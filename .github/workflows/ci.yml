@@ -70,6 +70,34 @@ jobs:
       github.ref_name == 'main' ||
       startsWith(github.ref_name, 'release/') ||
       startsWith(github.ref_name, 'hotfix/')
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: seekdb
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+            url: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
+          - name: oceanbase
+            docker_backend: oceanbase
+            image: oceanbase/oceanbase-ce:latest
+            user: root@test
+            password: ""
+            port: "2881"
+            db_name: seekdb
+            url: mysql+aiomysql://root%40test:@127.0.0.1:2881/seekdb
+          - name: mysql
+            docker_backend: mysql
+            image: mysql:8.4
+            user: root
+            password: root
+            port: "3306"
+            db_name: seekdb
+            url: mysql+aiomysql://root:root@127.0.0.1:3306/seekdb
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,11 +112,14 @@ jobs:
       - name: Sync dependencies
         run: uv sync --dev
 
-      - name: SeekDB/OceanBase smoke and e2e validation
+      - name: SeekDB/OceanBase smoke and e2e validation (${{ matrix.backend.name }})
         env:
-          SEEKDB_MODE: embed
-          SEEKDB_EMBED_CMD: uv run python scripts/seekdb_embed_launcher.py
-          OCEANBASE_USER: root
-          OCEANBASE_DB_NAME: seekdb
-          SEEKDB_URL: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
+          SEEKDB_MODE: docker
+          SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
+          SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+          OCEANBASE_USER: ${{ matrix.backend.user }}
+          OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
+          OCEANBASE_PORT: ${{ matrix.backend.port }}
+          OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
+          SEEKDB_URL: ${{ matrix.backend.url }}
         run: make test-seekdb

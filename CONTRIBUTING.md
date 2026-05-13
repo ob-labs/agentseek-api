@@ -32,7 +32,7 @@ GitHub Actions is split into three validation layers:
 - Sample Graphs
   In-process graph runner plus the in-process API smoke flow (`make test-samples`).
 - SeekDB Validation
-  Real SeekDB/OceanBase checkpoint smoke plus live HTTP e2e coverage (`make test-seekdb`) on PRs to `develop` or `main`, and on pushes to `develop`, `main`, `release/*`, and `hotfix/*`. CI runs this in embedded SeekDB mode via `scripts/seekdb_embed_launcher.py`.
+  Real backend checkpoint smoke plus live HTTP e2e coverage (`make test-seekdb`) on PRs to `develop` or `main`, and on pushes to `develop`, `main`, `release/*`, and `hotfix/*`. CI runs this in a Docker matrix across `seekdb`, `oceanbase`, and `mysql`, while local quick verification should prefer embedded SeekDB via `scripts/seekdb_embed_launcher.py`.
 
 Keep local commands aligned with CI when possible:
 
