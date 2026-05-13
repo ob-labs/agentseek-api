@@ -26,7 +26,7 @@ def main() -> None:
 
         waited = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
         waited.raise_for_status()
-        assert waited.json()["status"] in {"success", "error"}
+        assert waited.json()["status"] == "success"
 
         stream = client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
         stream.raise_for_status()

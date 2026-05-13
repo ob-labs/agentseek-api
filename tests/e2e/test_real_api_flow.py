@@ -50,7 +50,7 @@ async def test_real_api_flow(e2e_base_url: str) -> None:
 
         wait_response = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
         assert wait_response.status_code == 200
-        assert wait_response.json()["status"] in {"success", "error"}
+        assert wait_response.json()["status"] == "success"
 
         stream_response = await client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
         assert stream_response.status_code == 200

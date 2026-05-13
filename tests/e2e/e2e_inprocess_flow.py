@@ -30,8 +30,14 @@ class InlineExecutor:
         await func()
 
 
-async def fake_execute_run(*, thread_id: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    return {"echo": payload, "thread_id": thread_id, "run_id": run_id}
+async def fake_execute_run(
+    *,
+    thread_id: str,
+    run_id: str,
+    payload: dict[str, Any],
+    graph_id: str | None = None,
+) -> dict[str, Any]:
+    return {"echo": payload, "thread_id": thread_id, "run_id": run_id, "graph_id": graph_id}
 
 
 async def header_user(request: Request) -> User:
@@ -68,7 +74,7 @@ def main() -> None:
 
             waited = client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers={"x-user-id": "example-user"})
             assert waited.status_code == 200, waited.text
-            assert waited.json()["status"] in {"success", "error"}
+            assert waited.json()["status"] == "success"
 
             streamed = client.get(f"/threads/{thread_id}/runs/{run_id}/stream", headers={"x-user-id": "example-user"})
             assert streamed.status_code == 200, streamed.text

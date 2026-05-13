@@ -18,7 +18,7 @@ def test_assistants_threads_runs_flow(client: TestClient) -> None:
 
     wait_resp = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
     assert wait_resp.status_code == 200
-    assert wait_resp.json()["status"] in {"success", "error"}
+    assert wait_resp.json()["status"] == "success"
 
     list_resp = client.get(f"/threads/{thread_id}/runs")
     assert list_resp.status_code == 200

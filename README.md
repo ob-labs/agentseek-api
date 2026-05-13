@@ -20,6 +20,8 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
   - `make test`
 - Unit + integration with coverage gate (90%):
   - `make test-cov`
+- In-process sample graph + API smoke tests:
+  - `make test-samples`
 - Real end-to-end API tests (live server + real backend):
   - `make test-e2e`
 - Real SeekDB/OceanBase smoke test:
@@ -38,7 +40,20 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
 - `SEEKDB_MODE=docker` with `SEEKDB_DOCKER_IMAGE` override.
 - It now validates both:
   - direct checkpoint write/read smoke (`scripts/seekdb_checkpoint_smoke.py`)
-  - real live API HTTP flow (`tests/e2e/e2e_live_http_flow.py`) against a started uvicorn server
+  - real live API HTTP flows (`tests/e2e/e2e_live_http_flow.py` and `tests/e2e/e2e_live_http_multi_graph.py`) against a started uvicorn server
+  - the pytest-marked e2e suite (`make test-e2e`) against a real SeekDB/OceanBase backend
+
+## Branching Model
+
+This repository uses a GitFlow-lite workflow:
+
+- `main`: production-ready history only
+- `develop`: integration branch for ongoing development
+- `feature/<topic>`: branch from `develop`, PR back to `develop`
+- `release/<version>`: branch from `develop`, PR to `main`
+- `hotfix/<topic>`: branch from `main`, PR to `main`, then merge back into `develop`
+
+See [CONTRIBUTING.md](/Users/zhl/workspaces/agentseek-api/CONTRIBUTING.md) for the full branching and CI policy.
 
 ## Notes
 

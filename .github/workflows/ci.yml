@@ -2,47 +2,89 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches:
+      - main
+      - develop
+      - "feature/**"
+      - "release/**"
+      - "hotfix/**"
   pull_request:
+    branches:
+      - develop
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
-  test:
+  fast-tests:
+    name: Fast Tests
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup UV
-        uses: astral-sh/setup-uv@v3
-
-      - name: Setup Python
-        run: uv python install 3.12
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
 
       - name: Sync dependencies
         run: uv sync --dev
 
-      - name: Unit + integration tests
-        run: make test
-
-      - name: Coverage gate
+      - name: Coverage-backed unit + integration suite
         run: make test-cov
 
-  backend-validation:
+  sample-graphs:
+    name: Sample Graphs
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup UV
-        uses: astral-sh/setup-uv@v3
-
-      - name: Setup Python
-        run: uv python install 3.12
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
 
       - name: Sync dependencies
         run: uv sync --dev
 
-      - name: SeekDB/OceanBase smoke validation
+      - name: In-process sample graph validation
+        run: make test-samples
+
+  seekdb-validation:
+    name: SeekDB Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref_name == 'develop' ||
+      github.ref_name == 'main' ||
+      startsWith(github.ref_name, 'release/') ||
+      startsWith(github.ref_name, 'hotfix/')
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: SeekDB/OceanBase smoke and e2e validation
         env:
           SEEKDB_MODE: docker
           OCEANBASE_DB_NAME: test

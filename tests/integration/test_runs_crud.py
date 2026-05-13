@@ -78,4 +78,4 @@ def test_wait_run_returns_terminal_status(client: TestClient) -> None:
 
     waited = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
     assert waited.status_code == 200
-    assert waited.json()["status"] in {"success", "error"}
+    assert waited.json()["status"] == "success"
