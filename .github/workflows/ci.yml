@@ -85,6 +85,7 @@ jobs:
           - name: oceanbase
             docker_backend: oceanbase
             image: oceanbase/oceanbase-ce:latest
+            mode: slim
             user: root@test
             password: ""
             port: "2881"
@@ -117,6 +118,7 @@ jobs:
           SEEKDB_MODE: docker
           SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
           SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+          OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode || '' }}
           OCEANBASE_USER: ${{ matrix.backend.user }}
           OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
           OCEANBASE_PORT: ${{ matrix.backend.port }}

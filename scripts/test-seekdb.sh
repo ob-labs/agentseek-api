@@ -9,6 +9,7 @@ SEEKDB_EMBED_CMD="${SEEKDB_EMBED_CMD:-uv run python scripts/seekdb_embed_launche
 SEEKDB_DOCKER_BACKEND="${SEEKDB_DOCKER_BACKEND:-seekdb}"
 SEEKDB_DOCKER_IMAGE="${SEEKDB_DOCKER_IMAGE:-}"
 SEEKDB_CONTAINER_NAME="${SEEKDB_CONTAINER_NAME:-agentseek-seekdb-test}"
+OCEANBASE_DOCKER_MODE="${OCEANBASE_DOCKER_MODE:-mini}"
 EXAMPLE_API_PORT="${EXAMPLE_API_PORT:-2026}"
 
 export OCEANBASE_HOST="${OCEANBASE_HOST:-127.0.0.1}"
@@ -221,7 +222,7 @@ elif [[ "$SEEKDB_MODE" == "docker" ]]; then
     oceanbase)
       docker run -d \
         --name "$SEEKDB_CONTAINER_NAME" \
-        -e MODE=mini \
+        -e MODE="${OCEANBASE_DOCKER_MODE}" \
         -p "${OCEANBASE_PORT}:2881" \
         "$SEEKDB_DOCKER_IMAGE" >/tmp/agentseek-seekdb-docker.log
       ;;
