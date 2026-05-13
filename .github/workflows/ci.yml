@@ -86,6 +86,9 @@ jobs:
 
       - name: SeekDB/OceanBase smoke and e2e validation
         env:
-          SEEKDB_MODE: docker
-          OCEANBASE_DB_NAME: test
+          SEEKDB_MODE: embed
+          SEEKDB_EMBED_CMD: uv run python scripts/seekdb_embed_launcher.py
+          OCEANBASE_USER: root
+          OCEANBASE_DB_NAME: seekdb
+          SEEKDB_URL: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
         run: make test-seekdb

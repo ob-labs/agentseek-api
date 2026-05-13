@@ -43,6 +43,9 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
   - real live API HTTP flows (`tests/e2e/e2e_live_http_flow.py` and `tests/e2e/e2e_live_http_multi_graph.py`) against a started uvicorn server
   - the pytest-marked e2e suite (`make test-e2e`) against a real SeekDB/OceanBase backend
 
+CI note:
+- GitHub Actions uses embedded SeekDB via `SEEKDB_MODE=embed` and `scripts/seekdb_embed_launcher.py`, not Docker.
+
 ## Branching Model
 
 This repository uses a GitFlow-lite workflow:
