@@ -30,7 +30,33 @@ cleanup() {
 }
 trap cleanup EXIT
 
+readiness_timeout_seconds() {
+  case "${SEEKDB_MODE}:${SEEKDB_DOCKER_BACKEND:-embed}" in
+    docker:oceanbase)
+      echo 420
+      ;;
+    *)
+      echo 180
+      ;;
+  esac
+}
+
+print_backend_debug() {
+  if [[ "$SEEKDB_MODE" == "docker" ]]; then
+    echo "=== docker ps ==="
+    docker ps -a || true
+    echo "=== docker logs ($SEEKDB_CONTAINER_NAME) ==="
+    docker logs "$SEEKDB_CONTAINER_NAME" || true
+  else
+    echo "=== embedded launcher log ==="
+    cat /tmp/agentseek-seekdb-embed.log || true
+  fi
+}
+
 wait_for_seekdb() {
+  local timeout_seconds
+  timeout_seconds="$(readiness_timeout_seconds)"
+
   uv run python - <<'PY'
 import os
 import time
@@ -40,8 +66,9 @@ host = os.environ["OCEANBASE_HOST"]
 port = int(os.environ["OCEANBASE_PORT"])
 user = os.environ["OCEANBASE_USER"]
 password = os.environ["OCEANBASE_PASSWORD"]
+timeout_seconds = float(os.environ["SEEKDB_READINESS_TIMEOUT_SECONDS"])
 
-deadline = time.time() + 180
+deadline = time.time() + timeout_seconds
 last_error = None
 while time.time() < deadline:
     try:
@@ -60,8 +87,13 @@ while time.time() < deadline:
         last_error = exc
         time.sleep(2)
 
-raise SystemExit(f"SeekDB did not become ready: {last_error}")
+raise SystemExit(f"SeekDB did not become ready within {timeout_seconds:.0f}s: {last_error}")
 PY
+  local status=$?
+  if [[ $status -ne 0 ]]; then
+    print_backend_debug
+    return $status
+  fi
 }
 
 ensure_database_exists() {
@@ -216,6 +248,7 @@ else
   exit 1
 fi
 
+export SEEKDB_READINESS_TIMEOUT_SECONDS="$(readiness_timeout_seconds)"
 wait_for_seekdb
 ensure_database_exists
 uv run python scripts/seekdb_checkpoint_smoke.py
