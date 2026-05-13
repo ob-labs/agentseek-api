@@ -99,6 +99,7 @@ PY
 ensure_database_exists() {
   uv run python - <<'PY'
 import os
+import time
 import pymysql
 
 host = os.environ["OCEANBASE_HOST"]
@@ -106,20 +107,30 @@ port = int(os.environ["OCEANBASE_PORT"])
 user = os.environ["OCEANBASE_USER"]
 password = os.environ["OCEANBASE_PASSWORD"]
 db_name = os.environ["OCEANBASE_DB_NAME"]
+deadline = time.time() + 180
+last_error = None
 
-conn = pymysql.connect(
-    host=host,
-    port=port,
-    user=user,
-    password=password,
-    autocommit=True,
-    charset="utf8mb4",
-)
-try:
-    with conn.cursor() as cursor:
-        cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
-finally:
-    conn.close()
+while time.time() < deadline:
+    try:
+        conn = pymysql.connect(
+            host=host,
+            port=port,
+            user=user,
+            password=password,
+            autocommit=True,
+            charset="utf8mb4",
+        )
+        try:
+            with conn.cursor() as cursor:
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
+            raise SystemExit(0)
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        last_error = exc
+        time.sleep(2)
+
+raise SystemExit(f"Database bootstrap did not become ready: {last_error}")
 PY
 }
 
