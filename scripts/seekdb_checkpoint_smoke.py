@@ -47,11 +47,11 @@ def main() -> None:
             )
             row = cursor.fetchone()
             if row is None or int(row["count"]) != 1:
-                raise RuntimeError("SeekDB smoke test failed: checkpoint row not found")
+                raise RuntimeError("Checkpoint storage smoke test failed: checkpoint row not found")
     finally:
         conn.close()
 
-    print("SeekDB smoke test passed")
+    print("Checkpoint storage smoke test passed")
 
 
 if __name__ == "__main__":

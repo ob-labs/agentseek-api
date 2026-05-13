@@ -28,20 +28,24 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
   - `make test-seekdb`
 
 `test-seekdb` supports:
-- `SEEKDB_MODE=auto` (default): tries embed command first if provided, otherwise Docker.
+- `SEEKDB_MODE=auto` (default): prefers embedded SeekDB when `pylibseekdb` is available, otherwise falls back to Docker.
 - `SEEKDB_MODE=embed` with `SEEKDB_EMBED_CMD="<your command>"`. A bundled launcher at `scripts/seekdb_embed_launcher.py` starts an in-process SeekDB via `pylibseekdb.open_with_service` (bootstrap user `root`, no password). Example invocation:
   ```
   SEEKDB_MODE=embed \
-  SEEKDB_EMBED_CMD=".venv/bin/python scripts/seekdb_embed_launcher.py" \
+  SEEKDB_EMBED_CMD="uv run python scripts/seekdb_embed_launcher.py" \
   OCEANBASE_USER=root \
   SEEKDB_URL="mysql+aiomysql://root:@127.0.0.1:2881/seekdb" \
   make test-seekdb
   ```
-- `SEEKDB_MODE=docker` with `SEEKDB_DOCKER_IMAGE` override.
+- `SEEKDB_MODE=docker` with `SEEKDB_DOCKER_BACKEND=seekdb|oceanbase|mysql` and optional `SEEKDB_DOCKER_IMAGE` override.
 - It now validates both:
   - direct checkpoint write/read smoke (`scripts/seekdb_checkpoint_smoke.py`)
   - real live API HTTP flows (`tests/e2e/e2e_live_http_flow.py` and `tests/e2e/e2e_live_http_multi_graph.py`) against a started uvicorn server
   - the pytest-marked e2e suite (`make test-e2e`) against a real SeekDB/OceanBase backend
+
+CI note:
+- Local quick verification should prefer embedded SeekDB.
+- GitHub Actions runs the real backend validation in Docker against a matrix of `seekdb`, `oceanbase`, and `mysql`.
 
 ## Branching Model
 
