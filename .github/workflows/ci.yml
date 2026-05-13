@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v3
+
+      - name: Setup Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Unit + integration tests
+        run: make test
+
+      - name: Coverage gate
+        run: make test-cov
+
+  backend-validation:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@v3
+
+      - name: Setup Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: SeekDB/OceanBase smoke validation
+        env:
+          SEEKDB_MODE: docker
+          OCEANBASE_DB_NAME: test
+        run: make test-seekdb
