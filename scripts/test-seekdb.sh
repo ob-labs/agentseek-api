@@ -42,6 +42,17 @@ readiness_timeout_seconds() {
   esac
 }
 
+api_readiness_timeout_seconds() {
+  case "${SEEKDB_MODE}:${SEEKDB_DOCKER_BACKEND:-embed}" in
+    docker:oceanbase)
+      echo 180
+      ;;
+    *)
+      echo 60
+      ;;
+  esac
+}
+
 print_backend_debug() {
   if [[ "$SEEKDB_MODE" == "docker" ]]; then
     echo "=== docker ps ==="
@@ -135,13 +146,15 @@ PY
 }
 
 wait_for_api() {
-  uv run python - <<'PY'
+  export API_READINESS_TIMEOUT_SECONDS="$(api_readiness_timeout_seconds)"
+
+  if ! uv run python - <<'PY'
 import os
 import time
 import httpx
 
 base_url = os.environ["EXAMPLE_BASE_URL"]
-deadline = time.time() + 60
+deadline = time.time() + float(os.environ["API_READINESS_TIMEOUT_SECONDS"])
 last_error = None
 while time.time() < deadline:
     try:
@@ -155,6 +168,11 @@ while time.time() < deadline:
 
 raise SystemExit(f"API did not become ready: {last_error}")
 PY
+  then
+    echo "=== api log ==="
+    cat /tmp/agentseek-api-example.log || true
+    return 1
+  fi
 }
 
 set_backend_defaults() {
