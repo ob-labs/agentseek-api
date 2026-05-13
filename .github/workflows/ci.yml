@@ -60,8 +60,8 @@ jobs:
       - name: In-process sample graph validation
         run: make test-samples
 
-  seekdb-validation:
-    name: SeekDB Validation
+  mysql-family-checkpoint-validation:
+    name: MySQL-Family Checkpoint Validation
     runs-on: ubuntu-latest
     timeout-minutes: 30
     if: >-
@@ -113,7 +113,7 @@ jobs:
       - name: Sync dependencies
         run: uv sync --dev
 
-      - name: SeekDB/OceanBase smoke and e2e validation (${{ matrix.backend.name }})
+      - name: MySQL-family checkpoint validation (${{ matrix.backend.name }})
         env:
           SEEKDB_MODE: docker
           SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
@@ -124,4 +124,82 @@ jobs:
           OCEANBASE_PORT: ${{ matrix.backend.port }}
           OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
           SEEKDB_URL: ${{ matrix.backend.url }}
-        run: make test-seekdb
+        run: make test-checkpoints
+
+  pgsql-metadata-checkpoint-validation:
+    name: PostgreSQL Metadata + Checkpoint Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref_name == 'develop' ||
+      github.ref_name == 'main' ||
+      startsWith(github.ref_name, 'release/') ||
+      startsWith(github.ref_name, 'hotfix/')
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentseek
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentseek"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: seekdb
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: oceanbase
+            docker_backend: oceanbase
+            image: oceanbase/oceanbase-ce:latest
+            mode: slim
+            user: root@test
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: mysql
+            docker_backend: mysql
+            image: mysql:8.4
+            user: root
+            password: root
+            port: "3306"
+            db_name: seekdb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: PostgreSQL metadata with checkpoint validation (${{ matrix.backend.name }})
+        env:
+          SEEKDB_MODE: docker
+          SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
+          SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+          OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode || '' }}
+          OCEANBASE_USER: ${{ matrix.backend.user }}
+          OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
+          OCEANBASE_PORT: ${{ matrix.backend.port }}
+          OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
+          METADATA_DB_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentseek
+          METADATA_DB_BACKEND: postgresql
+        run: make test-checkpoints

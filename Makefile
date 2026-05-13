@@ -1,4 +1,4 @@
-.PHONY: test test-cov test-samples test-e2e test-seekdb
+.PHONY: test test-cov test-samples test-e2e test-checkpoints test-seekdb
 
 test:
 	uv run pytest tests/unit tests/integration -q
@@ -13,5 +13,7 @@ test-samples:
 test-e2e:
 	uv run pytest tests/e2e -q -m e2e
 
-test-seekdb:
-	bash ./scripts/test-seekdb.sh
+test-checkpoints:
+	bash ./scripts/test-checkpoints.sh
+
+test-seekdb: test-checkpoints
