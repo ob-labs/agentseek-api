@@ -57,7 +57,7 @@ wait_for_seekdb() {
   local timeout_seconds
   timeout_seconds="$(readiness_timeout_seconds)"
 
-  uv run python - <<'PY'
+  if ! uv run python - <<'PY'
 import os
 import time
 import pymysql
@@ -89,10 +89,9 @@ while time.time() < deadline:
 
 raise SystemExit(f"SeekDB did not become ready within {timeout_seconds:.0f}s: {last_error}")
 PY
-  local status=$?
-  if [[ $status -ne 0 ]]; then
+  then
     print_backend_debug
-    return $status
+    return 1
   fi
 }
 
@@ -223,7 +222,6 @@ elif [[ "$SEEKDB_MODE" == "docker" ]]; then
       docker run -d \
         --name "$SEEKDB_CONTAINER_NAME" \
         -e MODE=mini \
-        -e OB_SERVER_IP=127.0.0.1 \
         -p "${OCEANBASE_PORT}:2881" \
         "$SEEKDB_DOCKER_IMAGE" >/tmp/agentseek-seekdb-docker.log
       ;;
