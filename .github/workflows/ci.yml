@@ -8,10 +8,14 @@ on:
       - "feature/**"
       - "release/**"
       - "hotfix/**"
+    paths-ignore:
+      - "**/*.md"
   pull_request:
     branches:
       - develop
       - main
+    paths-ignore:
+      - "**/*.md"
   workflow_dispatch:
 
 permissions:
