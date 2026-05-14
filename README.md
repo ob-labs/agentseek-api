@@ -19,6 +19,40 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
    - restart the server, then create assistants with `graph_id: "external_hello"`
    - the loader accepts both agentseek-style graph objects and basic `langgraph.json` graph mappings such as `"graphs": {"chat": "./chat.py:graph"}`
 
+## Manual Live Provider Streaming Check
+
+This repo now includes a dispatch-only GitHub Actions workflow for proving
+real token streaming against provider endpoints without putting model spend
+on every PR:
+
+- workflow: `.github/workflows/live-provider-streaming.yml`
+- manifest: `examples/live_provider_graphs/manifest.json`
+- test target: `tests/integration/test_live_provider_streaming.py`
+
+Set these GitHub repository settings before running the workflow:
+
+- OpenAI-compatible endpoint:
+  - repository variable `OPENAI_COMPAT_MODEL`
+  - repository variable `OPENAI_COMPAT_BASE_URL`
+  - repository secret `OPENAI_COMPAT_API_KEY`
+- Anthropic-compatible endpoint:
+  - repository variable `ANTHROPIC_COMPAT_MODEL`
+  - repository variable `ANTHROPIC_COMPAT_BASE_URL`
+  - repository secret `ANTHROPIC_COMPAT_API_KEY`
+
+Then run the workflow from the Actions tab with `workflow_dispatch`.
+You can override the model or base URL for one run by filling the optional
+dispatch inputs; API keys remain in secrets only.
+
+Notes:
+
+- For OpenAI-compatible providers, `OPENAI_COMPAT_BASE_URL` usually includes
+  the provider's `/v1` prefix.
+- For Anthropic-compatible providers, set `ANTHROPIC_COMPAT_BASE_URL` to the
+  provider's Anthropic-style API root.
+- The live check passes only when `/stream` replays at least two non-empty
+  `message_chunk` SSE events from the real model-backed graph.
+
 ## Local backend tests
 
 - Unit + integration (mocked backend):

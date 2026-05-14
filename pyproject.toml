@@ -17,6 +17,8 @@ dependencies = [
     "langgraph>=1.0.3",
     "langgraph-sdk>=0.3.5",
     "langchain-core>=1.0.0",
+    "langchain-openai>=1.0.0",
+    "langchain-anthropic>=1.0.0",
     "langchain-oceanbase @ git+https://github.com/oceanbase/langchain-oceanbase.git@release/0.4.0",
     "cryptography>=45.0.0",
     "pymysql>=1.1.0",
