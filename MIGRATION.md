@@ -169,15 +169,22 @@ runs through the HTTP surface.
 # Milestone 3 — First-Class CLI Surface (next sprint)
 
 **Goal:** Replace the current mix of raw `uvicorn` and `make` invocations with
-an `agentseek` developer CLI that mirrors the useful parts of the existing
-`aegra` CLI pattern while staying scoped to this runtime.
+an `agentseek` developer CLI that is a **strict superset** of the current
+LangGraph CLI surface. `agentseek` must accept `langgraph.json` directly,
+support the same top-level commands and core options, and then add
+AgentSeek-specific extensions such as `serve` and any runtime-specific helpers.
+If parity is not implemented for a LangGraph CLI command, the milestone is not
+done.
 
-**Reference shape from `aegra`**
+**Reference shape**
 - Dedicated CLI package plus console-script entrypoint (`[project.scripts]`).
-- Config auto-discovery (`aegra.json`, then `langgraph.json`) instead of
-  forcing every command to take explicit paths.
-- `dev` for local hot-reload, `serve` for non-reload execution, and Docker-aware
-  commands separated from the core runtime commands.
+- Config auto-discovery (`agentseek.json`, then `langgraph.json`) instead of
+  forcing every command to take explicit paths. `langgraph.json` compatibility
+  is a hard requirement, not a best-effort fallback.
+- LangGraph CLI command parity first: `dev`, `build`, `deploy`, `up`,
+  `dockerfile`.
+- AgentSeek extensions second: `serve`, `version`, and any runtime-specific
+  commands that do not break LangGraph CLI compatibility.
 - Shared option handling for `--host`, `--port`, `--config`, and `--env-file`.
 
 ## Phase 3.1: CLI Packaging + Entry Point
@@ -189,47 +196,86 @@ an `agentseek` developer CLI that mirrors the useful parts of the existing
   duplicating runtime logic.
 - [ ] Add `agentseek version` that reports the CLI/package version and the
   installed `agentseek-api` version.
+- [ ] Define command-compatibility policy explicitly: when `agentseek` and
+  LangGraph CLI overlap, `agentseek` should accept the LangGraph CLI command
+  names and core options unchanged.
 
 ## Phase 3.2: Core Runtime Commands
 
 - [ ] `agentseek dev`: wraps `uvicorn agentseek_api.main:app --reload`, with
-  `--host`, `--port`, `--config`, `--env-file`, and `--no-reload`.
+  LangGraph CLI-compatible flags including `-c/--config`, `--host`, `--port`,
+  `--no-reload`, `--n-jobs-per-worker`, `--debug-port`, `--wait-for-client`,
+  `--no-browser`, `--studio-url`, `--allow-blocking`, and `--tunnel`.
+- [ ] `agentseek build`: LangGraph CLI-compatible image build surface with
+  `--platform`, `-t/--tag`, `--pull/--no-pull`, and `-c/--config`.
+- [ ] `agentseek deploy`: LangGraph CLI-compatible deploy surface, including
+  inherited build flags plus `--api-key`, `--name`, `--deployment-id`,
+  `--deployment-type`, `--no-wait`, `--verbose`, and subcommands
+  `deploy list`, `deploy revisions list`, `deploy delete`, and `deploy logs`.
+- [ ] `agentseek up`: LangGraph CLI-compatible local Docker runtime surface
+  with `--wait`, `--base-image`, `--image`, `--postgres-uri`, `--watch`,
+  `--debugger-base-url`, `--debugger-port`, `--verbose`, `-c/--config`,
+  `-d/--docker-compose`, `-p/--port`, `--pull/--no-pull`, and
+  `--recreate/--no-recreate`.
+- [ ] `agentseek dockerfile`: LangGraph CLI-compatible Dockerfile generation
+  surface with `-c/--config`.
 - [ ] `agentseek serve`: same runtime surface without reload, intended for
-  container entrypoints and smoke environments.
-- [ ] Config discovery should accept `agentseek.json` first, then basic
-  `langgraph.json` layouts, so local UX matches the manifest/graph-loading work
-  already landed in Milestone 2.
+  container entrypoints and smoke environments. This is an AgentSeek extension
+  and does not replace `up`.
+- [ ] Config discovery should accept `agentseek.json` first, then full
+  `langgraph.json` layouts without requiring users to rewrite the file into an
+  AgentSeek-only shape.
 
 ## Phase 3.3: Build / Docker Integration
 
 - [ ] `agentseek dockerfile [SAVE_PATH]`: generate a Dockerfile from the active
-  config, similar in spirit to `langgraph dockerfile`, but initially scoped to
-  this project's current FastAPI + graph manifest runtime.
+  config, preserving LangGraph CLI expectations while layering in
+  AgentSeek-specific runtime pieces only where needed.
 - [ ] `agentseek build -t <tag>`: build the container image from the generated
-  Dockerfile or an equivalent in-memory template.
-- [ ] Defer `agentseek up` until after the Docker contract is stable; the repo
-  does not currently ship a canonical `docker-compose.yml`, so copying Aegra's
-  `up/down` surface immediately would create a larger maintenance surface than
-  we need.
+  Dockerfile or an equivalent in-memory template without dropping LangGraph CLI
+  flags/behavior.
+- [ ] `agentseek up` should use the generated/built image path and preserve the
+  LangGraph CLI local-Docker workflow instead of deferring that command out of
+  scope.
+- [ ] Config parsing must handle core LangGraph CLI keys cleanly, including at
+  least `dependencies`, `graphs`, `env`, `auth`, `store`, `http`, and
+  `api_version`. Unsupported keys must fail clearly instead of being silently
+  ignored.
 
 ## Phase 3.4: Tests + Docs
 
 - [ ] Unit tests for CLI parsing, config discovery precedence, and the command
-  lines emitted for `dev`, `serve`, `dockerfile`, and `build`.
+  lines emitted for `dev`, `build`, `deploy`, `up`, `dockerfile`, and `serve`.
 - [ ] Update `README.md` quickstart to prefer `agentseek dev` once available,
   while keeping the raw `uvicorn` command documented as the low-level fallback.
 - [ ] Add a minimal `agentseek.json` example alongside the existing
   `langgraph.json`-compatible graph mapping examples.
+- [ ] Add a fixture test proving the basic LangGraph config example runs
+  unchanged under `agentseek`:
+  ```json
+  {
+    "$schema": "https://langgra.ph/schema.json",
+    "dependencies": ["."],
+    "graphs": {
+      "chat": "chat.graph:graph"
+    }
+  }
+  ```
 
 **Verify**
 - `uv run pytest tests/unit/test_cli.py -q`
 - `uv run agentseek version`
 - `uv run agentseek dev --help`
+- `uv run agentseek deploy --help`
+- `uv run agentseek up --help`
 - `uv run agentseek build --help`
+- `uv run agentseek dockerfile --help`
+- `uv run agentseek deploy list --help`
 
-**Exit criteria** — A developer can install the package and use a stable
-`agentseek` command for local development and container builds without memorizing
-raw `uvicorn` or ad hoc packaging commands.
+**Exit criteria** — A developer can install the package, point `agentseek` at a
+valid `langgraph.json`, and use the full LangGraph CLI command surface through
+`agentseek` without losing command/option compatibility. AgentSeek-only
+commands are additive on top of that baseline.
 
 ---
 
