@@ -32,10 +32,15 @@ class RunCreate(BaseModel):
     input: dict[str, Any]
 
 
+class RunResume(BaseModel):
+    resume: Any
+
+
 class RunRead(BaseModel):
     run_id: str
     thread_id: str
     assistant_id: str
     status: str
     output: dict[str, Any] | None
+    interrupts: list[dict[str, Any]] | None = None
     last_error: str | None = None

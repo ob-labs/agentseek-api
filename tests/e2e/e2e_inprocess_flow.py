@@ -12,6 +12,7 @@ from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.main import create_app
 from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
+from agentseek_api.services.run_executor import RunExecutionResult
 
 
 class FakeCheckpointer:
@@ -36,8 +37,14 @@ async def fake_execute_run(
     run_id: str,
     payload: dict[str, Any],
     graph_id: str | None = None,
-) -> dict[str, Any]:
-    return {"echo": payload, "thread_id": thread_id, "run_id": run_id, "graph_id": graph_id}
+    resume: Any = None,
+) -> RunExecutionResult:
+    _ = resume
+    return RunExecutionResult(
+        output={"echo": payload, "thread_id": thread_id, "run_id": run_id, "graph_id": graph_id},
+        interrupted=False,
+        interrupts=[],
+    )
 
 
 async def header_user(request: Request) -> User:

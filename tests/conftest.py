@@ -22,17 +22,6 @@ class FakeCheckpointer:
     def save_checkpoint(self, *, thread_id: str, run_id: str, payload: dict[str, Any]) -> None:
         _ = (thread_id, run_id, payload)
 
-
-async def fake_execute_run(
-    *,
-    thread_id: str,
-    run_id: str,
-    payload: dict[str, Any],
-    graph_id: str | None = None,
-) -> dict[str, Any]:
-    return {"echo": payload, "thread_id": thread_id, "run_id": run_id, "graph_id": graph_id}
-
-
 class InlineExecutor:
     async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
         await func()
@@ -46,7 +35,6 @@ async def header_user_override(request: Request) -> User:
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.execute_run", fake_execute_run)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
 

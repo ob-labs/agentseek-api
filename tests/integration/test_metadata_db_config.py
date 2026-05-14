@@ -49,6 +49,7 @@ def test_health_uses_postgresql_async_driver(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("agentseek_api.core.database.create_async_engine", fake_create_async_engine)
     monkeypatch.setattr("agentseek_api.core.database.async_sessionmaker", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr("agentseek_api.core.database.LangGraphOceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(
         settings,
         "METADATA_DB_URL",
@@ -77,6 +78,7 @@ def test_health_uses_mysql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("agentseek_api.core.database.create_async_engine", fake_create_async_engine)
     monkeypatch.setattr("agentseek_api.core.database.async_sessionmaker", lambda *_args, **_kwargs: object())
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr("agentseek_api.core.database.LangGraphOceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(
         settings,
         "METADATA_DB_URL",

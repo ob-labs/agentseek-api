@@ -92,11 +92,14 @@ def should_continue(state: State) -> str:
     return "process" if state.step_count < target_steps else "respond"
 
 
-builder = StateGraph(State)
-builder.add_node("process", process_step)
-builder.add_node("respond", respond)
-builder.set_entry_point("process")
-builder.add_conditional_edges("process", should_continue)
-builder.set_finish_point("respond")
+def build_graph(checkpointer=None):
+    builder = StateGraph(State)
+    builder.add_node("process", process_step)
+    builder.add_node("respond", respond)
+    builder.set_entry_point("process")
+    builder.add_conditional_edges("process", should_continue)
+    builder.set_finish_point("respond")
+    return builder.compile(name="Stress Test", checkpointer=checkpointer)
 
-graph = builder.compile(name="Stress Test")
+
+graph = build_graph()

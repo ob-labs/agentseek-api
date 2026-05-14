@@ -2,6 +2,8 @@ import asyncio
 from collections.abc import Callable
 from typing import Any
 
+from langgraph.checkpoint.memory import InMemorySaver
+from langchain_oceanbase.checkpointer import OceanBaseCheckpointSaver as LangGraphOceanBaseCheckpointSaver
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
@@ -61,14 +63,21 @@ class DatabaseManager:
         self.engine: AsyncEngine | None = None
         self.session_factory: async_sessionmaker[AsyncSession] | None = None
         self._checkpointer: OceanBaseCheckpointSaver | None = None
+        self._langgraph_checkpointer: Any | None = None
         self._store: NullStore | None = None
         self._setup_lock: asyncio.Lock = asyncio.Lock()
         self._checkpointer_setup_done: bool = False
+        self._langgraph_checkpointer_setup_done: bool = False
 
     async def initialize(self) -> None:
         if self.engine is not None:
             return
         metadata_db_url = resolve_metadata_db_url()
+        parsed_url = make_url(settings.METADATA_DB_URL or settings.SEEKDB_URL)
+        metadata_backend = _resolve_metadata_backend(
+            configured_backend=settings.METADATA_DB_BACKEND,
+            url_drivername=parsed_url.drivername,
+        )
         self.engine = create_async_engine(metadata_db_url, pool_pre_ping=True)
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as conn:
@@ -82,7 +91,20 @@ class DatabaseManager:
                 "db_name": settings.OCEANBASE_DB_NAME,
             }
         )
+        if metadata_backend == "sqlite":
+            self._langgraph_checkpointer = InMemorySaver()
+        else:
+            self._langgraph_checkpointer = LangGraphOceanBaseCheckpointSaver(
+                connection_args={
+                    "host": settings.OCEANBASE_HOST,
+                    "port": settings.OCEANBASE_PORT,
+                    "user": settings.OCEANBASE_USER,
+                    "password": settings.OCEANBASE_PASSWORD,
+                    "db_name": settings.OCEANBASE_DB_NAME,
+                }
+            )
         await self._setup_checkpointer_once()
+        await self._setup_langgraph_checkpointer_once()
         self._store = NullStore()
 
     async def _setup_checkpointer_once(self) -> None:
@@ -96,14 +118,29 @@ class DatabaseManager:
             await asyncio.to_thread(self._checkpointer.setup)
             self._checkpointer_setup_done = True
 
+    async def _setup_langgraph_checkpointer_once(self) -> None:
+        if self._langgraph_checkpointer_setup_done:
+            return
+        async with self._setup_lock:
+            if self._langgraph_checkpointer_setup_done:
+                return
+            if self._langgraph_checkpointer is None:
+                raise RuntimeError("LangGraph checkpointer not initialized")
+            setup = getattr(self._langgraph_checkpointer, "setup", None)
+            if callable(setup):
+                await asyncio.to_thread(setup)
+            self._langgraph_checkpointer_setup_done = True
+
     async def close(self) -> None:
         if self.engine is not None:
             await self.engine.dispose()
         self.engine = None
         self.session_factory = None
         self._checkpointer = None
+        self._langgraph_checkpointer = None
         self._store = None
         self._checkpointer_setup_done = False
+        self._langgraph_checkpointer_setup_done = False
 
     def get_engine(self) -> AsyncEngine:
         if self.engine is None:
@@ -119,6 +156,11 @@ class DatabaseManager:
         if self._checkpointer is None:
             raise RuntimeError("Database not initialized")
         return self._checkpointer
+
+    def get_langgraph_checkpointer(self) -> Any:
+        if self._langgraph_checkpointer is None:
+            raise RuntimeError("Database not initialized")
+        return self._langgraph_checkpointer
 
     def get_store(self) -> NullStore:
         if self._store is None:

@@ -12,7 +12,12 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
    - `uv run uvicorn agentseek_api.main:app --reload --port 2026`
 4. Exercise the bundled sample graphs in-process:
    - `uv run python examples/run_sample_graphs.py`
+   - `uv run python examples/external_graph/run.py`
    - Source for each sample lives under `examples/graphs/`; see `examples/README.md` for a tour.
+5. Optional: register external graphs with a manifest:
+   - `export AGENTSEEK_GRAPHS=$PWD/examples/external_graph/manifest.json`
+   - restart the server, then create assistants with `graph_id: "external_hello"`
+   - the loader accepts both agentseek-style graph objects and basic `langgraph.json` graph mappings such as `"graphs": {"chat": "./chat.py:graph"}`
 
 ## Local backend tests
 
@@ -40,7 +45,7 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
 - `SEEKDB_MODE=docker` with `SEEKDB_DOCKER_BACKEND=seekdb|oceanbase|mysql` and optional `SEEKDB_DOCKER_IMAGE` override.
 - It now validates both:
   - direct checkpoint write/read smoke (`scripts/seekdb_checkpoint_smoke.py`)
-  - real live API HTTP flows (`tests/e2e/e2e_live_http_flow.py` and `tests/e2e/e2e_live_http_multi_graph.py`) against a started uvicorn server
+  - real live API HTTP flows (`tests/e2e/e2e_live_http_flow.py`, `tests/e2e/e2e_live_http_multi_graph.py`, and `tests/e2e/e2e_live_http_resume_flow.py`) against a started uvicorn server
   - the pytest-marked e2e suite (`make test-e2e`) against a real SeekDB/OceanBase backend
 
 CI note:
@@ -66,7 +71,9 @@ See [CONTRIBUTING.md](/Users/zhl/workspaces/agentseek-api/CONTRIBUTING.md) for t
   - PostgreSQL -> `postgresql+asyncpg://...`
   - OceanBase/MySQL -> `mysql+aiomysql://...`
 - Checkpoint persistence defaults to OceanBase via `OCEANBASE_*` settings, using the same SeekDB deployment by default.
+- `AGENTSEEK_GRAPHS=/abs/path/manifest.json` loads user-defined graphs at startup. Manifest entries override bundled IDs.
+- Graph definitions are compatible with LangGraph-style entries: relative `./file.py:symbol`, module-path `package.module:symbol`, compiled graph variables, zero-arg builders, `build_graph(checkpointer=...)`, and config-style factories that rebuild from a config dict.
 - Auth mode is explicit:
   - `AUTH_TYPE=noop` uses default identity `default_user`
   - `AUTH_TYPE=custom` requires `AUTH_MODULE_PATH=module:backend_symbol`
-- Async checkpoint execution is intentionally blocked in milestone 1.
+- Runs can surface `status=interrupted` plus an `interrupts` payload; resume them with `POST /threads/{thread_id}/runs/{run_id}/resume`.

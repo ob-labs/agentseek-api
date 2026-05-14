@@ -107,4 +107,5 @@ def test_build_sample_registry_returns_all_expected_ids() -> None:
         entry = registry[expected]
         assert callable(entry["prepare_input"])
         assert callable(entry["extract_output"])
-        assert entry["graph"] is not None
+        assert callable(entry["graph_factory"])
+        assert entry["graph_factory"]() is not None

@@ -88,3 +88,45 @@ async def test_stream_payload_contains_json_event(e2e_base_url: str) -> None:
         assert lines
         payload = json.loads(lines[-1].replace("data: ", "", 1))
         assert payload["run_id"] == run_id
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_hitl_run_can_resume_via_http(e2e_base_url: str) -> None:
+    timeout = httpx.Timeout(30.0)
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=timeout) as client:
+        assistant_create = await client.post(
+            "/assistants",
+            json={"name": "resume-assistant", "graph_id": "subgraph_hitl_agent"},
+        )
+        assert assistant_create.status_code == 200
+        assistant_id = assistant_create.json()["assistant_id"]
+
+        thread_create = await client.post("/threads", json={"metadata": {"suite": "resume"}})
+        assert thread_create.status_code == 200
+        thread_id = thread_create.json()["thread_id"]
+
+        run_create = await client.post(
+            f"/threads/{thread_id}/runs",
+            json={"assistant_id": assistant_id, "input": {"foo": "hello "}},
+        )
+        assert run_create.status_code == 200
+        run_body = run_create.json()
+        run_id = run_body["run_id"]
+
+        waited = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
+        assert waited.status_code == 200
+        waited_body = waited.json()
+        assert waited_body["status"] == "interrupted"
+        assert waited_body["interrupts"][0]["value"] == "Provide value:"
+
+        resumed = await client.post(f"/threads/{thread_id}/runs/{run_id}/resume", json={"resume": "world"})
+        assert resumed.status_code == 200
+        resumed_body = resumed.json()
+        assert resumed_body["run_id"] == run_id
+
+        resumed_wait = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
+        assert resumed_wait.status_code == 200
+        resumed_wait_body = resumed_wait.json()
+        assert resumed_wait_body["status"] == "success"
+        assert resumed_wait_body["output"]["state"]["foo"].endswith("world")
