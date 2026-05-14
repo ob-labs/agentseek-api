@@ -44,7 +44,8 @@ def build_openai_graph(checkpointer=None):
         base_url=_require_env("LIVE_OPENAI_COMPAT_BASE_URL"),
         temperature=0,
         streaming=True,
-        stream_usage=True,
+        stream_usage=False,
+        use_responses_api=False,
         max_retries=1,
         timeout=60,
     )
