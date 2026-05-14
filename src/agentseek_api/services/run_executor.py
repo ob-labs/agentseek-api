@@ -67,6 +67,15 @@ def _extract_chunk_messages(chunk: Any) -> list[BaseMessage]:
     return messages
 
 
+def _extract_text_chunk(chunk: Any) -> Any:
+    if isinstance(chunk, str):
+        return chunk
+    text = getattr(chunk, "text", None)
+    if isinstance(text, str):
+        return text
+    return None
+
+
 def _base_stream_payload(event: dict[str, Any]) -> dict[str, Any]:
     payload: dict[str, Any] = {
         "name": str(event.get("name", "")),
@@ -109,7 +118,7 @@ def _translate_stream_events(event: dict[str, Any]) -> list[tuple[str, dict[str,
                 payload["output"] = _normalize_stream_value(data["output"])
         translated.append(("tool_start" if event_name == "on_tool_start" else "tool_end", payload))
 
-    if event_name == "on_chain_stream":
+    if event_name in {"on_chain_stream", "on_chat_model_stream", "on_llm_stream"}:
         data = event.get("data", {})
         chunk = data.get("chunk") if isinstance(data, dict) else None
         for message in _extract_chunk_messages(chunk):
@@ -123,6 +132,13 @@ def _translate_stream_events(event: dict[str, Any]) -> list[tuple[str, dict[str,
             if tool_calls:
                 payload["tool_calls"] = tool_calls
             translated.append(("message_chunk", payload))
+        if not translated and event_name == "on_llm_stream":
+            content = _extract_text_chunk(chunk)
+            if content not in ("", None):
+                payload = _base_stream_payload(event)
+                payload["message_type"] = type(chunk).__name__
+                payload["content"] = content
+                translated.append(("message_chunk", payload))
 
     return translated
 

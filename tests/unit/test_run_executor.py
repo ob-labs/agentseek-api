@@ -1,7 +1,8 @@
 import pytest
+from langchain_core.messages import AIMessageChunk
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 
-from agentseek_api.services.run_executor import RunExecutionResult, execute_run
+from agentseek_api.services.run_executor import RunExecutionResult, _translate_stream_events, execute_run
 
 
 class FakeGraph:
@@ -175,3 +176,34 @@ async def test_execute_run_preserves_interrupts_from_root_stream(monkeypatch: py
     assert result.interrupted is True
     assert result.interrupts == [{"value": "Provide value:", "id": "interrupt-1"}]
     assert result.output["state"]["foo"] == "hello"
+
+
+def test_translate_stream_events_maps_chat_model_stream_to_message_chunk() -> None:
+    translated = _translate_stream_events(
+        {
+            "event": "on_chat_model_stream",
+            "name": "chat-model",
+            "run_id": "langgraph-run",
+            "parent_ids": ["parent-run"],
+            "metadata": {"langgraph_node": "call_model"},
+            "tags": ["graph:step:1"],
+            "data": {"chunk": AIMessageChunk(content="hello")},
+        }
+    )
+
+    assert translated == [
+        (
+            "message_chunk",
+            {
+                "name": "chat-model",
+                "langgraph_event": "on_chat_model_stream",
+                "langgraph_run_id": "langgraph-run",
+                "metadata": {"langgraph_node": "call_model"},
+                "tags": ["graph:step:1"],
+                "parent_ids": ["parent-run"],
+                "node": "call_model",
+                "message_type": "AIMessageChunk",
+                "content": "hello",
+            },
+        )
+    ]
