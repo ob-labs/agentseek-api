@@ -1,0 +1,11 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "live_openai_stream": {
+      "graph": "examples.live_provider_graphs.graph:build_openai_graph"
+    },
+    "live_anthropic_stream": {
+      "graph": "examples.live_provider_graphs.graph:build_anthropic_graph"
+    }
+  }
+}

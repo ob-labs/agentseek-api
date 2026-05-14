@@ -149,9 +149,9 @@ runs through the HTTP surface.
 
 ## Phase 2.3: Token-Level Streaming
 
-- [ ] Upgrade `GET /threads/{thread_id}/runs/{run_id}/stream` to emit intermediate events from `graph.astream_events` (node starts, tool calls, message tokens) alongside the existing `start`/`end` markers.
-- [ ] Backward compatibility: the current start/end contract still works for consumers that don't care about sub-events.
-- [ ] Integration tests: assert that a `react_agent` run yields at least one tool call event and one message-chunk event.
+- [x] Upgrade `GET /threads/{thread_id}/runs/{run_id}/stream` to emit intermediate events from `graph.astream_events` (node starts, tool calls, message tokens) alongside the existing `start`/`end` markers.
+- [x] Backward compatibility: the current start/end contract still works for consumers that don't care about sub-events.
+- [x] Integration tests: assert that a `react_agent` run yields at least one tool call event and one message-chunk event.
 
 **Verify** — `uv run pytest tests/integration/test_runs_streaming.py tests/integration/test_runs_streaming_errors.py -q`
 

@@ -1,0 +1,121 @@
+name: Live Provider Streaming
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_openai_compatible:
+        description: Run the OpenAI-compatible live streaming check
+        required: false
+        default: true
+        type: boolean
+      openai_model:
+        description: Optional override for the OpenAI-compatible model name
+        required: false
+        type: string
+      openai_base_url:
+        description: Optional override for the OpenAI-compatible base URL
+        required: false
+        type: string
+      run_anthropic_compatible:
+        description: Run the Anthropic-compatible live streaming check
+        required: false
+        default: true
+        type: boolean
+      anthropic_model:
+        description: Optional override for the Anthropic-compatible model name
+        required: false
+        type: string
+      anthropic_base_url:
+        description: Optional override for the Anthropic-compatible base URL
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  openai-compatible:
+    name: OpenAI-Compatible Streaming
+    if: ${{ inputs.run_openai_compatible }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AGENTSEEK_GRAPHS: ${{ github.workspace }}/examples/live_provider_graphs/manifest.json
+      LIVE_PROVIDER_KIND: openai
+      LIVE_OPENAI_COMPAT_MODEL: ${{ inputs.openai_model != '' && inputs.openai_model || vars.OPENAI_COMPAT_MODEL }}
+      LIVE_OPENAI_COMPAT_BASE_URL: ${{ inputs.openai_base_url != '' && inputs.openai_base_url || vars.OPENAI_COMPAT_BASE_URL }}
+      LIVE_OPENAI_COMPAT_API_KEY: ${{ secrets.OPENAI_COMPAT_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          missing=()
+          for name in LIVE_PROVIDER_KIND LIVE_OPENAI_COMPAT_MODEL LIVE_OPENAI_COMPAT_BASE_URL LIVE_OPENAI_COMPAT_API_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Missing OpenAI-compatible workflow config: ${missing[*]}"
+            echo "::error::Set repo variables OPENAI_COMPAT_MODEL / OPENAI_COMPAT_BASE_URL, repo secret OPENAI_COMPAT_API_KEY, or provide dispatch input overrides for model/base URL."
+            exit 1
+          fi
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Run live provider streaming test
+        run: uv run pytest tests/integration/test_live_provider_streaming.py -q
+
+  anthropic-compatible:
+    name: Anthropic-Compatible Streaming
+    if: ${{ inputs.run_anthropic_compatible }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AGENTSEEK_GRAPHS: ${{ github.workspace }}/examples/live_provider_graphs/manifest.json
+      LIVE_PROVIDER_KIND: anthropic
+      LIVE_ANTHROPIC_COMPAT_MODEL: ${{ inputs.anthropic_model != '' && inputs.anthropic_model || vars.ANTHROPIC_COMPAT_MODEL }}
+      LIVE_ANTHROPIC_COMPAT_BASE_URL: ${{ inputs.anthropic_base_url != '' && inputs.anthropic_base_url || vars.ANTHROPIC_COMPAT_BASE_URL }}
+      LIVE_ANTHROPIC_COMPAT_API_KEY: ${{ secrets.ANTHROPIC_COMPAT_API_KEY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Validate configuration
+        shell: bash
+        run: |
+          missing=()
+          for name in LIVE_PROVIDER_KIND LIVE_ANTHROPIC_COMPAT_MODEL LIVE_ANTHROPIC_COMPAT_BASE_URL LIVE_ANTHROPIC_COMPAT_API_KEY; do
+            if [[ -z "${!name:-}" ]]; then
+              missing+=("$name")
+            fi
+          done
+          if [[ ${#missing[@]} -gt 0 ]]; then
+            echo "::error::Missing Anthropic-compatible workflow config: ${missing[*]}"
+            echo "::error::Set repo variables ANTHROPIC_COMPAT_MODEL / ANTHROPIC_COMPAT_BASE_URL, repo secret ANTHROPIC_COMPAT_API_KEY, or provide dispatch input overrides for model/base URL."
+            exit 1
+          fi
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Run live provider streaming test
+        run: uv run pytest tests/integration/test_live_provider_streaming.py -q
