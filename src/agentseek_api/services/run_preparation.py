@@ -106,6 +106,9 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
             raise ValueError("Assistant not found")
         graph_id = assistant.graph_id
         payload = run.input_json
+        run.status = "pending"
+        run.last_error = None
+        await session.commit()
 
     await get_executor().submit(
         lambda: _execute_and_persist(

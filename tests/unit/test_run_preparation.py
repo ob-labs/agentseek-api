@@ -50,6 +50,14 @@ class InlineExecutor:
         await func()
 
 
+class DeferredExecutor:
+    def __init__(self) -> None:
+        self.submitted: list[Callable[[], Awaitable[None]]] = []
+
+    async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
+        self.submitted.append(func)
+
+
 @pytest.mark.asyncio
 async def test_prepare_run_raises_when_thread_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     session_factory = FakeSessionFactory([FakeSession([None])])
@@ -124,3 +132,41 @@ async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pyt
     assert events[-1][1] == "end"
     assert events[-1][2]["status"] == "error"
     assert captured["graph_id"] == "stress_test"
+
+
+@pytest.mark.asyncio
+async def test_resume_run_marks_row_pending_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
+    db_run = type(
+        "DbRun",
+        (),
+        {
+            "run_id": "r1",
+            "thread_id": "t1",
+            "assistant_id": "a1",
+            "user_id": "u1",
+            "status": "interrupted",
+            "input_json": {"foo": "hello "},
+            "output_json": {"interrupts": [{"value": "Provide value:"}], "interrupted": True},
+            "last_error": None,
+        },
+    )()
+    load_session = FakeSession([db_run, fake_assistant])
+    reload_session = FakeSession([db_run])
+    session_factory = FakeSessionFactory([load_session, reload_session])
+    executor = DeferredExecutor()
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: executor)
+
+    run = await run_prep_module.resume_run(
+        thread_id="t1",
+        run_id="r1",
+        resume="world",
+        user=User(identity="u1", is_authenticated=True),
+    )
+
+    assert run.status == "pending"
+    assert db_run.status == "pending"
+    assert load_session.commits == 1
+    assert len(executor.submitted) == 1
