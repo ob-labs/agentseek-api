@@ -7,25 +7,24 @@ from agentseek_api.services.executor import ExecutorFacade, get_executor
 
 
 @pytest.mark.asyncio
-async def test_submit_delegates_to_asyncio_create_task(monkeypatch: pytest.MonkeyPatch) -> None:
-    called = {"count": 0}
-    real_create_task = asyncio.create_task
+async def test_submit_schedules_task_without_waiting_for_completion() -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    finished = asyncio.Event()
 
     async def sample_task() -> None:
-        called["count"] += 1
-
-    async def run_immediately(coro) -> None:
-        await coro
-
-    monkeypatch.setattr(
-        "agentseek_api.services.executor.asyncio.create_task",
-        lambda coro: real_create_task(run_immediately(coro)),
-    )
+        started.set()
+        await release.wait()
+        finished.set()
 
     facade = ExecutorFacade()
-    await facade.submit(sample_task)
-    await asyncio.sleep(0)
-    assert called["count"] == 1
+    await asyncio.wait_for(facade.submit(sample_task), timeout=0.1)
+
+    await asyncio.wait_for(started.wait(), timeout=0.1)
+    assert not finished.is_set()
+
+    release.set()
+    await asyncio.wait_for(finished.wait(), timeout=0.1)
 
 
 def test_get_executor_returns_singleton() -> None:

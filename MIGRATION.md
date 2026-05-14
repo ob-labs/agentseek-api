@@ -166,7 +166,74 @@ runs through the HTTP surface.
 
 ---
 
-# Milestone 3 — Assistant Configuration + Auth Samples (proposed)
+# Milestone 3 — First-Class CLI Surface (next sprint)
+
+**Goal:** Replace the current mix of raw `uvicorn` and `make` invocations with
+an `agentseek` developer CLI that mirrors the useful parts of the existing
+`aegra` CLI pattern while staying scoped to this runtime.
+
+**Reference shape from `aegra`**
+- Dedicated CLI package plus console-script entrypoint (`[project.scripts]`).
+- Config auto-discovery (`aegra.json`, then `langgraph.json`) instead of
+  forcing every command to take explicit paths.
+- `dev` for local hot-reload, `serve` for non-reload execution, and Docker-aware
+  commands separated from the core runtime commands.
+- Shared option handling for `--host`, `--port`, `--config`, and `--env-file`.
+
+## Phase 3.1: CLI Packaging + Entry Point
+
+- [ ] Add a small `agentseek_cli` package (or equivalent module under
+  `src/agentseek_api/cli.py`) and expose `agentseek` via `[project.scripts]`.
+- [ ] Keep the first implementation thin: orchestrate the existing FastAPI app,
+  current env/config loader, and existing test/build commands instead of
+  duplicating runtime logic.
+- [ ] Add `agentseek version` that reports the CLI/package version and the
+  installed `agentseek-api` version.
+
+## Phase 3.2: Core Runtime Commands
+
+- [ ] `agentseek dev`: wraps `uvicorn agentseek_api.main:app --reload`, with
+  `--host`, `--port`, `--config`, `--env-file`, and `--no-reload`.
+- [ ] `agentseek serve`: same runtime surface without reload, intended for
+  container entrypoints and smoke environments.
+- [ ] Config discovery should accept `agentseek.json` first, then basic
+  `langgraph.json` layouts, so local UX matches the manifest/graph-loading work
+  already landed in Milestone 2.
+
+## Phase 3.3: Build / Docker Integration
+
+- [ ] `agentseek dockerfile [SAVE_PATH]`: generate a Dockerfile from the active
+  config, similar in spirit to `langgraph dockerfile`, but initially scoped to
+  this project's current FastAPI + graph manifest runtime.
+- [ ] `agentseek build -t <tag>`: build the container image from the generated
+  Dockerfile or an equivalent in-memory template.
+- [ ] Defer `agentseek up` until after the Docker contract is stable; the repo
+  does not currently ship a canonical `docker-compose.yml`, so copying Aegra's
+  `up/down` surface immediately would create a larger maintenance surface than
+  we need.
+
+## Phase 3.4: Tests + Docs
+
+- [ ] Unit tests for CLI parsing, config discovery precedence, and the command
+  lines emitted for `dev`, `serve`, `dockerfile`, and `build`.
+- [ ] Update `README.md` quickstart to prefer `agentseek dev` once available,
+  while keeping the raw `uvicorn` command documented as the low-level fallback.
+- [ ] Add a minimal `agentseek.json` example alongside the existing
+  `langgraph.json`-compatible graph mapping examples.
+
+**Verify**
+- `uv run pytest tests/unit/test_cli.py -q`
+- `uv run agentseek version`
+- `uv run agentseek dev --help`
+- `uv run agentseek build --help`
+
+**Exit criteria** — A developer can install the package and use a stable
+`agentseek` command for local development and container builds without memorizing
+raw `uvicorn` or ad hoc packaging commands.
+
+---
+
+# Milestone 4 — Assistant Configuration + Auth Samples (proposed)
 
 **Goal:** Real-world shaped multi-tenant scenarios: per-assistant
 configuration flowed into the graph, first-class JWT auth sample, custom

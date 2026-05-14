@@ -2,13 +2,14 @@
 
 Each entry is keyed by ``graph_id`` and exposes three pieces:
 
-* ``graph`` — the compiled ``Pregel`` instance from ``examples/graphs/<name>``.
+* ``graph_factory`` — a callable that compiles a ``Pregel`` instance from
+  ``examples/graphs/<name>`` with an optional injected checkpointer.
 * ``prepare_input`` — converts the raw JSON payload the API receives into
   the shape the graph expects (messages, state dict, ...).
 * ``extract_output`` — turns the final graph result into a JSON-serialisable
   dict that is stored as the run output and the OceanBase/SeekDB checkpoint.
 
-Adding a new sample: drop a compiled ``graph`` under
+Adding a new sample: drop a ``build_graph(checkpointer=None)`` function under
 ``examples/graphs/<name>/graph.py`` and append an entry to
 ``build_sample_registry``.
 """
@@ -98,10 +99,10 @@ def build_sample_registry() -> dict[str, dict[str, Any]]:
     registry: dict[str, dict[str, Any]] = {}
 
     try:
-        from graphs.stress_test.graph import graph as stress_test_graph  # type: ignore[import-not-found]
+        from graphs.stress_test.graph import build_graph as stress_test_graph_factory  # type: ignore[import-not-found]
 
         registry["stress_test"] = {
-            "graph": stress_test_graph,
+            "graph_factory": stress_test_graph_factory,
             "prepare_input": _ensure_messages_payload,
             "extract_output": _extract_messages_output,
         }
@@ -109,10 +110,10 @@ def build_sample_registry() -> dict[str, dict[str, Any]]:
         print(f"[sample_graphs] skipped stress_test: {exc}", flush=True)
 
     try:
-        from graphs.subgraph_agent.graph import graph as subgraph_agent_graph  # type: ignore[import-not-found]
+        from graphs.subgraph_agent.graph import build_graph as subgraph_agent_graph_factory  # type: ignore[import-not-found]
 
         registry["subgraph_agent"] = {
-            "graph": subgraph_agent_graph,
+            "graph_factory": subgraph_agent_graph_factory,
             "prepare_input": _ensure_messages_payload,
             "extract_output": _extract_messages_output,
         }
@@ -120,10 +121,10 @@ def build_sample_registry() -> dict[str, dict[str, Any]]:
         print(f"[sample_graphs] skipped subgraph_agent: {exc}", flush=True)
 
     try:
-        from graphs.react_agent.graph import graph as react_agent_graph  # type: ignore[import-not-found]
+        from graphs.react_agent.graph import build_graph as react_agent_graph_factory  # type: ignore[import-not-found]
 
         registry["react_agent"] = {
-            "graph": react_agent_graph,
+            "graph_factory": react_agent_graph_factory,
             "prepare_input": _ensure_messages_payload,
             "extract_output": _extract_messages_output,
         }
@@ -131,10 +132,10 @@ def build_sample_registry() -> dict[str, dict[str, Any]]:
         print(f"[sample_graphs] skipped react_agent: {exc}", flush=True)
 
     try:
-        from graphs.subgraph_hitl_agent.graph import graph as subgraph_hitl_graph  # type: ignore[import-not-found]
+        from graphs.subgraph_hitl_agent.graph import build_graph as subgraph_hitl_graph_factory  # type: ignore[import-not-found]
 
         registry["subgraph_hitl_agent"] = {
-            "graph": subgraph_hitl_graph,
+            "graph_factory": subgraph_hitl_graph_factory,
             "prepare_input": _prepare_subgraph_hitl_payload,
             "extract_output": _extract_interrupt_output,
         }

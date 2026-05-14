@@ -67,11 +67,14 @@ def route_model_output(state: MessagesState) -> Literal["tools", "__end__"]:
     return END
 
 
-builder = StateGraph(MessagesState)
-builder.add_node("call_model", call_model)
-builder.add_node("tools", ToolNode(TOOLS))
-builder.add_edge(START, "call_model")
-builder.add_conditional_edges("call_model", route_model_output, {"tools": "tools", END: END})
-builder.add_edge("tools", "call_model")
+def build_graph(checkpointer=None):
+    builder = StateGraph(MessagesState)
+    builder.add_node("call_model", call_model)
+    builder.add_node("tools", ToolNode(TOOLS))
+    builder.add_edge(START, "call_model")
+    builder.add_conditional_edges("call_model", route_model_output, {"tools": "tools", END: END})
+    builder.add_edge("tools", "call_model")
+    return builder.compile(name="ReAct Agent", checkpointer=checkpointer)
 
-graph = builder.compile(name="ReAct Agent")
+
+graph = build_graph()

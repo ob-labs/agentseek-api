@@ -287,4 +287,5 @@ server_pid="$!"
 wait_for_api
 uv run python tests/e2e/e2e_live_http_flow.py
 uv run python tests/e2e/e2e_live_http_multi_graph.py
+uv run python tests/e2e/e2e_live_http_resume_flow.py
 uv run pytest tests/e2e -q -m e2e

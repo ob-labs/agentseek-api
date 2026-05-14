@@ -21,7 +21,7 @@ from typing import Annotated, Any
 from langchain_core.messages import AIMessage, AnyMessage, HumanMessage
 from langgraph.graph import END, START, StateGraph, add_messages
 
-from graphs.stress_test.graph import graph as inner_graph
+from graphs.stress_test.graph import build_graph as build_inner_graph
 
 
 @dataclass
@@ -48,11 +48,14 @@ async def route_to_subgraph(state: State) -> dict[str, Any]:
         return {"messages": [wrapped]}
 
 
-builder = StateGraph(State)
-builder.add_node("no_stream", route_to_subgraph)
-builder.add_node("subgraph", inner_graph)
-builder.add_edge(START, "no_stream")
-builder.add_edge("no_stream", "subgraph")
-builder.add_edge("subgraph", END)
+def build_graph(checkpointer=None):
+    builder = StateGraph(State)
+    builder.add_node("no_stream", route_to_subgraph)
+    builder.add_node("subgraph", build_inner_graph(checkpointer=checkpointer))
+    builder.add_edge(START, "no_stream")
+    builder.add_edge("no_stream", "subgraph")
+    builder.add_edge("subgraph", END)
+    return builder.compile(name="Subgraph Agent", checkpointer=checkpointer)
 
-graph = builder.compile(name="Subgraph Agent")
+
+graph = build_graph()

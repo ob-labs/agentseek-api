@@ -20,6 +20,7 @@ def _run_case(
     *,
     graph_id: str,
     input_payload: dict,
+    expected_status: str = "success",
     assert_output,
 ) -> None:
     assistant = client.post("/assistants", json={"name": f"sample-{graph_id}", "graph_id": graph_id})
@@ -40,7 +41,7 @@ def _run_case(
     waited = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
     waited.raise_for_status()
     body = waited.json()
-    assert body["status"] == "success", f"{graph_id} run did not succeed: {body}"
+    assert body["status"] == expected_status, f"{graph_id} run did not reach expected status {expected_status!r}: {body}"
 
     output = body.get("output") or {}
     assert_output(output)
@@ -102,6 +103,7 @@ def main() -> None:
             client,
             graph_id="subgraph_hitl_agent",
             input_payload={"foo": "hello "},
+            expected_status="interrupted",
             assert_output=_assert_subgraph_hitl,
         )
 

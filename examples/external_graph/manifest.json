@@ -1,0 +1,7 @@
+{
+  "graphs": {
+    "external_hello": {
+      "graph": "examples.external_graph.graph:build_graph"
+    }
+  }
+}

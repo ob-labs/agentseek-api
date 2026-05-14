@@ -15,6 +15,7 @@ Every sample is keyed in the API registry by its directory name:
 | `subgraph_agent`     | `graphs/subgraph_agent/graph.py`       | Outer router delegating to a compiled inner graph.         |
 | `react_agent`        | `graphs/react_agent/graph.py`          | Tool-calling ReAct loop (uses a fake chat model, offline). |
 | `subgraph_hitl_agent`| `graphs/subgraph_hitl_agent/graph.py`  | Nested subgraph + `interrupt()` human-in-the-loop pattern. |
+| `external_hello`     | `external_graph/graph.py`              | Manifest-registered external graph example.                |
 
 See `src/agentseek_api/services/sample_graphs.py` for how each graph is
 registered and how its input / output is adapted to the API's JSON contract.
@@ -23,6 +24,7 @@ registered and how its input / output is adapted to the API's JSON contract.
 
 ```bash
 uv run python examples/run_sample_graphs.py
+uv run python examples/external_graph/run.py
 ```
 
 Invokes every sample graph directly through LangGraph — no HTTP server, no
@@ -63,11 +65,36 @@ embedded SeekDB instance.
 
 ## Adding your own graph
 
-1. Drop a `graph.py` under `examples/graphs/<your_name>/` that exposes a
-   compiled `graph` variable.
-2. Append an entry to `build_sample_registry()` in
-   `src/agentseek_api/services/sample_graphs.py` — set `graph_id`, the
-   graph, and two small adapter callables (`prepare_input`, `extract_output`).
-3. Restart the server. Any assistant created with `graph_id: "<your_name>"`
-   now routes runs to your graph and checkpoints through the configured
-   SeekDB/OceanBase backend.
+Preferred path for this sprint:
+
+1. Build a Python module that exposes `build_graph(checkpointer=None)`.
+2. Create a JSON manifest and point `AGENTSEEK_GRAPHS` at it. Both of these
+   forms are accepted:
+
+```json
+{
+  "graphs": {
+    "external_hello": {
+      "graph": "examples.external_graph.graph:build_graph"
+    }
+  }
+}
+```
+
+```json
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "external_hello": "./examples/external_graph/graph.py:graph"
+  }
+}
+```
+
+3. Optional: add `prepare_input` / `extract_output` dotted paths if your graph
+   does not use the default messages-style adapters.
+4. Restart the server. User-defined manifest entries override bundled graph IDs
+   on conflict.
+
+See `examples/external_graph/manifest.json` and
+`examples/external_graph/run.py` for a minimal end-to-end example.

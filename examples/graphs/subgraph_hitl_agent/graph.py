@@ -34,18 +34,20 @@ def subgraph_node(state: State) -> State:
     return {"foo": state["foo"] + value}
 
 
-subgraph_builder = StateGraph(State)
-subgraph_builder.add_node(subgraph_set_state)
-subgraph_builder.add_node(subgraph_node)
-subgraph_builder.add_edge(START, "subgraph_set_state")
-subgraph_builder.add_edge("subgraph_set_state", "subgraph_node")
-subgraph_builder.add_edge("subgraph_node", "__end__")
-subgraph = subgraph_builder.compile()
+def build_graph(checkpointer=None):
+    subgraph_builder = StateGraph(State)
+    subgraph_builder.add_node(subgraph_set_state)
+    subgraph_builder.add_node(subgraph_node)
+    subgraph_builder.add_edge(START, "subgraph_set_state")
+    subgraph_builder.add_edge("subgraph_set_state", "subgraph_node")
+    subgraph_builder.add_edge("subgraph_node", "__end__")
+    subgraph = subgraph_builder.compile(checkpointer=checkpointer)
+
+    builder = StateGraph(State)
+    builder.add_node("node_1", subgraph)
+    builder.add_edge(START, "node_1")
+    builder.add_edge("node_1", "__end__")
+    return builder.compile(name="Subgraph HITL", checkpointer=checkpointer)
 
 
-builder = StateGraph(State)
-builder.add_node("node_1", subgraph)
-builder.add_edge(START, "node_1")
-builder.add_edge("node_1", "__end__")
-
-graph = builder.compile(name="Subgraph HITL")
+graph = build_graph()

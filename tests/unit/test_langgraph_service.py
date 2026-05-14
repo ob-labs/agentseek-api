@@ -12,7 +12,7 @@ def test_default_graph_entry_invokes_echo() -> None:
     service = LangGraphService()
     entry = service.get_entry("default")
     prepared = entry.prepare_input({"message": "hello"})
-    result = entry.graph.invoke(prepared)
+    result = entry.build_graph().invoke(prepared)
     assert entry.extract_output(result, {"message": "hello"})["echo"] == {"message": "hello"}
 
 
@@ -28,6 +28,13 @@ def test_sample_graphs_are_registered() -> None:
     ids = service.registered_graph_ids()
     for expected in ("default", "stress_test", "subgraph_agent", "react_agent", "subgraph_hitl_agent"):
         assert expected in ids, f"missing graph_id: {expected}; have: {ids}"
+
+
+def test_get_graph_builds_from_factory() -> None:
+    service = LangGraphService()
+    graph = service.get_graph("default")
+    result = graph.invoke({"input": {"message": "factory"}})
+    assert result["output"]["echo"] == {"message": "factory"}
 
 
 def test_get_langgraph_service_is_singleton() -> None:
