@@ -8,9 +8,17 @@ class FakeGraph:
     def __init__(self) -> None:
         self.configs: list[dict] = []
 
-    async def ainvoke(self, prepared_input: dict, config: dict) -> dict:
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
         self.configs.append(config)
-        return {"output": {"ok": True, "received": prepared_input}}
+        yield {
+            "event": "on_chain_end",
+            "name": "fake-graph",
+            "run_id": "langgraph-run",
+            "parent_ids": [],
+            "metadata": {},
+            "tags": [],
+            "data": {"output": {"output": {"ok": True, "received": prepared_input}}},
+        }
 
 
 class FakeEntry:
@@ -99,3 +107,71 @@ async def test_execute_run_passes_runtime_checkpointer_in_config(monkeypatch: py
     assert config[CONF]["thread_id"] == "t1"
     assert config[CONF]["checkpoint_ns"] == "r1"
     assert config[CONF][CONFIG_KEY_CHECKPOINTER] is fake_db.langgraph_checkpointer
+
+
+class FakeInterruptGraph(FakeGraph):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+        self.configs.append(config)
+        yield {
+            "event": "on_chain_stream",
+            "name": "fake-graph",
+            "run_id": "langgraph-run",
+            "parent_ids": [],
+            "metadata": {},
+            "tags": [],
+            "data": {
+                "chunk": {
+                    "__interrupt__": [
+                        type("Interrupt", (), {"value": "Provide value:", "id": "interrupt-1"})(),
+                    ]
+                }
+            },
+        }
+        yield {
+            "event": "on_chain_end",
+            "name": "fake-graph",
+            "run_id": "langgraph-run",
+            "parent_ids": [],
+            "metadata": {},
+            "tags": [],
+            "data": {"output": {"foo": prepared_input["input"]["foo"]}},
+        }
+
+
+class FakeInterruptEntry(FakeEntry):
+    graph = FakeInterruptGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None) -> FakeInterruptGraph:
+        return FakeInterruptEntry.graph
+
+    @staticmethod
+    def extract_output(result: dict, _payload: dict) -> dict:
+        interrupts = result.get("__interrupt__", [])
+        return {
+            "state": {"foo": result.get("foo")},
+            "interrupted": bool(interrupts),
+            "interrupts": [{"value": item.value, "id": item.id} for item in interrupts],
+        }
+
+
+class FakeInterruptLangGraphService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> FakeInterruptEntry:
+        return FakeInterruptEntry()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_preserves_interrupts_from_root_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeInterruptEntry.graph = FakeInterruptGraph()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeInterruptLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    result = await execute_run(thread_id="t1", run_id="r1", payload={"foo": "hello"})
+
+    assert result.interrupted is True
+    assert result.interrupts == [{"value": "Provide value:", "id": "interrupt-1"}]
+    assert result.output["state"]["foo"] == "hello"
