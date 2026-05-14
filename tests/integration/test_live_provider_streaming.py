@@ -14,6 +14,24 @@ from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
 
 
+def _text_from_content(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, dict):
+        if isinstance(content.get("text"), str):
+            return content["text"]
+        if "content" in content:
+            return _text_from_content(content["content"])
+        return ""
+    if isinstance(content, list):
+        return "".join(_text_from_content(item) for item in content)
+    return ""
+
+
+def _normalize_text(text: str) -> str:
+    return " ".join(text.split())
+
+
 class FakeCheckpointer:
     def __init__(self, connection_args: dict[str, str]) -> None:
         self.connection_args = connection_args
@@ -103,6 +121,12 @@ def test_live_provider_stream_emits_multiple_message_chunks(live_provider_client
     assert waited_body["status"] == "success", waited_body.get("last_error")
     assert waited_body["output"]["final_text"]
 
+    fetched = live_provider_client.get(f"/threads/{thread_id}/runs/{run_id}")
+    assert fetched.status_code == 200
+    fetched_body = fetched.json()
+    assert fetched_body["status"] == "success"
+    assert fetched_body["output"]["final_text"] == waited_body["output"]["final_text"]
+
     stream = live_provider_client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
     assert stream.status_code == 200
     payloads = [
@@ -115,9 +139,17 @@ def test_live_provider_stream_emits_multiple_message_chunks(live_provider_client
         for payload in payloads
         if payload.get("event") == "message_chunk"
         and payload.get("langgraph_event") in {"on_chat_model_stream", "on_llm_stream"}
-        and str(payload.get("content", "")).strip()
+        and _text_from_content(payload.get("content")).strip()
     ]
+    chunk_texts = [_text_from_content(payload.get("content")) for payload in message_chunks]
+    end_payloads = [payload for payload in payloads if payload.get("event") == "end"]
 
+    assert payloads[0]["event"] == "start"
     assert "event: start" in stream.text
     assert "event: end" in stream.text
+    assert any(payload.get("event") == "node_start" and payload.get("node") == "call_model" for payload in payloads)
+    assert any(payload.get("event") == "node_end" and payload.get("node") == "call_model" for payload in payloads)
+    assert end_payloads[-1]["status"] == "success"
+    assert end_payloads[-1]["run_id"] == run_id
     assert len(message_chunks) >= 2
+    assert _normalize_text("".join(chunk_texts)) == _normalize_text(waited_body["output"]["final_text"])
