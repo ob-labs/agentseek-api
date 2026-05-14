@@ -100,7 +100,7 @@ def test_live_provider_stream_emits_multiple_message_chunks(live_provider_client
     waited = live_provider_client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
     assert waited.status_code == 200
     waited_body = waited.json()
-    assert waited_body["status"] == "success"
+    assert waited_body["status"] == "success", waited_body.get("last_error")
     assert waited_body["output"]["final_text"]
 
     stream = live_provider_client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
