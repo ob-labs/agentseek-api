@@ -24,6 +24,9 @@ dependencies = [
     "pymysql>=1.1.0",
 ]
 
+[project.scripts]
+agentseek = "agentseek_api.cli:main"
+
 [dependency-groups]
 dev = [
     "pytest>=8.0.0",
