@@ -146,6 +146,8 @@ def render_dockerfile(*, config_path: Path, cwd: Path) -> str:
             "ENV PYTHONUNBUFFERED=1",
             "ENV PYTHONPATH=/deps/agent",
             "",
+            "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*",
+            "",
             "WORKDIR /deps/agent",
             "COPY . /deps/agent",
             "RUN pip install --no-cache-dir .",

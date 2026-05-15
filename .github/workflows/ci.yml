@@ -69,8 +69,8 @@ jobs:
           mkdir -p .tmp
           uv run agentseek dockerfile --config examples/external_graph/manifest.json .tmp/agentseek.Dockerfile
           test -s .tmp/agentseek.Dockerfile
-          rg 'ENV PYTHONPATH=/deps/agent' .tmp/agentseek.Dockerfile
-          rg 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' .tmp/agentseek.Dockerfile
+          grep -F 'ENV PYTHONPATH=/deps/agent' .tmp/agentseek.Dockerfile
+          grep -F 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' .tmp/agentseek.Dockerfile
 
       - name: CLI config and LangGraph compatibility tests
         run: make test-cli
