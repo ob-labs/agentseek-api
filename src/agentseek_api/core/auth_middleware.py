@@ -1,4 +1,7 @@
+import sys
 from importlib import import_module
+from importlib.util import module_from_spec, spec_from_file_location
+from pathlib import Path
 from typing import Protocol
 
 from fastapi import Request
@@ -16,6 +19,18 @@ class NoopAuthBackend:
         return User(identity="default_user", is_authenticated=True)
 
 
+def _load_python_file_backend(module_ref: str) -> object:
+    file_path = Path(module_ref).expanduser().resolve()
+    module_name = f"agentseek_auth_{abs(hash(file_path))}"
+    spec = spec_from_file_location(module_name, file_path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"Could not load AUTH_MODULE_PATH module file '{file_path}'.")
+    module = module_from_spec(spec)
+    sys.modules[module_name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _load_custom_backend() -> AuthBackend | None:
     auth_module_path = settings.AUTH_MODULE_PATH
     if not auth_module_path:
@@ -25,14 +40,17 @@ def _load_custom_backend() -> AuthBackend | None:
             f"Invalid AUTH_MODULE_PATH='{auth_module_path}'. Expected format 'module.path:symbol'."
         )
 
-    module_name, symbol = auth_module_path.split(":", maxsplit=1)
+    module_name, symbol = auth_module_path.rsplit(":", maxsplit=1)
     if not module_name or not symbol:
         raise RuntimeError(
             f"Invalid AUTH_MODULE_PATH='{auth_module_path}'. Expected format 'module.path:symbol'."
         )
 
     try:
-        module = import_module(module_name)
+        if module_name.endswith(".py") or module_name.startswith(".") or "/" in module_name or "\\" in module_name:
+            module = _load_python_file_backend(module_name)
+        else:
+            module = import_module(module_name)
         obj = getattr(module, symbol)
         return obj() if callable(obj) else obj
     except Exception as exc:  # noqa: BLE001

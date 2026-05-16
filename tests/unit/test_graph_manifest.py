@@ -3,8 +3,7 @@ from pathlib import Path
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
-
+from langchain_core.messages import HumanMessage
 from agentseek_api.services.langgraph_service import GraphManifestError, LangGraphService
 
 
@@ -147,6 +146,18 @@ def build_graph(checkpointer=None):
     service = LangGraphService(manifest_path=manifest_path)
     result = service.get_entry("file_graph").build_graph().invoke({"value": "ok"})
     assert result["value"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_manifest_supports_dataclass_backed_python_file_graph_defs() -> None:
+    manifest_path = Path("examples/sample_graphs_manifest.json").resolve()
+
+    service = LangGraphService(manifest_path=manifest_path)
+    result = await service.get_entry("stress_test").build_graph().ainvoke(
+        {"messages": [HumanMessage(content='{"delay": 0.0, "steps": 1}')]}
+    )
+
+    assert result["messages"][-1].content
 
 
 def test_manifest_supports_langgraph_basic_config_shorthand(tmp_path: Path) -> None:

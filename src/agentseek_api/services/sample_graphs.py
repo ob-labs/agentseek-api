@@ -132,6 +132,17 @@ def build_sample_registry() -> dict[str, dict[str, Any]]:
         print(f"[sample_graphs] skipped react_agent: {exc}", flush=True)
 
     try:
+        from graphs.stress_tool_agent.graph import build_graph as stress_tool_agent_graph_factory  # type: ignore[import-not-found]
+
+        registry["stress_tool_agent"] = {
+            "graph_factory": stress_tool_agent_graph_factory,
+            "prepare_input": _ensure_messages_payload,
+            "extract_output": _extract_messages_output,
+        }
+    except Exception as exc:  # noqa: BLE001
+        print(f"[sample_graphs] skipped stress_tool_agent: {exc}", flush=True)
+
+    try:
         from graphs.subgraph_hitl_agent.graph import build_graph as subgraph_hitl_graph_factory  # type: ignore[import-not-found]
 
         registry["subgraph_hitl_agent"] = {

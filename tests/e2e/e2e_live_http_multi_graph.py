@@ -69,6 +69,14 @@ def _assert_react_agent(output: dict) -> None:
     assert "42" in output["final_text"], f"react final_text missing 42: {output['final_text']}"
 
 
+def _assert_stress_tool_agent(output: dict) -> None:
+    transcript = output["transcript"]
+    tool_messages = [message for message in transcript if message["type"] == "ToolMessage"]
+    assert len(tool_messages) == 3, f"expected 3 tool messages, got {len(tool_messages)}: {transcript}"
+    assert output["final_json"]["status"] == "completed"
+    assert output["final_json"]["steps_completed"] == 3
+
+
 def _assert_subgraph_hitl(output: dict) -> None:
     assert output["interrupted"] is True
     assert output["interrupts"], "expected at least one interrupt"
@@ -98,6 +106,12 @@ def main() -> None:
             graph_id="react_agent",
             input_payload={"message": "what is the meaning of life?"},
             assert_output=_assert_react_agent,
+        )
+        _run_case(
+            client,
+            graph_id="stress_tool_agent",
+            input_payload={"delay": 0.0, "steps": 3},
+            assert_output=_assert_stress_tool_agent,
         )
         _run_case(
             client,

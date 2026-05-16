@@ -9,7 +9,11 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
 2. Install:
    - `uv sync`
 3. Run:
-   - `uv run uvicorn agentseek_api.main:app --reload --port 2026`
+   - `uv run agentseek dev`
+   - optional explicit config: `uv run agentseek dev --config ./langgraph.json`
+   - raw fallback: `uv run uvicorn agentseek_api.main:app --reload --port 2026`
+   - generate a container file from an explicit config: `uv run agentseek dockerfile --config ./examples/external_graph/manifest.json ./Dockerfile.agentseek`
+   - plan a local image build: `uv run agentseek build --config ./examples/external_graph/manifest.json -t agentseek-api:dev`
 4. Exercise the bundled sample graphs in-process:
    - `uv run python examples/run_sample_graphs.py`
    - `uv run python examples/external_graph/run.py`
@@ -61,6 +65,8 @@ Notes:
   - `make test-cov`
 - In-process sample graph + API smoke tests:
   - `make test-samples`
+- CLI Docker smoke for `dockerfile` + `build` + `up`:
+  - `make test-cli-docker`
 - Real end-to-end API tests (live server + real backend):
   - `make test-e2e`
 - Real SeekDB/OceanBase smoke test:
@@ -106,6 +112,9 @@ See [CONTRIBUTING.md](/Users/zhl/workspaces/agentseek-api/CONTRIBUTING.md) for t
   - OceanBase/MySQL -> `mysql+aiomysql://...`
 - Checkpoint persistence defaults to OceanBase via `OCEANBASE_*` settings, using the same SeekDB deployment by default.
 - `AGENTSEEK_GRAPHS=/abs/path/manifest.json` loads user-defined graphs at startup. Manifest entries override bundled IDs.
+- `agentseek dev` / `agentseek serve` auto-discover `agentseek.json` first, then `langgraph.json`, and export the selected file through `AGENTSEEK_GRAPHS`.
+- `agentseek dockerfile` renders a container entrypoint that keeps the selected config mounted at `/deps/agent/...` and starts the API with `agentseek serve`.
+- CI now smoke-tests the Docker CLI path by rendering a Dockerfile, building the image with `agentseek build`, starting it with `agentseek up`, and probing `/health` and `/info`.
 - Graph definitions are compatible with LangGraph-style entries: relative `./file.py:symbol`, module-path `package.module:symbol`, compiled graph variables, zero-arg builders, `build_graph(checkpointer=...)`, and config-style factories that rebuild from a config dict.
 - Auth mode is explicit:
   - `AUTH_TYPE=noop` uses default identity `default_user`

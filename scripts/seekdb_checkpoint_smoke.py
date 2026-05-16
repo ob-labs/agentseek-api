@@ -1,9 +1,33 @@
 import os
+import time
 from uuid import uuid4
 
 import pymysql
+from pymysql.err import OperationalError
 
 from agentseek_api.core.oceanbase_checkpointer import OceanBaseCheckpointSaver
+
+RETRYABLE_OCEANBASE_ERROR_CODES = {
+    4012,  # Timeout or service-not-ready style transient observed during startup
+    4392,  # "disk is hung" reported transiently by OceanBase CE in CI startup
+}
+
+def _retry_transient_timeout(action_name: str, func, *, timeout_seconds: float = 60.0) -> None:
+    deadline = time.time() + timeout_seconds
+    last_error: Exception | None = None
+    attempt = 0
+    while time.time() < deadline:
+        try:
+            func()
+            return
+        except OperationalError as exc:
+            last_error = exc
+            if exc.args and exc.args[0] in RETRYABLE_OCEANBASE_ERROR_CODES:
+                attempt += 1
+                time.sleep(min(2 * attempt, 5))
+                continue
+            raise
+    raise RuntimeError(f"{action_name} did not succeed within {timeout_seconds:.0f}s: {last_error}") from last_error
 
 
 def main() -> None:
@@ -22,12 +46,15 @@ def main() -> None:
             "db_name": db_name,
         }
     )
-    saver.setup()
+    _retry_transient_timeout("checkpoint setup", saver.setup, timeout_seconds=180.0)
 
     thread_id = f"smoke-thread-{uuid4()}"
     run_id = f"smoke-run-{uuid4()}"
     payload = {"input": {"message": "hello"}, "output": {"echo": "hello"}}
-    saver.save_checkpoint(thread_id=thread_id, run_id=run_id, payload=payload)
+    _retry_transient_timeout(
+        "checkpoint write",
+        lambda: saver.save_checkpoint(thread_id=thread_id, run_id=run_id, payload=payload),
+    )
 
     conn = pymysql.connect(
         host=host,

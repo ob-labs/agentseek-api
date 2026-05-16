@@ -43,6 +43,70 @@ jobs:
       - name: Coverage-backed unit + integration suite
         run: make test-cov
 
+  cli-compatibility:
+    name: CLI Compatibility (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Installed CLI reports version
+        run: uv run agentseek version
+
+      - name: CLI auto-discovers agentseek.json for dockerfile
+        run: uv run python scripts/test_cli_config_autodiscovery.py
+
+      - name: Dockerfile command renders a runnable config
+        run: >-
+          uv run python -c
+          "from pathlib import Path; import subprocess; out = Path('.tmp/agentseek.Dockerfile'); out.parent.mkdir(exist_ok=True); subprocess.run(['uv', 'run', 'agentseek', 'dockerfile', '--config', 'examples/external_graph/manifest.json', str(out)], check=True); text = out.read_text(encoding='utf-8'); assert 'ENV PYTHONPATH=/deps/agent' in text; assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' in text"
+
+      - name: CLI serve smoke boots a live API
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
+        run: uv run python scripts/test_cli_serve_smoke.py
+
+      - name: CLI config and Docker planning tests
+        run: uv run pytest tests/unit/test_cli.py tests/unit/test_graph_manifest.py -q
+
+  cli-docker-runtime:
+    name: CLI Docker Runtime
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: CLI Docker smoke
+        run: make test-cli-docker
+
   sample-graphs:
     name: Sample Graphs
     runs-on: ubuntu-latest
@@ -63,6 +127,46 @@ jobs:
 
       - name: In-process sample graph validation
         run: make test-samples
+
+  cli-dev-sample-graphs:
+    name: CLI Dev Sample Graphs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: seekdb
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Run sample graphs through agentseek dev
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root
+          MYSQL_DB: seekdb
+        run: make test-cli-dev-samples
 
   mysql-family-checkpoint-validation:
     name: MySQL-Family Checkpoint Validation

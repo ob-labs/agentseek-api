@@ -11,6 +11,8 @@ from agentseek_api.core.oceanbase_checkpointer import OceanBaseCheckpointSaver
 from agentseek_api.core.orm import Base
 from agentseek_api.settings import settings
 
+DEFAULT_SEEKDB_URL = "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
+
 
 class NullStore:
     async def aget(self, _namespace: tuple[str, ...], _key: str) -> None:
@@ -48,8 +50,25 @@ def _ensure_async_driver(*, url: URL, backend: str) -> URL:
     raise ValueError(f"Unsupported metadata backend: {backend}")
 
 
+def _resolve_seekdb_url() -> str:
+    if settings.SEEKDB_URL != DEFAULT_SEEKDB_URL:
+        return settings.SEEKDB_URL
+    return URL.create(
+        drivername="mysql+aiomysql",
+        username=settings.OCEANBASE_USER,
+        password=settings.OCEANBASE_PASSWORD,
+        host=settings.OCEANBASE_HOST,
+        port=int(settings.OCEANBASE_PORT),
+        database=settings.OCEANBASE_DB_NAME,
+    ).render_as_string(hide_password=False)
+
+
+def _resolve_base_metadata_url() -> str:
+    return settings.METADATA_DB_URL or _resolve_seekdb_url()
+
+
 def resolve_metadata_db_url() -> str:
-    raw_url = settings.METADATA_DB_URL or settings.SEEKDB_URL
+    raw_url = _resolve_base_metadata_url()
     parsed_url = make_url(raw_url)
     backend = _resolve_metadata_backend(
         configured_backend=settings.METADATA_DB_BACKEND,
@@ -73,7 +92,7 @@ class DatabaseManager:
         if self.engine is not None:
             return
         metadata_db_url = resolve_metadata_db_url()
-        parsed_url = make_url(settings.METADATA_DB_URL or settings.SEEKDB_URL)
+        parsed_url = make_url(_resolve_base_metadata_url())
         metadata_backend = _resolve_metadata_backend(
             configured_backend=settings.METADATA_DB_BACKEND,
             url_drivername=parsed_url.drivername,

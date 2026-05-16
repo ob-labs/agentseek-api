@@ -61,6 +61,36 @@ def test_react_agent_stream_includes_tool_and_message_events(client: TestClient)
     )
 
 
+def test_stress_tool_agent_stream_includes_multiple_tool_cycles(client: TestClient) -> None:
+    assistant = client.post("/assistants", json={"name": "streaming-stress-tools", "graph_id": "stress_tool_agent"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "stress-tool-stream"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    run = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"delay": 0.0, "steps": 3}},
+    )
+    assert run.status_code == 200
+    run_id = run.json()["run_id"]
+
+    stream_response = client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
+    assert stream_response.status_code == 200
+    payloads = _stream_payloads(stream_response.text)
+
+    tool_starts = [payload for payload in payloads if payload["event"] == "tool_start" and payload["name"] == "slow_process"]
+    tool_ends = [payload for payload in payloads if payload["event"] == "tool_end" and payload["name"] == "slow_process"]
+    assert len(tool_starts) == 3
+    assert len(tool_ends) == 3
+    assert any(
+        payload["event"] == "message_chunk" and '"steps_completed": 3' in str(payload.get("content", ""))
+        for payload in payloads
+    )
+
+
 def test_interrupted_run_stream_payload_includes_terminal_status(client: TestClient) -> None:
     assistant = client.post("/assistants", json={"name": "streaming-hitl", "graph_id": "subgraph_hitl_agent"})
     assert assistant.status_code == 200
