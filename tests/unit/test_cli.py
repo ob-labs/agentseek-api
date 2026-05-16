@@ -480,6 +480,41 @@ version = "0.1.0"
     assert "RUN pip install --no-cache-dir /deps/agent\n" not in content
 
 
+def test_dockerfile_command_installs_nearest_ancestor_project_for_nested_manifest(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "workspace-root"
+version = "0.1.0"
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest_dir = tmp_path / "examples" / "docker_ci_auth"
+    manifest_dir.mkdir(parents=True)
+    config_path = manifest_dir / "manifest.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": [".."],
+  "graphs": {
+    "chat": "../graphs/chat.py:graph"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+
+    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+
+    assert exit_code == 0
+    content = dockerfile_path.read_text(encoding="utf-8")
+    assert "RUN pip install --no-cache-dir /deps/agent" in content
+    assert "RUN pip install --no-cache-dir /deps/agent/examples/docker_ci_auth" not in content
+
+
 def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 

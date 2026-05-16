@@ -316,6 +316,22 @@ def _dependency_install_command(*, dependency_path: Path, cwd: Path) -> str | No
     return None
 
 
+def _find_installable_project_root(*, start: Path, cwd: Path) -> Path:
+    start_resolved = start.resolve()
+    cwd_resolved = cwd.resolve()
+    for candidate in [start_resolved, *start_resolved.parents]:
+        if candidate == cwd_resolved or cwd_resolved in candidate.parents:
+            if (
+                (candidate / "pyproject.toml").exists()
+                or (candidate / "setup.py").exists()
+                or (candidate / "requirements.txt").exists()
+            ):
+                return candidate
+        if candidate == cwd_resolved:
+            break
+    return start_resolved
+
+
 def _root_install_command(*, project_root: Path, cwd: Path) -> str | None:
     container_path = _container_config_path(config_path=project_root, cwd=cwd)
     if (project_root / "pyproject.toml").exists() or (project_root / "setup.py").exists():
@@ -375,7 +391,7 @@ def _default_base_image(*, python_version: str | None, image_distro: str | None)
 
 def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str | None = None) -> str:
     config = _load_cli_config(config_path)
-    project_root = config_path.parent.resolve()
+    project_root = _find_installable_project_root(start=config_path.parent, cwd=cwd)
     container_config = _container_config_path(config_path=config_path, cwd=cwd)
     pythonpath_entries, dependency_install_commands = _docker_dependency_plan(
         config=config,
