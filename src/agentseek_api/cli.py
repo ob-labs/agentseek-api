@@ -82,6 +82,12 @@ def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None
         resolved = (cwd / candidate).resolve()
         if resolved.exists():
             return resolved
+
+    env_manifest = os.environ.get("AGENTSEEK_GRAPHS")
+    if env_manifest:
+        resolved = Path(env_manifest).expanduser().resolve()
+        if resolved.exists():
+            return resolved
     return None
 
 

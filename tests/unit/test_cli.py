@@ -60,6 +60,14 @@ graph = builder.compile()
     return config_path
 
 
+def _write_basic_manifest_config(root: Path) -> Path:
+    config_path = _write_basic_langgraph_config(root)
+    manifest_path = root / "manifest.json"
+    manifest_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
+    config_path.unlink()
+    return manifest_path
+
+
 def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -92,6 +100,24 @@ def test_serve_command_falls_back_to_langgraph_json_and_runs_graph(tmp_path: Pat
     service = LangGraphService(manifest_path=capture.env["AGENTSEEK_GRAPHS"])
     result = service.get_entry("chat").build_graph().invoke({})
     assert result["value"] == "basic-config"
+
+
+def test_serve_command_uses_agentseek_graphs_env_for_manifest_named_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_manifest_config(tmp_path)
+    monkeypatch.setenv("AGENTSEEK_GRAPHS", str(config_path.resolve()))
+    capture = _RunCapture()
+
+    exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
+
+    assert exit_code == 0
+    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.env is not None
+    assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
 def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) -> None:
