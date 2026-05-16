@@ -187,64 +187,79 @@ done.
   commands that do not break LangGraph CLI compatibility.
 - Shared option handling for `--host`, `--port`, `--config`, and `--env-file`.
 
+## Current Status (2026-05-16)
+
+- Implemented and locally verified: `version`, `serve`, `dev`, `build`, `up`,
+  `dockerfile`, config auto-discovery (`agentseek.json` then `langgraph.json`),
+  and embeddable module entrypoints (`register_subcommands`, `run_namespace`).
+- `deploy` parsing/help surface exists, but the command body remains
+  intentionally unimplemented in the current milestone slice.
+- GitHub CI now covers the CLI on Linux/macOS/Windows plus Docker-backed
+  runtime paths through `CLI Compatibility`, `CLI Docker Runtime`, and
+  `CLI Dev Sample Graphs`.
+- Docker CI specifically verifies built-image startup, container health,
+  manifest-driven sample graphs, and custom auth inside the container runtime.
+
 ## Phase 3.1: CLI Packaging + Entry Point
 
-- [ ] Add a small `agentseek_cli` package (or equivalent module under
+- [x] Add a small `agentseek_cli` package (or equivalent module under
   `src/agentseek_api/cli.py`) and expose `agentseek` via `[project.scripts]`.
-- [ ] Keep the first implementation thin: orchestrate the existing FastAPI app,
+- [x] Keep the first implementation thin: orchestrate the existing FastAPI app,
   current env/config loader, and existing test/build commands instead of
   duplicating runtime logic.
-- [ ] Add `agentseek version` that reports the CLI/package version and the
+- [x] Add `agentseek version` that reports the CLI/package version and the
   installed `agentseek-api` version.
-- [ ] Define command-compatibility policy explicitly: when `agentseek` and
+- [x] Define command-compatibility policy explicitly: when `agentseek` and
   LangGraph CLI overlap, `agentseek` should accept the LangGraph CLI command
   names and core options unchanged.
 
 ## Phase 3.2: Core Runtime Commands
 
-- [ ] `agentseek dev`: wraps `uvicorn agentseek_api.main:app --reload`, with
+- [x] `agentseek dev`: wraps `uvicorn agentseek_api.main:app --reload`, with
   LangGraph CLI-compatible flags including `-c/--config`, `--host`, `--port`,
   `--no-reload`, `--n-jobs-per-worker`, `--debug-port`, `--wait-for-client`,
   `--no-browser`, `--studio-url`, `--allow-blocking`, and `--tunnel`.
-- [ ] `agentseek build`: LangGraph CLI-compatible image build surface with
+- [x] `agentseek build`: LangGraph CLI-compatible image build surface with
   `--platform`, `-t/--tag`, `--pull/--no-pull`, and `-c/--config`.
 - [ ] `agentseek deploy`: LangGraph CLI-compatible deploy surface, including
   inherited build flags plus `--api-key`, `--name`, `--deployment-id`,
   `--deployment-type`, `--no-wait`, `--verbose`, and subcommands
   `deploy list`, `deploy revisions list`, `deploy delete`, and `deploy logs`.
-- [ ] `agentseek up`: LangGraph CLI-compatible local Docker runtime surface
+- [x] `agentseek up`: LangGraph CLI-compatible local Docker runtime surface
   with `--wait`, `--base-image`, `--image`, `--postgres-uri`, `--watch`,
   `--debugger-base-url`, `--debugger-port`, `--verbose`, `-c/--config`,
   `-d/--docker-compose`, `-p/--port`, `--pull/--no-pull`, and
   `--recreate/--no-recreate`.
-- [ ] `agentseek dockerfile`: LangGraph CLI-compatible Dockerfile generation
+- [x] `agentseek dockerfile`: LangGraph CLI-compatible Dockerfile generation
   surface with `-c/--config`.
-- [ ] `agentseek serve`: same runtime surface without reload, intended for
+- [x] `agentseek serve`: same runtime surface without reload, intended for
   container entrypoints and smoke environments. This is an AgentSeek extension
   and does not replace `up`.
-- [ ] Config discovery should accept `agentseek.json` first, then full
+- [x] Config discovery should accept `agentseek.json` first, then full
   `langgraph.json` layouts without requiring users to rewrite the file into an
   AgentSeek-only shape.
 
 ## Phase 3.3: Build / Docker Integration
 
-- [ ] `agentseek dockerfile [SAVE_PATH]`: generate a Dockerfile from the active
+- [x] `agentseek dockerfile [SAVE_PATH]`: generate a Dockerfile from the active
   config, preserving LangGraph CLI expectations while layering in
   AgentSeek-specific runtime pieces only where needed.
-- [ ] `agentseek build -t <tag>`: build the container image from the generated
+- [x] `agentseek build -t <tag>`: build the container image from the generated
   Dockerfile or an equivalent in-memory template without dropping LangGraph CLI
   flags/behavior.
-- [ ] `agentseek up` should use the generated/built image path and preserve the
+- [x] `agentseek up` should use the generated/built image path and preserve the
   LangGraph CLI local-Docker workflow instead of deferring that command out of
   scope.
-- [ ] Config parsing must handle core LangGraph CLI keys cleanly, including at
-  least `dependencies`, `graphs`, `env`, `auth`, `store`, `http`, and
-  `api_version`. Unsupported keys must fail clearly instead of being silently
-  ignored.
+- [x] Config parsing handles the runtime-critical LangGraph CLI keys used by
+  the current CLI slice, including `dependencies`, `graphs`, `env`, `auth`,
+  image/runtime build settings, and manifest-based Docker generation.
+  Endpoint-level keys such as `store`, `http`, and `api_version` are currently
+  tolerated/ignored in the CLI layer and remain deferred at the runtime/API
+  layer.
 
 ## Phase 3.4: Tests + Docs
 
-- [ ] Unit tests for CLI parsing, config discovery precedence, and the command
+- [x] Unit tests for CLI parsing, config discovery precedence, and the command
   lines emitted for `dev`, `build`, `deploy`, `up`, `dockerfile`, and `serve`.
 - [ ] Update `README.md` quickstart to prefer `agentseek dev` once available,
   while keeping the raw `uvicorn` command documented as the low-level fallback.

@@ -27,6 +27,19 @@ __all__ = [
     "write_dockerfile",
 ]
 
+_CONTAINER_ENV_PREFIXES = (
+    "AGENTSEEK_",
+    "ANTHROPIC_",
+    "AUTH_",
+    "LANGCHAIN_",
+    "LANGSMITH_",
+    "LIVE_",
+    "METADATA_",
+    "OCEANBASE_",
+    "OPENAI_",
+    "SEEKDB_",
+)
+
 
 class CliError(RuntimeError):
     pass
@@ -368,8 +381,21 @@ def _docker_dependency_plan(*, config: CliConfig, config_path: Path, cwd: Path) 
     return pythonpath_entries, install_commands
 
 
+def _ambient_container_env() -> dict[str, str]:
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key.startswith(_CONTAINER_ENV_PREFIXES)
+    }
+
+
 def build_container_env(*, config_path: Path, env_file: str | None, cwd: Path) -> dict[str, str]:
-    env = build_runtime_env(config_path=config_path, env_file=env_file, cwd=cwd, base_env={})
+    env = build_runtime_env(
+        config_path=config_path,
+        env_file=env_file,
+        cwd=cwd,
+        base_env=_ambient_container_env(),
+    )
     env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
     auth_module_path = env.get("AUTH_MODULE_PATH")
     if auth_module_path:
@@ -389,6 +415,22 @@ def _default_base_image(*, python_version: str | None, image_distro: str | None)
     raise CliError(f"Unsupported image_distro '{image_distro}'.")
 
 
+def _supports_apt_get_base_image(base_image: str) -> bool:
+    normalized = base_image.strip().lower()
+    if normalized.startswith(("python:", "debian:", "ubuntu:", "langchain/langgraph")):
+        return "alpine" not in normalized and "wolfi" not in normalized
+    return any(marker in normalized for marker in ("debian", "ubuntu", "bookworm", "bullseye"))
+
+
+def _validate_base_image(base_image: str) -> None:
+    if _supports_apt_get_base_image(base_image):
+        return
+    raise CliError(
+        f"Base image '{base_image}' is not supported because generated Dockerfiles require apt-get. "
+        "Use a Debian/Ubuntu-compatible image such as 'python:3.12-slim' or 'langchain/langgraph-api'."
+    )
+
+
 def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str | None = None) -> str:
     config = _load_cli_config(config_path)
     project_root = _find_installable_project_root(start=config_path.parent, cwd=cwd)
@@ -405,6 +447,7 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
         python_version=config.python_version,
         image_distro=config.image_distro,
     )
+    _validate_base_image(base_image)
     pip_install_prefix = ""
     if config.pip_config_file is not None:
         pip_config_path = _container_config_path(config_path=config.pip_config_file, cwd=cwd)
@@ -487,6 +530,27 @@ def _wait_for_http_ready(url: str, *, timeout_seconds: float) -> None:
     raise CliError(f"Timed out waiting for '{url}' to become ready: {last_error}")
 
 
+def _container_exists(
+    name: str,
+    *,
+    runner: Callable[..., int],
+    env: dict[str, str],
+    cwd: Path,
+) -> bool:
+    inspect_command = ["docker", "container", "inspect", name]
+    if runner is _default_runner:
+        completed = subprocess.run(
+            inspect_command,
+            env=env,
+            cwd=str(cwd),
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        return completed.returncode == 0
+    return runner(inspect_command, env=env, cwd=str(cwd)) == 0
+
+
 def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
@@ -514,6 +578,10 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
     container_name = _container_name_for_port(args.port)
     if args.recreate:
         runner(["docker", "rm", "-f", container_name], env=env, cwd=str(cwd))
+    elif _container_exists(container_name, runner=runner, env=env, cwd=cwd):
+        raise CliError(
+            f"Container '{container_name}' already exists. Re-run with '--recreate' or remove it manually."
+        )
     if args.docker_compose:
         compose_path = _resolve_path(args.docker_compose, cwd=cwd)
         if not compose_path.exists():

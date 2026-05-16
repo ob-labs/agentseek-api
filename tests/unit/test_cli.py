@@ -25,7 +25,19 @@ class _RunCapture:
         self.command = command
         self.env = env
         self.cwd = cwd
+        if command[:3] == ["docker", "container", "inspect"]:
+            return 1
         return 0
+
+
+def _docker_env_from_run_command(command: list[str]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for index, token in enumerate(command):
+        if token != "-e":
+            continue
+        key, value = command[index + 1].split("=", maxsplit=1)
+        values[key] = value
+    return values
 
 
 def _write_basic_langgraph_config(root: Path) -> Path:
@@ -702,6 +714,76 @@ def test_dockerfile_command_rejects_unsupported_image_distro(tmp_path: Path) -> 
     assert "not supported without an explicit base_image" in stderr.getvalue()
 
 
+def test_dockerfile_command_rejects_non_apt_base_image(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "base_image": "python:3.12-alpine"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    stderr = io.StringIO()
+
+    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+
+    assert exit_code == 2
+    assert "require apt-get" in stderr.getvalue()
+
+
+def test_dockerfile_command_rejects_unknown_non_debian_base_image(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "base_image": "registry.access.redhat.com/ubi9/python-312"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    stderr = io.StringIO()
+
+    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+
+    assert exit_code == 2
+    assert "Debian/Ubuntu-compatible" in stderr.getvalue()
+
+
+def test_dockerfile_command_allows_supported_explicit_langgraph_base_image(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "base_image": "langchain/langgraph-api:0.2"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+
+    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+
+    assert exit_code == 0
+    content = dockerfile_path.read_text(encoding="utf-8")
+    assert "FROM langchain/langgraph-api:0.2" in content
+
+
 def test_build_command_requires_config_file(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -744,7 +826,7 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
     assert exit_code == 0
     assert capture.calls is not None
     assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
-    assert capture.calls[1] == [
+    assert capture.calls[1][:9] == [
         "docker",
         "run",
         "--detach",
@@ -754,14 +836,12 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
         "host.docker.internal:host-gateway",
         "-p",
         "8123:2026",
-        "-e",
-        "AGENTSEEK_GRAPHS=/deps/agent/langgraph.json",
-        "-e",
-        "METADATA_DB_URL=sqlite+aiosqlite:////tmp/agentseek.db",
-        "-e",
-        "OCEANBASE_HOST=host.docker.internal",
-        "agentseek:test",
     ]
+    assert capture.calls[1][-1] == "agentseek:test"
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
+    assert container_env["METADATA_DB_URL"] == "sqlite+aiosqlite:////tmp/agentseek.db"
+    assert container_env["OCEANBASE_HOST"] == "host.docker.internal"
 
 
 def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
@@ -848,7 +928,8 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: 
         str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
         ".",
     ]
-    assert capture.calls[1] == [
+    assert capture.calls[1] == ["docker", "container", "inspect", "agentseek-up-8124"]
+    assert capture.calls[2][:9] == [
         "docker",
         "run",
         "--detach",
@@ -858,14 +939,12 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: 
         "host.docker.internal:host-gateway",
         "-p",
         "8124:2026",
-        "-e",
-        "AGENTSEEK_GRAPHS=/deps/agent/langgraph.json",
-        "-e",
-        "METADATA_DB_URL=postgresql://postgres:postgres@db/agentseek",
-        "-e",
-        "METADATA_DB_BACKEND=postgresql",
-        "agentseek-up:8124",
     ]
+    assert capture.calls[2][-1] == "agentseek-up:8124"
+    container_env = _docker_env_from_run_command(capture.calls[2])
+    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
+    assert container_env["METADATA_DB_URL"] == "postgresql://postgres:postgres@db/agentseek"
+    assert container_env["METADATA_DB_BACKEND"] == "postgresql"
 
 
 def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path: Path) -> None:
@@ -909,7 +988,8 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0] == [
+    assert capture.calls[0] == ["docker", "container", "inspect", "agentseek-up-8123"]
+    assert capture.calls[1][:9] == [
         "docker",
         "run",
         "--detach",
@@ -919,16 +999,68 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path
         "host.docker.internal:host-gateway",
         "-p",
         "8123:2026",
-        "-e",
-        "AGENTSEEK_GRAPHS=/deps/agent/langgraph.json",
-        "-e",
-        "AUTH_MODULE_PATH=/deps/agent/auth.py:backend",
-        "-e",
-        "AUTH_TYPE=custom",
-        "-e",
-        "FEATURE_FLAG=True",
-        "agentseek:test",
     ]
+    assert capture.calls[1][-1] == "agentseek:test"
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
+    assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/auth.py:backend"
+    assert container_env["AUTH_TYPE"] == "custom"
+    assert container_env["FEATURE_FLAG"] == "True"
+
+
+def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-key")
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert container_env["OPENAI_API_KEY"] == "ambient-key"
+
+
+def test_up_command_does_not_pass_shell_runtime_env_into_container(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("PATH", "/tmp/bad-path")
+    monkeypatch.setenv("PWD", "/tmp/host-pwd")
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert "PATH" not in container_env
+    assert "PWD" not in container_env
 
 
 def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> None:
@@ -969,6 +1101,71 @@ def test_up_command_returns_build_failure_without_running_container(tmp_path: Pa
 
     assert exit_code == 9
     assert capture.calls == [["docker", "build", "--pull", "-t", "agentseek-up:8125", "-f", str((tmp_path / ".agentseek" / "Dockerfile").resolve()), "."]]
+
+
+def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    stderr = io.StringIO()
+    capture = _RunCapture()
+
+    def existing_container_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
+        capture(command, env=env, cwd=cwd)
+        if command[:3] == ["docker", "container", "inspect"]:
+            return 0
+        return 0
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+        ],
+        runner=existing_container_runner,
+        cwd=tmp_path,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert capture.calls == [["docker", "container", "inspect", "agentseek-up-8123"]]
+    assert "already exists" in stderr.getvalue()
+    assert "--recreate" in stderr.getvalue()
+
+
+def test_container_exists_uses_quiet_probe_for_default_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    observed: dict[str, object] = {}
+
+    class _Completed:
+        returncode = 0
+
+    def fake_run(command: list[str], **kwargs: object) -> _Completed:
+        observed["command"] = command
+        observed["kwargs"] = kwargs
+        return _Completed()
+
+    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+
+    exists = cli_module._container_exists(
+        "agentseek-up-8123",
+        runner=cli_module._default_runner,
+        env={},
+        cwd=tmp_path,
+    )
+
+    assert exists is True
+    assert observed["command"] == ["docker", "container", "inspect", "agentseek-up-8123"]
+    kwargs = observed["kwargs"]
+    assert kwargs["stdout"] is cli_module.subprocess.DEVNULL
+    assert kwargs["stderr"] is cli_module.subprocess.DEVNULL
+    assert kwargs["check"] is False
 
 
 def test_up_command_waits_for_http_health_when_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
