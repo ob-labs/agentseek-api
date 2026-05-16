@@ -79,6 +79,23 @@ def test_resolve_metadata_db_url_prefers_explicit_backend(monkeypatch: pytest.Mo
     assert resolved_url.startswith("postgresql+asyncpg://")
 
 
+def test_resolve_metadata_db_url_builds_seekdb_url_from_oceanbase_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "METADATA_DB_URL", None)
+    monkeypatch.setattr(settings, "SEEKDB_URL", "mysql+aiomysql://root%40test:@localhost:2881/seekdb")
+    monkeypatch.setattr(settings, "METADATA_DB_BACKEND", "auto")
+    monkeypatch.setattr(settings, "OCEANBASE_HOST", "host.docker.internal")
+    monkeypatch.setattr(settings, "OCEANBASE_PORT", "3306")
+    monkeypatch.setattr(settings, "OCEANBASE_USER", "root")
+    monkeypatch.setattr(settings, "OCEANBASE_PASSWORD", "")
+    monkeypatch.setattr(settings, "OCEANBASE_DB_NAME", "seekdb")
+
+    resolved_url = resolve_metadata_db_url()
+
+    assert resolved_url == "mysql+aiomysql://root:@host.docker.internal:3306/seekdb"
+
+
 def test_resolve_metadata_db_url_raises_on_unknown_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "METADATA_DB_URL", "postgresql://postgres:postgres@localhost:5432/agentseek")
     monkeypatch.setattr(settings, "METADATA_DB_BACKEND", "oracle")
