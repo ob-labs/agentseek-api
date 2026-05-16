@@ -106,6 +106,34 @@ def _assert_sample_run(
     return waited, _stream_payloads(stream_body)
 
 
+def _assert_custom_auth_default_identity(
+    *,
+    base_url: str,
+    other_headers: dict[str, str],
+) -> None:
+    _, created_thread, _ = _request(
+        base_url=base_url,
+        path="/threads",
+        method="POST",
+        payload={"metadata": {"suite": "docker-auth-default"}},
+    )
+    assert isinstance(created_thread, dict)
+    assert created_thread["user_id"] == "default_user"
+    thread_id = str(created_thread["thread_id"])
+
+    _, default_threads, _ = _request(base_url=base_url, path="/threads")
+    assert isinstance(default_threads, list)
+    assert any(item["thread_id"] == thread_id and item["user_id"] == "default_user" for item in default_threads)
+
+    _, hidden_from_other_user, _ = _request(
+        base_url=base_url,
+        path=f"/threads/{thread_id}",
+        headers=other_headers,
+        expected_status=404,
+    )
+    assert isinstance(hidden_from_other_user, dict)
+
+
 def _assert_common_flow(base_url: str) -> None:
     alice = {"x-user-id": "alice"}
     bob = {"x-user-id": "bob"}
@@ -122,6 +150,8 @@ def _assert_common_flow(base_url: str) -> None:
 
     _, assistants, _ = _request(base_url=base_url, path="/assistants")
     assert isinstance(assistants, list)
+
+    _assert_custom_auth_default_identity(base_url=base_url, other_headers=alice)
 
     _, created_assistant, _ = _request(
         base_url=base_url,
@@ -354,6 +384,7 @@ def _assert_common_flow(base_url: str) -> None:
 def _assert_smoke_flow(base_url: str) -> None:
     headers = {"x-user-id": "autobuild"}
     _assert_health(base_url)
+    _assert_custom_auth_default_identity(base_url=base_url, other_headers=headers)
 
     _, created_assistant, _ = _request(
         base_url=base_url,

@@ -116,6 +116,37 @@ if ! uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8123
   exit 1
 fi
 
+DUPLICATE_STDERR="$TMP_DIR/up-duplicate.stderr"
+set +e
+uv run agentseek up \
+  --config "$CONFIG_PATH" \
+  --image "$IMAGE_TAG" \
+  --port 8123 \
+  --env-file "$TMP_DIR/up.env" \
+  2>"$DUPLICATE_STDERR"
+DUPLICATE_EXIT=$?
+set -e
+
+if [[ "$DUPLICATE_EXIT" -eq 0 ]]; then
+  print_logs
+  echo "Duplicate agentseek up unexpectedly succeeded without --recreate." >&2
+  exit 1
+fi
+
+if ! grep -q "already exists" "$DUPLICATE_STDERR" || ! grep -q -- "--recreate" "$DUPLICATE_STDERR"; then
+  print_logs
+  cat "$DUPLICATE_STDERR" >&2 || true
+  echo "Duplicate agentseek up did not emit the expected recreate guidance." >&2
+  exit 1
+fi
+
+if grep -Eqi "Conflict|already in use by container|Error response from daemon" "$DUPLICATE_STDERR"; then
+  print_logs
+  cat "$DUPLICATE_STDERR" >&2 || true
+  echo "Duplicate agentseek up leaked raw Docker conflict output." >&2
+  exit 1
+fi
+
 if ! uv run agentseek up \
   --config "$CONFIG_PATH" \
   --port 8124 \

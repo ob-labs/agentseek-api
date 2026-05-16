@@ -332,6 +332,30 @@ def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: P
     assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2026"]' in content
 
 
+def test_dockerfile_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    (tmp_path / "agentseek.json").write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    _write_basic_langgraph_config(tmp_path)
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+
+    exit_code = main(["dockerfile", str(dockerfile_path)], cwd=tmp_path)
+
+    assert exit_code == 0
+    content = dockerfile_path.read_text(encoding="utf-8")
+    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/agentseek.json" in content
+    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" not in content
+
+
 def test_dockerfile_command_honors_base_image_python_and_custom_lines(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -1033,6 +1057,38 @@ def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatc
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
 
 
+def test_up_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    (tmp_path / "agentseek.json").write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    _write_basic_langgraph_config(tmp_path)
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--image",
+            "agentseek:test",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/agentseek.json"
+
+
 def test_up_command_does_not_pass_shell_runtime_env_into_container(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1085,6 +1141,29 @@ def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> No
     assert exit_code == 0
     dockerfile = (tmp_path / ".agentseek" / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM python:3.13-slim-bookworm" in dockerfile
+
+
+def test_up_command_rejects_non_apt_base_image_before_docker_build(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    capture = _RunCapture()
+    stderr = io.StringIO()
+
+    exit_code = main(
+        [
+            "up",
+            "--base-image",
+            "python:3.12-alpine",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert capture.calls is None
+    assert "require apt-get" in stderr.getvalue()
 
 
 def test_up_command_returns_build_failure_without_running_container(tmp_path: Path) -> None:
