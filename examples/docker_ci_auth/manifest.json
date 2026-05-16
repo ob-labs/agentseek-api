@@ -1,4 +1,6 @@
 {
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": [".."],
   "graphs": {
     "external_hello": {
       "graph": "../external_graph/graph.py:build_graph"

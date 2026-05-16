@@ -184,7 +184,7 @@ def _assert_common_flow(base_url: str) -> None:
 
     _, waited_run, _ = _request(base_url=base_url, path=f"/threads/{thread_id}/runs/{run_id}/wait", headers=alice)
     assert isinstance(waited_run, dict)
-    assert waited_run["status"] == "success"
+    assert waited_run["status"] == "success", waited_run
     assert waited_run["output"]["final_text"] == "external graph heard: hello-from-docker"
 
     _, missing_for_bob, _ = _request(

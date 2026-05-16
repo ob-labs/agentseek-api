@@ -111,7 +111,10 @@ if ! curl -fsS "http://127.0.0.1:8123/health" | grep -q '"healthy"'; then
   exit 1
 fi
 
-uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8123 --mode full
+if ! uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8123 --mode full; then
+  print_logs
+  exit 1
+fi
 
 if ! uv run agentseek up \
   --config "$CONFIG_PATH" \
@@ -132,4 +135,7 @@ if ! curl -fsS "http://127.0.0.1:8124/health" | grep -q '"healthy"'; then
   exit 1
 fi
 
-uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8124 --mode smoke
+if ! uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8124 --mode smoke; then
+  print_logs
+  exit 1
+fi
