@@ -44,9 +44,16 @@ jobs:
         run: make test-cov
 
   cli-compatibility:
-    name: CLI Compatibility
-    runs-on: ubuntu-latest
+    name: CLI Compatibility (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -65,15 +72,12 @@ jobs:
         run: uv run agentseek version
 
       - name: Dockerfile command renders a runnable config
-        run: |
-          mkdir -p .tmp
-          uv run agentseek dockerfile --config examples/external_graph/manifest.json .tmp/agentseek.Dockerfile
-          test -s .tmp/agentseek.Dockerfile
-          grep -F 'ENV PYTHONPATH=/deps/agent' .tmp/agentseek.Dockerfile
-          grep -F 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' .tmp/agentseek.Dockerfile
+        run: >-
+          uv run python -c
+          "from pathlib import Path; import subprocess; out = Path('.tmp/agentseek.Dockerfile'); out.parent.mkdir(exist_ok=True); subprocess.run(['uv', 'run', 'agentseek', 'dockerfile', '--config', 'examples/external_graph/manifest.json', str(out)], check=True); text = out.read_text(encoding='utf-8'); assert 'ENV PYTHONPATH=/deps/agent' in text; assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' in text"
 
-      - name: CLI config and LangGraph compatibility tests
-        run: make test-cli
+      - name: CLI config and Docker planning tests
+        run: uv run pytest tests/unit/test_cli.py tests/unit/test_graph_manifest.py -q
 
   cli-docker-runtime:
     name: CLI Docker Runtime

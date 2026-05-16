@@ -3,8 +3,6 @@ from pathlib import Path
 
 import pytest
 from langgraph.checkpoint.memory import InMemorySaver
-from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
-
 from agentseek_api.services.langgraph_service import GraphManifestError, LangGraphService
 
 

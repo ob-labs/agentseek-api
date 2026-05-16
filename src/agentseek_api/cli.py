@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import time
+from dataclasses import dataclass, field
 from urllib import error as urllib_error
 from urllib import request as urllib_request
 from collections.abc import Callable, Sequence
@@ -17,6 +18,19 @@ from agentseek_api import __version__
 
 class CliError(RuntimeError):
     pass
+
+
+@dataclass
+class CliConfig:
+    graphs: dict[str, object]
+    env_mapping: dict[str, str] = field(default_factory=dict)
+    env_file: Path | None = None
+    auth_path: str | None = None
+    base_image: str | None = None
+    python_version: str | None = None
+    image_distro: str | None = None
+    pip_config_file: Path | None = None
+    dockerfile_lines: list[str] = field(default_factory=list)
 
 
 def _resolve_path(path_text: str, *, cwd: Path) -> Path:
@@ -73,6 +87,101 @@ def _parse_env_file(env_file: Path) -> dict[str, str]:
     return values
 
 
+def _resolve_path_from_config(path_text: str, *, config_path: Path) -> Path:
+    path = Path(path_text).expanduser()
+    if not path.is_absolute():
+        path = config_path.parent / path
+    return path.resolve()
+
+
+def _normalize_symbol_reference(reference: str, *, config_path: Path) -> str:
+    if ":" not in reference:
+        return reference
+    module_name, symbol_name = reference.split(":", maxsplit=1)
+    if not module_name or not symbol_name:
+        return reference
+    if module_name.endswith(".py") or module_name.startswith(".") or "/" in module_name or "\\" in module_name:
+        resolved_module = _resolve_path_from_config(module_name, config_path=config_path)
+        return f"{resolved_module}:{symbol_name}"
+    return reference
+
+
+def _normalize_env_mapping(raw_env: object, *, config_path: Path) -> tuple[dict[str, str], Path | None]:
+    if raw_env is None:
+        return {}, None
+    if isinstance(raw_env, str):
+        resolved_env = _resolve_path_from_config(raw_env, config_path=config_path)
+        if not resolved_env.exists():
+            raise CliError(f"Env file '{resolved_env}' does not exist.")
+        return {}, resolved_env
+    if isinstance(raw_env, dict):
+        env_mapping: dict[str, str] = {}
+        for key, value in raw_env.items():
+            if not isinstance(key, str):
+                raise CliError(f"Config file '{config_path}' env mapping keys must be strings.")
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                env_mapping[key] = "" if value is None else str(value)
+            else:
+                raise CliError(f"Config file '{config_path}' env mapping values must be scalar.")
+        return env_mapping, None
+    raise CliError(f"Config file '{config_path}' must set 'env' to a path string or key/value object.")
+
+
+def _load_cli_config(config_path: Path) -> CliConfig:
+    payload = _load_config_payload(config_path)
+    env_mapping, env_file = _normalize_env_mapping(payload.get("env"), config_path=config_path)
+
+    auth_path: str | None = None
+    raw_auth = payload.get("auth")
+    if raw_auth is not None:
+        if not isinstance(raw_auth, dict):
+            raise CliError(f"Config file '{config_path}' field 'auth' must be an object.")
+        raw_auth_path = raw_auth.get("path")
+        if raw_auth_path is not None:
+            if not isinstance(raw_auth_path, str) or not raw_auth_path.strip():
+                raise CliError(f"Config file '{config_path}' field 'auth.path' must be a non-empty string.")
+            auth_path = _normalize_symbol_reference(raw_auth_path.strip(), config_path=config_path)
+
+    raw_pip_config = payload.get("pip_config_file")
+    pip_config_file: Path | None = None
+    if raw_pip_config is not None:
+        if not isinstance(raw_pip_config, str) or not raw_pip_config.strip():
+            raise CliError(f"Config file '{config_path}' field 'pip_config_file' must be a non-empty string.")
+        pip_config_file = _resolve_path_from_config(raw_pip_config, config_path=config_path)
+        if not pip_config_file.exists():
+            raise CliError(f"Pip config file '{pip_config_file}' does not exist.")
+
+    raw_base_image = payload.get("base_image")
+    if raw_base_image is not None and (not isinstance(raw_base_image, str) or not raw_base_image.strip()):
+        raise CliError(f"Config file '{config_path}' field 'base_image' must be a non-empty string.")
+
+    raw_python_version = payload.get("python_version")
+    if raw_python_version is not None and (not isinstance(raw_python_version, str) or not raw_python_version.strip()):
+        raise CliError(f"Config file '{config_path}' field 'python_version' must be a non-empty string.")
+
+    raw_image_distro = payload.get("image_distro")
+    if raw_image_distro is not None and (not isinstance(raw_image_distro, str) or not raw_image_distro.strip()):
+        raise CliError(f"Config file '{config_path}' field 'image_distro' must be a non-empty string.")
+
+    raw_dockerfile_lines = payload.get("dockerfile_lines", [])
+    if raw_dockerfile_lines is None:
+        raw_dockerfile_lines = []
+    if not isinstance(raw_dockerfile_lines, list) or not all(isinstance(item, str) for item in raw_dockerfile_lines):
+        raise CliError(f"Config file '{config_path}' field 'dockerfile_lines' must be an array of strings.")
+
+    return CliConfig(
+        graphs=payload["graphs"],  # validated by _load_config_payload
+        env_mapping=env_mapping,
+        env_file=env_file,
+        auth_path=auth_path,
+        base_image=raw_base_image.strip() if isinstance(raw_base_image, str) else None,
+        python_version=raw_python_version.strip() if isinstance(raw_python_version, str) else None,
+        image_distro=raw_image_distro.strip() if isinstance(raw_image_distro, str) else None,
+        pip_config_file=pip_config_file,
+        dockerfile_lines=list(raw_dockerfile_lines),
+    )
+
+
 def build_runtime_env(
     *,
     config_path: Path | None,
@@ -81,6 +190,14 @@ def build_runtime_env(
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     env = dict(base_env or os.environ)
+    config: CliConfig | None = _load_cli_config(config_path) if config_path is not None else None
+    if config is not None:
+        if config.env_file is not None:
+            env.update(_parse_env_file(config.env_file))
+        env.update(config.env_mapping)
+        if config.auth_path:
+            env["AUTH_TYPE"] = "custom"
+            env["AUTH_MODULE_PATH"] = config.auth_path
     if env_file:
         resolved_env_file = _resolve_path(env_file, cwd=cwd)
         if not resolved_env_file.exists():
@@ -135,12 +252,32 @@ def _container_config_path(*, config_path: Path, cwd: Path) -> str:
     return f"/deps/agent/{relative_path.as_posix()}"
 
 
-def render_dockerfile(*, config_path: Path, cwd: Path) -> str:
-    _load_config_payload(config_path)
+def _default_base_image(*, python_version: str | None, image_distro: str | None) -> str:
+    version = (python_version or "3.12").strip()
+    distro = (image_distro or "debian").strip().lower()
+    if distro in {"", "debian"}:
+        return f"python:{version}-slim"
+    if distro in {"bookworm", "bullseye"}:
+        return f"python:{version}-slim-{distro}"
+    if distro == "wolfi":
+        raise CliError("image_distro 'wolfi' is not supported without an explicit base_image.")
+    raise CliError(f"Unsupported image_distro '{image_distro}'.")
+
+
+def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str | None = None) -> str:
+    config = _load_cli_config(config_path)
     container_config = _container_config_path(config_path=config_path, cwd=cwd)
+    base_image = base_image_override or config.base_image or _default_base_image(
+        python_version=config.python_version,
+        image_distro=config.image_distro,
+    )
+    pip_install_prefix = ""
+    if config.pip_config_file is not None:
+        pip_config_path = _container_config_path(config_path=config.pip_config_file, cwd=cwd)
+        pip_install_prefix = f"PIP_CONFIG_FILE={pip_config_path} "
     return "\n".join(
         [
-            "FROM python:3.12-slim",
+            f"FROM {base_image}",
             "",
             "ENV PYTHONDONTWRITEBYTECODE=1",
             "ENV PYTHONUNBUFFERED=1",
@@ -150,7 +287,8 @@ def render_dockerfile(*, config_path: Path, cwd: Path) -> str:
             "",
             "WORKDIR /deps/agent",
             "COPY . /deps/agent",
-            "RUN pip install --no-cache-dir .",
+            *config.dockerfile_lines,
+            f"RUN {pip_install_prefix}pip install --no-cache-dir .",
             f"ENV AGENTSEEK_GRAPHS={container_config}",
             "EXPOSE 2026",
             'CMD ["agentseek", "serve", "--host", "0.0.0.0", "--port", "2026"]',
@@ -159,9 +297,12 @@ def render_dockerfile(*, config_path: Path, cwd: Path) -> str:
     )
 
 
-def write_dockerfile(*, config_path: Path, save_path: Path, cwd: Path) -> Path:
+def write_dockerfile(*, config_path: Path, save_path: Path, cwd: Path, base_image_override: str | None = None) -> Path:
     save_path.parent.mkdir(parents=True, exist_ok=True)
-    save_path.write_text(render_dockerfile(config_path=config_path, cwd=cwd), encoding="utf-8")
+    save_path.write_text(
+        render_dockerfile(config_path=config_path, cwd=cwd, base_image_override=base_image_override),
+        encoding="utf-8",
+    )
     return save_path
 
 
@@ -225,6 +366,7 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
             config_path=config_path,
             save_path=(cwd / ".agentseek" / "Dockerfile").resolve(),
             cwd=cwd,
+            base_image_override=args.base_image,
         )
         build_command = ["docker", "build"]
         if args.pull:
@@ -237,6 +379,16 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
     container_name = _container_name_for_port(args.port)
     if args.recreate:
         runner(["docker", "rm", "-f", container_name], env=env, cwd=str(cwd))
+    if args.docker_compose:
+        compose_path = _resolve_path(args.docker_compose, cwd=cwd)
+        if not compose_path.exists():
+            raise CliError(f"Docker compose file '{compose_path}' does not exist.")
+        compose_command = ["docker", "compose", "-f", str(compose_path), "up", "-d"]
+        if args.recreate:
+            compose_command.append("--force-recreate")
+        compose_exit_code = runner(compose_command, env=env, cwd=str(cwd))
+        if compose_exit_code != 0:
+            return compose_exit_code
 
     command = [
         "docker",
@@ -415,12 +567,10 @@ def main(
                 args,
                 command_name="up",
                 option_names=(
-                    "base_image",
                     "watch",
                     "debugger_base_url",
                     "debugger_port",
                     "verbose",
-                    "docker_compose",
                 ),
             )
             return _execute_up_command(args, runner=run, cwd=workdir)

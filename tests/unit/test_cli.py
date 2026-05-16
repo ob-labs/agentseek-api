@@ -125,6 +125,79 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) ->
     assert capture.env["AUTH_MODULE_PATH"] == "test.module:backend"
 
 
+def test_dev_command_loads_config_env_mapping_and_auth_path(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    package_dir = tmp_path / "chat"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "env": {
+    "OPENAI_API_KEY": "test-key",
+    "FEATURE_FLAG": true
+  },
+  "auth": {
+    "path": "./auth.py:auth"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    capture = _RunCapture()
+
+    exit_code = main(["dev", "--config", str(config_path), "--no-reload"], runner=capture, cwd=tmp_path)
+
+    assert exit_code == 0
+    assert capture.env is not None
+    assert capture.env["OPENAI_API_KEY"] == "test-key"
+    assert capture.env["FEATURE_FLAG"] == "True"
+    assert capture.env["AUTH_TYPE"] == "custom"
+    assert capture.env["AUTH_MODULE_PATH"] == f"{(tmp_path / 'auth.py').resolve()}:auth"
+
+
+def test_dev_command_merges_config_env_file_before_cli_env_file(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    config_env = tmp_path / "config.env"
+    config_env.write_text("TOKEN=from-config\nSHARED=config\n", encoding="utf-8")
+    config_path.write_text(
+        """
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "env": "./config.env"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "override.env"
+    cli_env.write_text("SHARED=override\n", encoding="utf-8")
+    capture = _RunCapture()
+
+    exit_code = main(
+        ["dev", "--config", str(config_path), "--env-file", str(cli_env), "--no-reload"],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.env is not None
+    assert capture.env["TOKEN"] == "from-config"
+    assert capture.env["SHARED"] == "override"
+
+
 def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -169,6 +242,44 @@ def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: P
     assert 'ENV PYTHONPATH=/deps/agent' in content
     assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json' in content
     assert 'CMD ["agentseek", "serve", "--host", "0.0.0.0", "--port", "2026"]' in content
+
+
+def test_dockerfile_command_honors_base_image_python_and_custom_lines(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    package_dir = tmp_path / "chat"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    pip_conf = tmp_path / "pip.conf"
+    pip_conf.write_text("[global]\nindex-url = https://pypi.org/simple\n", encoding="utf-8")
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "python_version": "3.13",
+  "image_distro": "bookworm",
+  "pip_config_file": "./pip.conf",
+  "dockerfile_lines": [
+    "RUN echo custom-step"
+  ]
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+
+    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+
+    assert exit_code == 0
+    content = dockerfile_path.read_text(encoding="utf-8")
+    assert "FROM python:3.13-slim-bookworm" in content
+    assert "RUN echo custom-step" in content
+    assert "RUN PIP_CONFIG_FILE=/deps/agent/pip.conf pip install --no-cache-dir ." in content
 
 
 def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Path) -> None:
@@ -311,6 +422,36 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
     ]
 
 
+def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    compose_path = tmp_path / "docker-compose.yml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--docker-compose",
+            str(compose_path),
+            "--recreate",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
+    assert capture.calls[1] == ["docker", "compose", "-f", str(compose_path.resolve()), "up", "-d", "--force-recreate"]
+    assert capture.calls[2][-1] == "agentseek:test"
+
+
 def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -360,6 +501,30 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: 
         "METADATA_DB_BACKEND=postgresql",
         "agentseek-up:8124",
     ]
+
+
+def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--port",
+            "8126",
+            "--base-image",
+            "python:3.13-slim-bookworm",
+            "--no-pull",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    dockerfile = (tmp_path / ".agentseek" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM python:3.13-slim-bookworm" in dockerfile
 
 
 def test_up_command_returns_build_failure_without_running_container(tmp_path: Path) -> None:

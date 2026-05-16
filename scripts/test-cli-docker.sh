@@ -7,16 +7,22 @@ cd "$ROOT_DIR"
 IMAGE_TAG="${IMAGE_TAG:-agentseek-api-cli-smoke:latest}"
 DB_CONTAINER="${DB_CONTAINER:-agentseek-cli-mysql}"
 APP_CONTAINER="${APP_CONTAINER:-agentseek-up-8123}"
+APP_CONTAINER_AUTOBUILD="${APP_CONTAINER_AUTOBUILD:-agentseek-up-8124}"
+PG_CONTAINER="${PG_CONTAINER:-agentseek-cli-postgres}"
 TMP_DIR="${TMP_DIR:-$ROOT_DIR/.tmp/cli-docker}"
 
 cleanup() {
   docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$APP_CONTAINER_AUTOBUILD" >/dev/null 2>&1 || true
   docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
+  docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
 }
 
 print_logs() {
   docker logs "$APP_CONTAINER" || true
+  docker logs "$APP_CONTAINER_AUTOBUILD" || true
   docker logs "$DB_CONTAINER" || true
+  docker logs "$PG_CONTAINER" || true
 }
 
 trap cleanup EXIT
@@ -45,6 +51,15 @@ docker run -d --rm \
   -p 3306:3306 \
   mysql:8.4 >/dev/null
 
+docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
+docker run -d --rm \
+  --name "$PG_CONTAINER" \
+  -e POSTGRES_USER=postgres \
+  -e POSTGRES_PASSWORD=postgres \
+  -e POSTGRES_DB=agentseek \
+  -p 5432:5432 \
+  postgres:16 >/dev/null
+
 for _ in $(seq 1 60); do
   if docker exec "$DB_CONTAINER" mysqladmin ping -h 127.0.0.1 --silent >/dev/null 2>&1; then
     break
@@ -55,6 +70,19 @@ done
 if ! docker exec "$DB_CONTAINER" mysqladmin ping -h 127.0.0.1 --silent >/dev/null 2>&1; then
   print_logs
   echo "MySQL container did not become ready." >&2
+  exit 1
+fi
+
+for _ in $(seq 1 60); do
+  if docker exec "$PG_CONTAINER" pg_isready -U postgres -d agentseek >/dev/null 2>&1; then
+    break
+  fi
+  sleep 2
+done
+
+if ! docker exec "$PG_CONTAINER" pg_isready -U postgres -d agentseek >/dev/null 2>&1; then
+  print_logs
+  echo "PostgreSQL container did not become ready." >&2
   exit 1
 fi
 
@@ -114,4 +142,51 @@ waited = request(f"/threads/{thread['thread_id']}/runs/{run['run_id']}/wait")
 assert waited["status"] == "success", waited
 output = waited["output"]
 assert output["final_text"] == "external graph heard: hello-from-docker", output
+PY
+
+uv run agentseek up \
+  --config examples/external_graph/manifest.json \
+  --port 8124 \
+  --base-image python:3.13-slim-bookworm \
+  --postgres-uri postgresql://postgres:postgres@host.docker.internal:5432/agentseek \
+  --no-pull \
+  --wait \
+  --recreate
+
+if ! curl -fsS "http://127.0.0.1:8124/health" | grep -q '"healthy"'; then
+  print_logs
+  echo "Auto-built app container did not become healthy." >&2
+  exit 1
+fi
+
+uv run python - <<'PY'
+import json
+import urllib.request
+
+base_url = "http://127.0.0.1:8124"
+headers = {"Content-Type": "application/json", "x-user-id": "cli-docker-autobuild"}
+
+def request(path: str, payload: dict | None = None, method: str = "GET") -> dict:
+    data = None if payload is None else json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(
+        f"{base_url}{path}",
+        data=data,
+        method=method,
+        headers=headers,
+    )
+    with urllib.request.urlopen(req, timeout=30.0) as resp:
+        body = resp.read().decode("utf-8")
+    return json.loads(body) if body else {}
+
+assistant = request("/assistants", {"name": "external-autobuild", "graph_id": "external_hello"}, method="POST")
+thread = request("/threads", {"metadata": {"source": "cli-docker-autobuild"}}, method="POST")
+run = request(
+    f"/threads/{thread['thread_id']}/runs",
+    {"assistant_id": assistant["assistant_id"], "input": {"message": "hello-from-autobuild"}},
+    method="POST",
+)
+waited = request(f"/threads/{thread['thread_id']}/runs/{run['run_id']}/wait")
+assert waited["status"] == "success", waited
+output = waited["output"]
+assert output["final_text"] == "external graph heard: hello-from-autobuild", output
 PY

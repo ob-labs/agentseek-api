@@ -1,4 +1,5 @@
 import types
+from pathlib import Path
 
 import pytest
 from fastapi import Request
@@ -42,6 +43,32 @@ async def test_get_auth_backend_loads_custom_backend(monkeypatch: pytest.MonkeyP
     backend = get_auth_backend()
     user = await backend.authenticate(Request({"type": "http", "headers": []}))
     assert user.identity == "custom_user"
+
+
+@pytest.mark.asyncio
+async def test_get_auth_backend_loads_custom_backend_from_python_file(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    auth_file = tmp_path / "custom_auth.py"
+    auth_file.write_text(
+        """
+from agentseek_api.models.auth import User
+
+class CustomBackend:
+    async def authenticate(self, _request):
+        return User(identity="file_user", is_authenticated=True)
+
+backend = CustomBackend
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AUTH_TYPE", "custom")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", f"{auth_file}:backend")
+    auth_middleware._backend = None
+
+    backend = get_auth_backend()
+    user = await backend.authenticate(Request({"type": "http", "headers": []}))
+    assert user.identity == "file_user"
 
 
 def test_get_auth_backend_custom_requires_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
