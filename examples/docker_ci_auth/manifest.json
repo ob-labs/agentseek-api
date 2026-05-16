@@ -2,6 +2,11 @@
   "graphs": {
     "external_hello": {
       "graph": "../external_graph/graph.py:build_graph"
+    },
+    "subgraph_hitl_agent": {
+      "graph": "../graphs/subgraph_hitl_agent/graph.py:build_graph",
+      "prepare_input": "agentseek_api.services.sample_graphs:_prepare_subgraph_hitl_payload",
+      "extract_output": "agentseek_api.services.sample_graphs:_extract_interrupt_output"
     }
   },
   "auth": {
