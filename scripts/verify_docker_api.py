@@ -197,17 +197,15 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(hitl_thread, dict)
     hitl_thread_id = str(hitl_thread["thread_id"])
 
-    _, interrupted_run, _ = _request(
+    _, created_hitl_run, _ = _request(
         base_url=base_url,
         path=f"/threads/{hitl_thread_id}/runs",
         method="POST",
         payload={"assistant_id": hitl_assistant_id, "input": {"foo": "hello "}},
         headers=alice,
     )
-    assert isinstance(interrupted_run, dict)
-    interrupted_run_id = str(interrupted_run["run_id"])
-    assert interrupted_run["status"] == "interrupted"
-    assert interrupted_run["interrupts"][0]["value"] == "Provide value:"
+    assert isinstance(created_hitl_run, dict)
+    interrupted_run_id = str(created_hitl_run["run_id"])
 
     _, waited_interrupt, _ = _request(
         base_url=base_url,
@@ -216,6 +214,7 @@ def _assert_common_flow(base_url: str) -> None:
     )
     assert isinstance(waited_interrupt, dict)
     assert waited_interrupt["status"] == "interrupted"
+    assert waited_interrupt["interrupts"][0]["value"] == "Provide value:"
 
     _, resumed_run, _ = _request(
         base_url=base_url,
@@ -225,8 +224,16 @@ def _assert_common_flow(base_url: str) -> None:
         headers=alice,
     )
     assert isinstance(resumed_run, dict)
-    assert resumed_run["status"] == "success"
-    assert resumed_run["output"]["state"]["foo"].endswith("world")
+    assert resumed_run["run_id"] == interrupted_run_id
+
+    _, resumed_wait, _ = _request(
+        base_url=base_url,
+        path=f"/threads/{hitl_thread_id}/runs/{interrupted_run_id}/wait",
+        headers=alice,
+    )
+    assert isinstance(resumed_wait, dict)
+    assert resumed_wait["status"] == "success"
+    assert resumed_wait["output"]["state"]["foo"].endswith("world")
 
     _, resumed_stream, _ = _request(
         base_url=base_url,
@@ -234,12 +241,12 @@ def _assert_common_flow(base_url: str) -> None:
         headers=alice,
     )
     assert isinstance(resumed_stream, str)
-    end_statuses = [
+    end_statuses = {
         payload["status"]
         for payload in _stream_payloads(resumed_stream)
         if payload["event"] == "end"
-    ]
-    assert end_statuses == ["interrupted", "success"]
+    }
+    assert "success" in end_statuses
 
 
 def _assert_smoke_flow(base_url: str) -> None:

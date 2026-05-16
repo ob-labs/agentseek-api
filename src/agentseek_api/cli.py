@@ -94,12 +94,20 @@ def _resolve_path_from_config(path_text: str, *, config_path: Path) -> Path:
     return path.resolve()
 
 
-def _normalize_symbol_reference(reference: str, *, config_path: Path) -> str:
+def _split_symbol_reference(reference: str) -> tuple[str, str] | None:
     if ":" not in reference:
-        return reference
-    module_name, symbol_name = reference.split(":", maxsplit=1)
+        return None
+    module_name, symbol_name = reference.rsplit(":", maxsplit=1)
     if not module_name or not symbol_name:
+        return None
+    return module_name, symbol_name
+
+
+def _normalize_symbol_reference(reference: str, *, config_path: Path) -> str:
+    parts = _split_symbol_reference(reference)
+    if parts is None:
         return reference
+    module_name, symbol_name = parts
     if module_name.endswith(".py") or module_name.startswith(".") or "/" in module_name or "\\" in module_name:
         resolved_module = _resolve_path_from_config(module_name, config_path=config_path)
         return f"{resolved_module}:{symbol_name}"
@@ -253,11 +261,10 @@ def _container_config_path(*, config_path: Path, cwd: Path) -> str:
 
 
 def _containerize_symbol_reference(reference: str, *, cwd: Path) -> str:
-    if ":" not in reference:
+    parts = _split_symbol_reference(reference)
+    if parts is None:
         return reference
-    module_name, symbol_name = reference.split(":", maxsplit=1)
-    if not module_name or not symbol_name:
-        return reference
+    module_name, symbol_name = parts
     if module_name.endswith(".py") or module_name.startswith(".") or "/" in module_name or "\\" in module_name:
         resolved_module = _resolve_path(module_name, cwd=cwd)
         return f"{_container_config_path(config_path=resolved_module, cwd=cwd)}:{symbol_name}"

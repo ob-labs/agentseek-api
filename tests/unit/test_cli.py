@@ -379,6 +379,24 @@ def test_build_runtime_env_rejects_non_scalar_config_env_value(tmp_path: Path) -
         build_runtime_env(config_path=config_path, env_file=None, cwd=tmp_path, base_env={})
 
 
+def test_containerize_symbol_reference_supports_windows_drive_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    expected_path = tmp_path / "auth.py"
+    monkeypatch.setattr(cli_module, "_resolve_path", lambda path_text, *, cwd: expected_path)
+    monkeypatch.setattr(
+        cli_module,
+        "_container_config_path",
+        lambda *, config_path, cwd: "/deps/agent/auth.py",
+    )
+
+    result = cli_module._containerize_symbol_reference(r"C:\workspace\auth.py:backend", cwd=tmp_path)
+
+    assert result == "/deps/agent/auth.py:backend"
+
+
 def test_dockerfile_command_requires_valid_config_object(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 

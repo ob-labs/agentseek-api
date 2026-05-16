@@ -73,7 +73,7 @@ def _load_module_symbol(*, dotted_path: str, graph_id: str, field_name: str, man
             f"AGENTSEEK_GRAPHS='{manifest_path}' graph '{graph_id}' field '{field_name}' must use 'module.path:symbol'."
         )
 
-    module_name, symbol_name = dotted_path.split(":", maxsplit=1)
+    module_name, symbol_name = dotted_path.rsplit(":", maxsplit=1)
     if not module_name or not symbol_name:
         raise GraphManifestError(
             f"AGENTSEEK_GRAPHS='{manifest_path}' graph '{graph_id}' field '{field_name}' must use 'module.path:symbol'."

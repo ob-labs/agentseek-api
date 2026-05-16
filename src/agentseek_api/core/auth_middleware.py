@@ -38,7 +38,7 @@ def _load_custom_backend() -> AuthBackend | None:
             f"Invalid AUTH_MODULE_PATH='{auth_module_path}'. Expected format 'module.path:symbol'."
         )
 
-    module_name, symbol = auth_module_path.split(":", maxsplit=1)
+    module_name, symbol = auth_module_path.rsplit(":", maxsplit=1)
     if not module_name or not symbol:
         raise RuntimeError(
             f"Invalid AUTH_MODULE_PATH='{auth_module_path}'. Expected format 'module.path:symbol'."
