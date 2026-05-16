@@ -210,6 +210,17 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
     assert "Unsupported option(s) for 'agentseek dev': --tunnel" in stderr.getvalue()
 
 
+def test_dev_command_rejects_missing_explicit_config(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    stderr = io.StringIO()
+
+    exit_code = main(["dev", "--config", str(tmp_path / "missing.json")], cwd=tmp_path, stderr=stderr)
+
+    assert exit_code == 2
+    assert "does not exist" in stderr.getvalue()
+
+
 def test_version_reports_cli_and_package_versions() -> None:
     from agentseek_api import __version__
     from agentseek_api.cli import main
@@ -348,6 +359,26 @@ def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
     assert env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
+def test_build_runtime_env_rejects_invalid_config_env_shape(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text('{"graphs":{"chat":"chat.graph:graph"},"env":["bad"]}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="must set 'env' to a path string or key/value object"):
+        build_runtime_env(config_path=config_path, env_file=None, cwd=tmp_path, base_env={})
+
+
+def test_build_runtime_env_rejects_non_scalar_config_env_value(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text('{"graphs":{"chat":"chat.graph:graph"},"env":{"BAD":[]}}', encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="env mapping values must be scalar"):
+        build_runtime_env(config_path=config_path, env_file=None, cwd=tmp_path, base_env={})
+
+
 def test_dockerfile_command_requires_valid_config_object(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -359,6 +390,76 @@ def test_dockerfile_command_requires_valid_config_object(tmp_path: Path) -> None
 
     assert exit_code == 2
     assert "must contain a top-level JSON object" in stderr.getvalue()
+
+
+def test_dockerfile_command_rejects_invalid_auth_and_missing_pip_config(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "auth": [],
+  "pip_config_file": "./missing.conf"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    stderr = io.StringIO()
+
+    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+
+    assert exit_code == 2
+    assert "field 'auth' must be an object" in stderr.getvalue()
+
+
+def test_dockerfile_command_rejects_missing_pip_config_file(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "pip_config_file": "./missing.conf"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    stderr = io.StringIO()
+
+    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+
+    assert exit_code == 2
+    assert "Pip config file" in stderr.getvalue()
+
+
+def test_dockerfile_command_rejects_unsupported_image_distro(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "image_distro": "wolfi"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    stderr = io.StringIO()
+
+    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+
+    assert exit_code == 2
+    assert "not supported without an explicit base_image" in stderr.getvalue()
 
 
 def test_build_command_requires_config_file(tmp_path: Path) -> None:
@@ -450,6 +551,30 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
     assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
     assert capture.calls[1] == ["docker", "compose", "-f", str(compose_path.resolve()), "up", "-d", "--force-recreate"]
     assert capture.calls[2][-1] == "agentseek:test"
+
+
+def test_up_command_rejects_missing_docker_compose_file(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    stderr = io.StringIO()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--docker-compose",
+            str(tmp_path / "missing-compose.yml"),
+        ],
+        cwd=tmp_path,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert "Docker compose file" in stderr.getvalue()
 
 
 def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: Path) -> None:
@@ -572,6 +697,13 @@ def test_up_command_waits_for_http_health_when_requested(tmp_path: Path, monkeyp
 
     assert exit_code == 0
     assert waited == [("http://127.0.0.1:8123/health", 30.0)]
+
+
+def test_wait_for_http_ready_times_out() -> None:
+    from agentseek_api.cli import _wait_for_http_ready
+
+    with pytest.raises(RuntimeError, match="Timed out waiting"):
+        _wait_for_http_ready("http://127.0.0.1:9/health", timeout_seconds=0.01)
 
 
 def test_up_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None:
