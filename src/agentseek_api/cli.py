@@ -403,7 +403,7 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
             *config.dockerfile_lines,
             f"ENV AGENTSEEK_GRAPHS={container_config}",
             "EXPOSE 2026",
-            'CMD ["agentseek", "serve", "--host", "0.0.0.0", "--port", "2026"]',
+            'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2026"]',
             "",
         ]
     )

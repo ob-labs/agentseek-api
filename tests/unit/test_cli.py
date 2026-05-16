@@ -291,7 +291,7 @@ def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: P
     assert 'COPY . /deps/agent' in content
     assert 'ENV PYTHONPATH=/deps/agent' in content
     assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json' in content
-    assert 'CMD ["agentseek", "serve", "--host", "0.0.0.0", "--port", "2026"]' in content
+    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2026"]' in content
 
 
 def test_dockerfile_command_honors_base_image_python_and_custom_lines(tmp_path: Path) -> None:
@@ -490,7 +490,7 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Pa
     assert 'RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*' in generated
     assert 'ENV PYTHONPATH=/deps/agent' in generated
     assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json' in generated
-    assert 'CMD ["agentseek", "serve", "--host", "0.0.0.0", "--port", "2026"]' in generated
+    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2026"]' in generated
 
 
 def test_build_runtime_env_rejects_invalid_env_lines(tmp_path: Path) -> None:
