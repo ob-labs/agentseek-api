@@ -301,6 +301,14 @@ def test_dockerfile_command_honors_base_image_python_and_custom_lines(tmp_path: 
     package_dir.mkdir()
     (package_dir / "__init__.py").write_text("", encoding="utf-8")
     (package_dir / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text(
+        """
+[project]
+name = "sample-project"
+version = "0.1.0"
+""".strip(),
+        encoding="utf-8",
+    )
     pip_conf = tmp_path / "pip.conf"
     pip_conf.write_text("[global]\nindex-url = https://pypi.org/simple\n", encoding="utf-8")
     config_path = tmp_path / "langgraph.json"
@@ -372,7 +380,35 @@ version = "0.1.0"
     assert "RUN pip install --no-cache-dir /deps/agent/sample_project/local_pkg" in content
     assert "RUN pip install --no-cache-dir -r /deps/agent/sample_project/reqs/requirements.txt" in content
     assert "RUN pip install --no-cache-dir httpx" in content
-    assert "RUN pip install --no-cache-dir ." in content
+    assert "RUN pip install --no-cache-dir ." not in content
+
+
+def test_dockerfile_command_skips_root_install_when_root_is_not_installable(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    src_dir = tmp_path / "src"
+    src_dir.mkdir()
+    (src_dir / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": ["./src"],
+  "graphs": {
+    "chat": "./src/graph.py:graph"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+
+    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+
+    assert exit_code == 0
+    content = dockerfile_path.read_text(encoding="utf-8")
+    assert "ENV PYTHONPATH=/deps/agent:/deps/agent/src" in content
+    assert "RUN pip install --no-cache-dir ." not in content
 
 
 def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Path) -> None:

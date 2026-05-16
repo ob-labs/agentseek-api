@@ -310,6 +310,14 @@ def _dependency_install_command(*, dependency_path: Path, cwd: Path) -> str | No
     return None
 
 
+def _root_install_command(*, cwd: Path) -> str | None:
+    if (cwd / "pyproject.toml").exists() or (cwd / "setup.py").exists():
+        return "pip install --no-cache-dir ."
+    if (cwd / "requirements.txt").exists():
+        return "pip install --no-cache-dir -r requirements.txt"
+    return None
+
+
 def _docker_dependency_plan(*, config: CliConfig, config_path: Path, cwd: Path) -> tuple[list[str], list[str]]:
     pythonpath_entries = ["/deps/agent"]
     install_commands: list[str] = []
@@ -366,6 +374,9 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
         config_path=config_path,
         cwd=cwd,
     )
+    root_install_command = _root_install_command(cwd=cwd)
+    if root_install_command is not None and root_install_command not in dependency_install_commands:
+        dependency_install_commands.append(root_install_command)
     base_image = base_image_override or config.base_image or _default_base_image(
         python_version=config.python_version,
         image_distro=config.image_distro,
@@ -388,7 +399,6 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
             "COPY . /deps/agent",
             *[f"RUN {pip_install_prefix}{command}" for command in dependency_install_commands],
             *config.dockerfile_lines,
-            f"RUN {pip_install_prefix}pip install --no-cache-dir .",
             f"ENV AGENTSEEK_GRAPHS={container_config}",
             "EXPOSE 2026",
             'CMD ["agentseek", "serve", "--host", "0.0.0.0", "--port", "2026"]',
