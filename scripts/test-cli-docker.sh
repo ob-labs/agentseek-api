@@ -86,12 +86,15 @@ if ! docker exec "$PG_CONTAINER" pg_isready -U postgres -d agentseek >/dev/null 
   exit 1
 fi
 
-uv run agentseek up \
+if ! uv run agentseek up \
   --config examples/external_graph/manifest.json \
   --image "$IMAGE_TAG" \
   --port 8123 \
   --env-file "$TMP_DIR/up.env" \
-  --recreate
+  --recreate; then
+  print_logs
+  exit 1
+fi
 
 for _ in $(seq 1 60); do
   if curl -fsS "http://127.0.0.1:8123/health" >/dev/null 2>&1; then
@@ -144,14 +147,18 @@ output = waited["output"]
 assert output["final_text"] == "external graph heard: hello-from-docker", output
 PY
 
-uv run agentseek up \
+if ! uv run agentseek up \
   --config examples/external_graph/manifest.json \
   --port 8124 \
   --base-image python:3.13-slim-bookworm \
+  --env-file "$TMP_DIR/up.env" \
   --postgres-uri postgresql://postgres:postgres@host.docker.internal:5432/agentseek \
   --no-pull \
   --wait \
-  --recreate
+  --recreate; then
+  print_logs
+  exit 1
+fi
 
 if ! curl -fsS "http://127.0.0.1:8124/health" | grep -q '"healthy"'; then
   print_logs
