@@ -893,8 +893,8 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0] == ["docker", "compose", "-f", str(compose_path.resolve()), "up", "-d", "--force-recreate"]
-    assert capture.calls[1] == ["docker", "rm", "-f", "agentseek-up-8123"]
+    assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
+    assert capture.calls[1] == ["docker", "compose", "-f", str(compose_path.resolve()), "up", "-d", "--force-recreate"]
     assert capture.calls[2][-1] == "agentseek:test"
 
 
@@ -920,6 +920,42 @@ def test_up_command_rejects_missing_docker_compose_file(tmp_path: Path) -> None:
 
     assert exit_code == 2
     assert "Docker compose file" in stderr.getvalue()
+
+
+def test_up_command_rejects_existing_container_before_starting_compose_sidecars(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    compose_path = tmp_path / "docker-compose.yml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    stderr = io.StringIO()
+    capture = _RunCapture()
+
+    def existing_container_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
+        capture(command, env=env, cwd=cwd)
+        if command[:3] == ["docker", "container", "inspect"]:
+            return 0
+        return 0
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--docker-compose",
+            str(compose_path),
+        ],
+        runner=existing_container_runner,
+        cwd=tmp_path,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert capture.calls == [["docker", "container", "inspect", "agentseek-up-8123"]]
+    assert "already exists" in stderr.getvalue()
+    assert "--recreate" in stderr.getvalue()
 
 
 def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: Path) -> None:
