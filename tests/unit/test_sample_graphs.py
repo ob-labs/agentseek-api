@@ -102,7 +102,13 @@ def test_message_content_stringifies_non_string_content() -> None:
 
 def test_build_sample_registry_returns_all_expected_ids() -> None:
     registry = build_sample_registry()
-    for expected in ("stress_test", "subgraph_agent", "react_agent", "subgraph_hitl_agent"):
+    for expected in (
+        "stress_test",
+        "subgraph_agent",
+        "react_agent",
+        "stress_tool_agent",
+        "subgraph_hitl_agent",
+    ):
         assert expected in registry, f"missing {expected}: have {list(registry)}"
         entry = registry[expected]
         assert callable(entry["prepare_input"])

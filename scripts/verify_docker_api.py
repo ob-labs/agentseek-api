@@ -51,6 +51,61 @@ def _stream_payloads(stream_text: str) -> list[dict[str, object]]:
     ]
 
 
+def _assert_sample_run(
+    *,
+    base_url: str,
+    user_headers: dict[str, str],
+    graph_id: str,
+    input_payload: dict[str, object],
+    expected_status: str = "success",
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    _, assistant, _ = _request(
+        base_url=base_url,
+        path="/assistants",
+        method="POST",
+        payload={"name": f"docker-sample-{graph_id}", "graph_id": graph_id},
+    )
+    assert isinstance(assistant, dict)
+    assistant_id = str(assistant["assistant_id"])
+
+    _, thread, _ = _request(
+        base_url=base_url,
+        path="/threads",
+        method="POST",
+        payload={"metadata": {"suite": "docker-samples", "graph_id": graph_id}},
+        headers=user_headers,
+    )
+    assert isinstance(thread, dict)
+    thread_id = str(thread["thread_id"])
+
+    _, run, _ = _request(
+        base_url=base_url,
+        path=f"/threads/{thread_id}/runs",
+        method="POST",
+        payload={"assistant_id": assistant_id, "input": input_payload},
+        headers=user_headers,
+    )
+    assert isinstance(run, dict)
+    run_id = str(run["run_id"])
+
+    _, waited, _ = _request(
+        base_url=base_url,
+        path=f"/threads/{thread_id}/runs/{run_id}/wait",
+        headers=user_headers,
+    )
+    assert isinstance(waited, dict)
+    assert waited["status"] == expected_status
+
+    _, stream_body, stream_content_type = _request(
+        base_url=base_url,
+        path=f"/threads/{thread_id}/runs/{run_id}/stream",
+        headers=user_headers,
+    )
+    assert isinstance(stream_body, str)
+    assert "text/event-stream" in stream_content_type
+    return waited, _stream_payloads(stream_body)
+
+
 def _assert_common_flow(base_url: str) -> None:
     alice = {"x-user-id": "alice"}
     bob = {"x-user-id": "bob"}
@@ -247,6 +302,53 @@ def _assert_common_flow(base_url: str) -> None:
         if payload["event"] == "end"
     }
     assert "success" in end_statuses
+
+    stress_waited, _ = _assert_sample_run(
+        base_url=base_url,
+        user_headers=alice,
+        graph_id="stress_test",
+        input_payload={"delay": 0.0, "steps": 2},
+    )
+    stress_output = stress_waited["output"]
+    assert isinstance(stress_output, dict)
+    assert stress_output["final_json"]["steps_completed"] == 2
+
+    subgraph_waited, _ = _assert_sample_run(
+        base_url=base_url,
+        user_headers=alice,
+        graph_id="subgraph_agent",
+        input_payload={"delay": 0.0, "steps": 1},
+    )
+    subgraph_output = subgraph_waited["output"]
+    assert isinstance(subgraph_output, dict)
+    assert subgraph_output["final_json"]["status"] == "completed"
+
+    react_waited, react_payloads = _assert_sample_run(
+        base_url=base_url,
+        user_headers=alice,
+        graph_id="react_agent",
+        input_payload={"message": "what is the meaning of life?"},
+    )
+    react_output = react_waited["output"]
+    assert isinstance(react_output, dict)
+    assert "42" in str(react_output["final_text"])
+    assert any(payload["event"] == "tool_start" and payload["name"] == "lookup" for payload in react_payloads)
+
+    stress_tool_waited, stress_tool_payloads = _assert_sample_run(
+        base_url=base_url,
+        user_headers=alice,
+        graph_id="stress_tool_agent",
+        input_payload={"delay": 0.0, "steps": 3},
+    )
+    stress_tool_output = stress_tool_waited["output"]
+    assert isinstance(stress_tool_output, dict)
+    assert stress_tool_output["final_json"]["steps_completed"] == 3
+    tool_messages = [message for message in stress_tool_output["transcript"] if message["type"] == "ToolMessage"]
+    assert len(tool_messages) == 3
+    tool_starts = [
+        payload for payload in stress_tool_payloads if payload["event"] == "tool_start" and payload["name"] == "slow_process"
+    ]
+    assert len(tool_starts) == 3
 
 
 def _assert_smoke_flow(base_url: str) -> None:

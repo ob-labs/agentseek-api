@@ -1,4 +1,4 @@
-.PHONY: test test-cov test-cli test-cli-docker test-samples test-e2e test-checkpoints test-seekdb
+.PHONY: test test-cov test-cli test-cli-docker test-cli-dev-samples test-samples test-e2e test-checkpoints test-seekdb
 
 test:
 	uv run pytest tests/unit tests/integration -q
@@ -11,6 +11,9 @@ test-cli:
 
 test-cli-docker:
 	bash ./scripts/test-cli-docker.sh
+
+test-cli-dev-samples:
+	bash ./scripts/test-cli-dev-samples.sh
 
 test-samples:
 	uv run python examples/run_sample_graphs.py

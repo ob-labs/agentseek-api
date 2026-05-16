@@ -3,6 +3,18 @@
     "external_hello": {
       "graph": "../external_graph/graph.py:build_graph"
     },
+    "stress_test": {
+      "graph": "../graphs/stress_test/graph.py:build_graph"
+    },
+    "subgraph_agent": {
+      "graph": "../graphs/subgraph_agent/graph.py:build_graph"
+    },
+    "react_agent": {
+      "graph": "../graphs/react_agent/graph.py:build_graph"
+    },
+    "stress_tool_agent": {
+      "graph": "../graphs/stress_tool_agent/graph.py:build_graph"
+    },
     "subgraph_hitl_agent": {
       "graph": "../graphs/subgraph_hitl_agent/graph.py:build_graph",
       "prepare_input": "agentseek_api.services.sample_graphs:_prepare_subgraph_hitl_payload",

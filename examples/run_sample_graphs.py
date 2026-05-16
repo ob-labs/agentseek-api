@@ -20,6 +20,7 @@ from langchain_core.messages import HumanMessage  # noqa: E402
 
 from graphs.react_agent.graph import graph as react_graph  # noqa: E402
 from graphs.stress_test.graph import graph as stress_graph  # noqa: E402
+from graphs.stress_tool_agent.graph import graph as stress_tool_agent_graph  # noqa: E402
 from graphs.subgraph_agent.graph import graph as subgraph_agent_graph  # noqa: E402
 from graphs.subgraph_hitl_agent.graph import graph as subgraph_hitl_graph  # noqa: E402
 
@@ -52,6 +53,18 @@ async def _run_react_agent() -> None:
     print("react_agent:", final)
 
 
+async def _run_stress_tool_agent() -> None:
+    result = await stress_tool_agent_graph.ainvoke(
+        {"messages": [HumanMessage(content=json.dumps({"delay": 0.01, "steps": 3}))]}
+    )
+    payload = json.loads(result["messages"][-1].content)
+    assert payload["status"] == "completed"
+    assert payload["steps_completed"] == 3
+    tool_messages = [message for message in result["messages"] if type(message).__name__ == "ToolMessage"]
+    assert len(tool_messages) == 3
+    print("stress_tool_agent:", payload)
+
+
 async def _run_subgraph_hitl() -> None:
     result = await subgraph_hitl_graph.ainvoke({"foo": "hello "})
     assert result.get("__interrupt__"), "expected interrupt payload"
@@ -62,6 +75,7 @@ async def main() -> None:
     await _run_stress_test()
     await _run_subgraph_agent()
     await _run_react_agent()
+    await _run_stress_tool_agent()
     await _run_subgraph_hitl()
     print("All sample graphs ran successfully.")
 

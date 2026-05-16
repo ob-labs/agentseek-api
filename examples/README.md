@@ -14,6 +14,7 @@ Every sample is keyed in the API registry by its directory name:
 | `stress_test`        | `graphs/stress_test/graph.py`          | Deterministic loop, no LLM. Good load-test baseline.       |
 | `subgraph_agent`     | `graphs/subgraph_agent/graph.py`       | Outer router delegating to a compiled inner graph.         |
 | `react_agent`        | `graphs/react_agent/graph.py`          | Tool-calling ReAct loop (uses a fake chat model, offline). |
+| `stress_tool_agent`  | `graphs/stress_tool_agent/graph.py`    | Sequential tool-calling stress loop, offline and repeatable. |
 | `subgraph_hitl_agent`| `graphs/subgraph_hitl_agent/graph.py`  | Nested subgraph + `interrupt()` human-in-the-loop pattern. |
 | `external_hello`     | `external_graph/graph.py`              | Manifest-registered external graph example.                |
 
@@ -35,7 +36,7 @@ SeekDB. Useful during development when you want a tight feedback loop.
 Start the server:
 
 ```bash
-uv run uvicorn agentseek_api.main:app --reload --port 2026
+uv run agentseek dev --config examples/sample_graphs_manifest.json --no-reload --port 2026
 ```
 
 Create an assistant bound to the sample you want, submit a run, and wait
@@ -60,8 +61,9 @@ curl -s http://127.0.0.1:2026/threads/$THREAD_ID/runs/$RUN_ID/wait \
 ```
 
 `tests/e2e/e2e_live_http_multi_graph.py` does the full dance against every
-registered sample, and `make test-seekdb` runs it end-to-end against an
-embedded SeekDB instance.
+registered sample. `make test-cli-dev-samples` runs that sweep through the
+`agentseek dev` CLI, and `make test-seekdb` runs it end-to-end against a real
+SeekDB-compatible backend.
 
 ## Adding your own graph
 
