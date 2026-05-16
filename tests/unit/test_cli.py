@@ -869,8 +869,8 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
-    assert capture.calls[1] == ["docker", "compose", "-f", str(compose_path.resolve()), "up", "-d", "--force-recreate"]
+    assert capture.calls[0] == ["docker", "compose", "-f", str(compose_path.resolve()), "up", "-d", "--force-recreate"]
+    assert capture.calls[1] == ["docker", "rm", "-f", "agentseek-up-8123"]
     assert capture.calls[2][-1] == "agentseek:test"
 
 

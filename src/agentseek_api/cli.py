@@ -575,13 +575,6 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
         if build_exit_code != 0:
             return build_exit_code
 
-    container_name = _container_name_for_port(args.port)
-    if args.recreate:
-        runner(["docker", "rm", "-f", container_name], env=env, cwd=str(cwd))
-    elif _container_exists(container_name, runner=runner, env=env, cwd=cwd):
-        raise CliError(
-            f"Container '{container_name}' already exists. Re-run with '--recreate' or remove it manually."
-        )
     if args.docker_compose:
         compose_path = _resolve_path(args.docker_compose, cwd=cwd)
         if not compose_path.exists():
@@ -592,6 +585,14 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
         compose_exit_code = runner(compose_command, env=env, cwd=str(cwd))
         if compose_exit_code != 0:
             return compose_exit_code
+
+    container_name = _container_name_for_port(args.port)
+    if args.recreate:
+        runner(["docker", "rm", "-f", container_name], env=env, cwd=str(cwd))
+    elif _container_exists(container_name, runner=runner, env=env, cwd=cwd):
+        raise CliError(
+            f"Container '{container_name}' already exists. Re-run with '--recreate' or remove it manually."
+        )
 
     command = [
         "docker",
