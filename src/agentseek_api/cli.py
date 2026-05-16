@@ -310,11 +310,12 @@ def _dependency_install_command(*, dependency_path: Path, cwd: Path) -> str | No
     return None
 
 
-def _root_install_command(*, cwd: Path) -> str | None:
-    if (cwd / "pyproject.toml").exists() or (cwd / "setup.py").exists():
-        return "pip install --no-cache-dir ."
-    if (cwd / "requirements.txt").exists():
-        return "pip install --no-cache-dir -r requirements.txt"
+def _root_install_command(*, project_root: Path, cwd: Path) -> str | None:
+    container_path = _container_config_path(config_path=project_root, cwd=cwd)
+    if (project_root / "pyproject.toml").exists() or (project_root / "setup.py").exists():
+        return f"pip install --no-cache-dir {container_path}"
+    if (project_root / "requirements.txt").exists():
+        return f"pip install --no-cache-dir -r {container_path}/requirements.txt"
     return None
 
 
@@ -368,13 +369,14 @@ def _default_base_image(*, python_version: str | None, image_distro: str | None)
 
 def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str | None = None) -> str:
     config = _load_cli_config(config_path)
+    project_root = config_path.parent.resolve()
     container_config = _container_config_path(config_path=config_path, cwd=cwd)
     pythonpath_entries, dependency_install_commands = _docker_dependency_plan(
         config=config,
         config_path=config_path,
         cwd=cwd,
     )
-    root_install_command = _root_install_command(cwd=cwd)
+    root_install_command = _root_install_command(project_root=project_root, cwd=cwd)
     if root_install_command is not None and root_install_command not in dependency_install_commands:
         dependency_install_commands.append(root_install_command)
     base_image = base_image_override or config.base_image or _default_base_image(
