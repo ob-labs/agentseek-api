@@ -332,6 +332,49 @@ def test_dockerfile_command_honors_base_image_python_and_custom_lines(tmp_path: 
     assert "RUN PIP_CONFIG_FILE=/deps/agent/pip.conf pip install --no-cache-dir ." in content
 
 
+def test_dockerfile_command_translates_manifest_dependencies(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    project_dir = tmp_path / "sample_project"
+    project_dir.mkdir()
+    local_pkg_dir = project_dir / "local_pkg"
+    local_pkg_dir.mkdir()
+    (local_pkg_dir / "pyproject.toml").write_text(
+        """
+[project]
+name = "local-pkg"
+version = "0.1.0"
+""".strip(),
+        encoding="utf-8",
+    )
+    requirements_dir = project_dir / "reqs"
+    requirements_dir.mkdir()
+    (requirements_dir / "requirements.txt").write_text("httpx==0.28.1\n", encoding="utf-8")
+    config_path = project_dir / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": [".", "./local_pkg", "./reqs", "httpx"],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+
+    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+
+    assert exit_code == 0
+    content = dockerfile_path.read_text(encoding="utf-8")
+    assert "ENV PYTHONPATH=/deps/agent:/deps/agent/sample_project:/deps/agent/sample_project/local_pkg:/deps/agent/sample_project/reqs" in content
+    assert "RUN pip install --no-cache-dir /deps/agent/sample_project/local_pkg" in content
+    assert "RUN pip install --no-cache-dir -r /deps/agent/sample_project/reqs/requirements.txt" in content
+    assert "RUN pip install --no-cache-dir httpx" in content
+    assert "RUN pip install --no-cache-dir ." in content
+
+
 def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 

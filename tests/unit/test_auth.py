@@ -52,11 +52,20 @@ async def test_get_auth_backend_loads_custom_backend_from_python_file(
     auth_file = tmp_path / "custom_auth.py"
     auth_file.write_text(
         """
+from dataclasses import dataclass
+
 from agentseek_api.models.auth import User
+
+@dataclass
+class IdentityConfig:
+    identity: str
+
+
+DEFAULT_IDENTITY = IdentityConfig(identity="file_user")
 
 class CustomBackend:
     async def authenticate(self, _request):
-        return User(identity="file_user", is_authenticated=True)
+        return User(identity=DEFAULT_IDENTITY.identity, is_authenticated=True)
 
 backend = CustomBackend
 """.strip(),

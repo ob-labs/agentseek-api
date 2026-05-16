@@ -35,6 +35,7 @@ class CliError(RuntimeError):
 @dataclass
 class CliConfig:
     graphs: dict[str, object]
+    dependencies: list[str] = field(default_factory=list)
     env_mapping: dict[str, str] = field(default_factory=dict)
     env_file: Path | None = None
     auth_path: str | None = None
@@ -150,6 +151,11 @@ def _normalize_env_mapping(raw_env: object, *, config_path: Path) -> tuple[dict[
 def _load_cli_config(config_path: Path) -> CliConfig:
     payload = _load_config_payload(config_path)
     env_mapping, env_file = _normalize_env_mapping(payload.get("env"), config_path=config_path)
+    raw_dependencies = payload.get("dependencies", [])
+    if raw_dependencies is None:
+        raw_dependencies = []
+    if not isinstance(raw_dependencies, list) or not all(isinstance(item, str) and item.strip() for item in raw_dependencies):
+        raise CliError(f"Config file '{config_path}' field 'dependencies' must be an array of non-empty strings.")
 
     auth_path: str | None = None
     raw_auth = payload.get("auth")
@@ -190,6 +196,7 @@ def _load_cli_config(config_path: Path) -> CliConfig:
         raise CliError(f"Config file '{config_path}' field 'dockerfile_lines' must be an array of strings.")
 
     return CliConfig(
+        dependencies=[item.strip() for item in raw_dependencies],
         graphs=payload["graphs"],  # validated by _load_config_payload
         env_mapping=env_mapping,
         env_file=env_file,
@@ -283,6 +290,53 @@ def _containerize_symbol_reference(reference: str, *, cwd: Path) -> str:
     return reference
 
 
+def _resolve_dependency_path(dependency: str, *, config_path: Path) -> Path:
+    dependency_path = Path(dependency).expanduser()
+    if dependency_path.is_absolute():
+        return dependency_path.resolve()
+    return (config_path.parent / dependency_path).resolve()
+
+
+def _is_local_dependency(dependency: str) -> bool:
+    return dependency == "." or dependency.startswith(".") or "/" in dependency or "\\" in dependency
+
+
+def _dependency_install_command(*, dependency_path: Path, cwd: Path) -> str | None:
+    container_path = _container_config_path(config_path=dependency_path, cwd=cwd)
+    if (dependency_path / "pyproject.toml").exists() or (dependency_path / "setup.py").exists():
+        return f"pip install --no-cache-dir {container_path}"
+    if (dependency_path / "requirements.txt").exists():
+        return f"pip install --no-cache-dir -r {container_path}/requirements.txt"
+    return None
+
+
+def _docker_dependency_plan(*, config: CliConfig, config_path: Path, cwd: Path) -> tuple[list[str], list[str]]:
+    pythonpath_entries = ["/deps/agent"]
+    install_commands: list[str] = []
+    seen_pythonpath: set[str] = set()
+    seen_install_commands: set[str] = set()
+
+    for dependency in config.dependencies:
+        if _is_local_dependency(dependency):
+            dependency_path = _resolve_dependency_path(dependency, config_path=config_path)
+            container_path = _container_config_path(config_path=dependency_path, cwd=cwd)
+            if container_path not in seen_pythonpath:
+                pythonpath_entries.append(container_path)
+                seen_pythonpath.add(container_path)
+            install_command = _dependency_install_command(dependency_path=dependency_path, cwd=cwd)
+            if install_command is not None and install_command not in seen_install_commands:
+                install_commands.append(install_command)
+                seen_install_commands.add(install_command)
+            continue
+
+        install_command = f"pip install --no-cache-dir {dependency}"
+        if install_command not in seen_install_commands:
+            install_commands.append(install_command)
+            seen_install_commands.add(install_command)
+
+    return pythonpath_entries, install_commands
+
+
 def build_container_env(*, config_path: Path, env_file: str | None, cwd: Path) -> dict[str, str]:
     env = build_runtime_env(config_path=config_path, env_file=env_file, cwd=cwd, base_env={})
     env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
@@ -307,6 +361,11 @@ def _default_base_image(*, python_version: str | None, image_distro: str | None)
 def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str | None = None) -> str:
     config = _load_cli_config(config_path)
     container_config = _container_config_path(config_path=config_path, cwd=cwd)
+    pythonpath_entries, dependency_install_commands = _docker_dependency_plan(
+        config=config,
+        config_path=config_path,
+        cwd=cwd,
+    )
     base_image = base_image_override or config.base_image or _default_base_image(
         python_version=config.python_version,
         image_distro=config.image_distro,
@@ -321,12 +380,13 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
             "",
             "ENV PYTHONDONTWRITEBYTECODE=1",
             "ENV PYTHONUNBUFFERED=1",
-            "ENV PYTHONPATH=/deps/agent",
+            f"ENV PYTHONPATH={':'.join(pythonpath_entries)}",
             "",
             "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*",
             "",
             "WORKDIR /deps/agent",
             "COPY . /deps/agent",
+            *[f"RUN {pip_install_prefix}{command}" for command in dependency_install_commands],
             *config.dockerfile_lines,
             f"RUN {pip_install_prefix}pip install --no-cache-dir .",
             f"ENV AGENTSEEK_GRAPHS={container_config}",

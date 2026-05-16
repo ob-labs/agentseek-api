@@ -1,3 +1,4 @@
+import sys
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -25,6 +26,7 @@ def _load_python_file_backend(module_ref: str) -> object:
     if spec is None or spec.loader is None:
         raise RuntimeError(f"Could not load AUTH_MODULE_PATH module file '{file_path}'.")
     module = module_from_spec(spec)
+    sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
