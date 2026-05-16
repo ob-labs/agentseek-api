@@ -189,7 +189,7 @@ def build_runtime_env(
     cwd: Path,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    env = dict(base_env or os.environ)
+    env = dict(os.environ if base_env is None else base_env)
     config: CliConfig | None = _load_cli_config(config_path) if config_path is not None else None
     if config is not None:
         if config.env_file is not None:
@@ -250,6 +250,27 @@ def _container_config_path(*, config_path: Path, cwd: Path) -> str:
     except ValueError as exc:
         raise CliError(f"Config file '{config_path}' must live under the project root '{cwd}' for Docker builds.") from exc
     return f"/deps/agent/{relative_path.as_posix()}"
+
+
+def _containerize_symbol_reference(reference: str, *, cwd: Path) -> str:
+    if ":" not in reference:
+        return reference
+    module_name, symbol_name = reference.split(":", maxsplit=1)
+    if not module_name or not symbol_name:
+        return reference
+    if module_name.endswith(".py") or module_name.startswith(".") or "/" in module_name or "\\" in module_name:
+        resolved_module = _resolve_path(module_name, cwd=cwd)
+        return f"{_container_config_path(config_path=resolved_module, cwd=cwd)}:{symbol_name}"
+    return reference
+
+
+def build_container_env(*, config_path: Path, env_file: str | None, cwd: Path) -> dict[str, str]:
+    env = build_runtime_env(config_path=config_path, env_file=env_file, cwd=cwd, base_env={})
+    env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
+    auth_module_path = env.get("AUTH_MODULE_PATH")
+    if auth_module_path:
+        env["AUTH_MODULE_PATH"] = _containerize_symbol_reference(auth_module_path, cwd=cwd)
+    return env
 
 
 def _default_base_image(*, python_version: str | None, image_distro: str | None) -> str:
@@ -360,6 +381,7 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
 
     image = args.image
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    container_env = build_container_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
     if not image:
         image = f"agentseek-up:{args.port}"
         generated_dockerfile = write_dockerfile(
@@ -402,12 +424,8 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
         "-p",
         f"{args.port}:2026",
     ]
-    if args.env_file:
-        resolved_env_file = _resolve_path(args.env_file, cwd=cwd)
-        if not resolved_env_file.exists():
-            raise CliError(f"Env file '{resolved_env_file}' does not exist.")
-        command.extend(["--env-file", str(resolved_env_file)])
-    command.extend(["-e", f"AGENTSEEK_GRAPHS={_container_config_path(config_path=config_path, cwd=cwd)}"])
+    for key, value in sorted(container_env.items()):
+        command.extend(["-e", f"{key}={value}"])
     if args.postgres_uri:
         command.extend(
             [

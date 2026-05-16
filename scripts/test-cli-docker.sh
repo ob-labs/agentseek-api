@@ -38,10 +38,12 @@ OCEANBASE_PASSWORD=
 OCEANBASE_DB_NAME=seekdb
 EOF
 
-uv run agentseek dockerfile --config examples/external_graph/manifest.json "$TMP_DIR/agentseek.Dockerfile"
+CONFIG_PATH="examples/docker_ci_auth/manifest.json"
+
+uv run agentseek dockerfile --config "$CONFIG_PATH" "$TMP_DIR/agentseek.Dockerfile"
 test -s "$TMP_DIR/agentseek.Dockerfile"
 
-uv run agentseek build --config examples/external_graph/manifest.json -t "$IMAGE_TAG"
+uv run agentseek build --config "$CONFIG_PATH" -t "$IMAGE_TAG"
 
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --rm \
@@ -87,7 +89,7 @@ if ! docker exec "$PG_CONTAINER" pg_isready -U postgres -d agentseek >/dev/null 
 fi
 
 if ! uv run agentseek up \
-  --config examples/external_graph/manifest.json \
+  --config "$CONFIG_PATH" \
   --image "$IMAGE_TAG" \
   --port 8123 \
   --env-file "$TMP_DIR/up.env" \
@@ -109,46 +111,10 @@ if ! curl -fsS "http://127.0.0.1:8123/health" | grep -q '"healthy"'; then
   exit 1
 fi
 
-if ! curl -fsS "http://127.0.0.1:8123/info" | grep -q '"version"'; then
-  print_logs
-  echo "App info endpoint did not return version metadata." >&2
-  exit 1
-fi
-
-uv run python - <<'PY'
-import json
-import urllib.request
-
-base_url = "http://127.0.0.1:8123"
-headers = {"Content-Type": "application/json", "x-user-id": "cli-docker-smoke"}
-
-def request(path: str, payload: dict | None = None, method: str = "GET") -> dict:
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}{path}",
-        data=data,
-        method=method,
-        headers=headers,
-    )
-    with urllib.request.urlopen(req, timeout=30.0) as resp:
-        body = resp.read().decode("utf-8")
-    return json.loads(body) if body else {}
-
-assistant = request("/assistants", {"name": "external-smoke", "graph_id": "external_hello"}, method="POST")
-thread = request("/threads", {"metadata": {"source": "cli-docker-smoke"}}, method="POST")
-run = request(
-    f"/threads/{thread['thread_id']}/runs",
-    {"assistant_id": assistant["assistant_id"], "input": {"message": "hello-from-docker"}},
-    method="POST",
-)
-waited = request(f"/threads/{thread['thread_id']}/runs/{run['run_id']}/wait")
-assert waited["status"] == "success", waited
-output = waited["output"]
-assert output["final_text"] == "external graph heard: hello-from-docker", output
-PY
+uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8123 --mode full
 
 if ! uv run agentseek up \
-  --config examples/external_graph/manifest.json \
+  --config "$CONFIG_PATH" \
   --port 8124 \
   --base-image python:3.13-slim-bookworm \
   --env-file "$TMP_DIR/up.env" \
@@ -166,34 +132,4 @@ if ! curl -fsS "http://127.0.0.1:8124/health" | grep -q '"healthy"'; then
   exit 1
 fi
 
-uv run python - <<'PY'
-import json
-import urllib.request
-
-base_url = "http://127.0.0.1:8124"
-headers = {"Content-Type": "application/json", "x-user-id": "cli-docker-autobuild"}
-
-def request(path: str, payload: dict | None = None, method: str = "GET") -> dict:
-    data = None if payload is None else json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        f"{base_url}{path}",
-        data=data,
-        method=method,
-        headers=headers,
-    )
-    with urllib.request.urlopen(req, timeout=30.0) as resp:
-        body = resp.read().decode("utf-8")
-    return json.loads(body) if body else {}
-
-assistant = request("/assistants", {"name": "external-autobuild", "graph_id": "external_hello"}, method="POST")
-thread = request("/threads", {"metadata": {"source": "cli-docker-autobuild"}}, method="POST")
-run = request(
-    f"/threads/{thread['thread_id']}/runs",
-    {"assistant_id": assistant["assistant_id"], "input": {"message": "hello-from-autobuild"}},
-    method="POST",
-)
-waited = request(f"/threads/{thread['thread_id']}/runs/{run['run_id']}/wait")
-assert waited["status"] == "success", waited
-output = waited["output"]
-assert output["final_text"] == "external graph heard: hello-from-autobuild", output
-PY
+uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8124 --mode smoke

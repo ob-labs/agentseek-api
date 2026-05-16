@@ -1,0 +1,10 @@
+{
+  "graphs": {
+    "external_hello": {
+      "graph": "../external_graph/graph.py:build_graph"
+    }
+  },
+  "auth": {
+    "path": "./auth_backend.py:HeaderAuthBackend"
+  }
+}

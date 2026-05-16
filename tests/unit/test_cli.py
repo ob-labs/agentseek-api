@@ -515,10 +515,12 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
         "host.docker.internal:host-gateway",
         "-p",
         "8123:2026",
-        "--env-file",
-        str(env_file.resolve()),
         "-e",
         "AGENTSEEK_GRAPHS=/deps/agent/langgraph.json",
+        "-e",
+        "METADATA_DB_URL=sqlite+aiosqlite:////tmp/agentseek.db",
+        "-e",
+        "OCEANBASE_HOST=host.docker.internal",
         "agentseek:test",
     ]
 
@@ -625,6 +627,70 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: 
         "-e",
         "METADATA_DB_BACKEND=postgresql",
         "agentseek-up:8124",
+    ]
+
+
+def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    package_dir = tmp_path / "chat"
+    package_dir.mkdir()
+    (package_dir / "__init__.py").write_text("", encoding="utf-8")
+    (package_dir / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "env": {
+    "FEATURE_FLAG": true
+  },
+  "auth": {
+    "path": "./auth.py:backend"
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    assert capture.calls[0] == [
+        "docker",
+        "run",
+        "--detach",
+        "--rm",
+        "--name",
+        "agentseek-up-8123",
+        "--add-host",
+        "host.docker.internal:host-gateway",
+        "-p",
+        "8123:2026",
+        "-e",
+        "AGENTSEEK_GRAPHS=/deps/agent/langgraph.json",
+        "-e",
+        "AUTH_MODULE_PATH=/deps/agent/auth.py:backend",
+        "-e",
+        "AUTH_TYPE=custom",
+        "-e",
+        "FEATURE_FLAG=True",
+        "agentseek:test",
     ]
 
 
