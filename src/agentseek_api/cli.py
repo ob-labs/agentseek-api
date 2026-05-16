@@ -15,6 +15,18 @@ from typing import TextIO
 
 from agentseek_api import __version__
 
+__all__ = [
+    "CliError",
+    "build_container_env",
+    "build_runtime_env",
+    "build_uvicorn_command",
+    "create_parser",
+    "main",
+    "register_subcommands",
+    "run_namespace",
+    "write_dockerfile",
+]
+
 
 class CliError(RuntimeError):
     pass
@@ -461,14 +473,11 @@ def _unimplemented(command_name: str) -> int:
     raise CliError(f"'agentseek {command_name}' is not implemented yet in this milestone slice.")
 
 
-def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agentseek")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    runtime_parent = argparse.ArgumentParser(add_help=False)
-    runtime_parent.add_argument("-c", "--config")
-    runtime_parent.add_argument("--env-file")
-
+def _add_command_parsers(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    *,
+    runtime_parent: argparse.ArgumentParser,
+) -> None:
     dev_parser = subparsers.add_parser("dev", parents=[runtime_parent])
     dev_parser.add_argument("--host", default="127.0.0.1")
     dev_parser.add_argument("--port", default=2026, type=int)
@@ -542,19 +551,40 @@ def create_parser() -> argparse.ArgumentParser:
     dockerfile_parser = subparsers.add_parser("dockerfile", parents=[runtime_parent])
     dockerfile_parser.add_argument("save_path")
 
+
+def register_subcommands(
+    subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
+    *,
+    command_name: str = "agentseek",
+) -> argparse.ArgumentParser:
+    runtime_parent = argparse.ArgumentParser(add_help=False)
+    runtime_parent.add_argument("-c", "--config")
+    runtime_parent.add_argument("--env-file")
+
+    command_parser = subparsers.add_parser(command_name)
+    command_subparsers = command_parser.add_subparsers(dest="command", required=True)
+    _add_command_parsers(command_subparsers, runtime_parent=runtime_parent)
+    return command_parser
+
+
+def create_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="agentseek")
+    runtime_parent = argparse.ArgumentParser(add_help=False)
+    runtime_parent.add_argument("-c", "--config")
+    runtime_parent.add_argument("--env-file")
+    subparsers = parser.add_subparsers(dest="command", required=True)
+    _add_command_parsers(subparsers, runtime_parent=runtime_parent)
     return parser
 
 
-def main(
-    argv: Sequence[str] | None = None,
+def run_namespace(
+    args: argparse.Namespace,
     *,
     runner: Callable[..., int] | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     cwd: str | Path | None = None,
 ) -> int:
-    parser = create_parser()
-    args = parser.parse_args(list(argv) if argv is not None else None)
     command = args.command
     workdir = Path(cwd or Path.cwd()).resolve()
     run = runner or _default_runner
@@ -603,6 +633,19 @@ def main(
     except CliError as exc:
         err.write(f"{exc}\n")
         return 2
+
+
+def main(
+    argv: Sequence[str] | None = None,
+    *,
+    runner: Callable[..., int] | None = None,
+    stdout: TextIO | None = None,
+    stderr: TextIO | None = None,
+    cwd: str | Path | None = None,
+) -> int:
+    parser = create_parser()
+    args = parser.parse_args(list(argv) if argv is not None else None)
+    return run_namespace(args, runner=runner, stdout=stdout, stderr=stderr, cwd=cwd)
 
 
 if __name__ == "__main__":

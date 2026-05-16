@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import argparse
+import importlib
 import io
 from dataclasses import dataclass
 from pathlib import Path
@@ -234,6 +236,43 @@ def test_version_reports_cli_and_package_versions() -> None:
         f"agentseek {__version__}",
         f"agentseek-api {__version__}",
     ]
+
+
+def test_cli_module_is_importable_with_embeddable_entrypoints() -> None:
+    cli_module = importlib.import_module("agentseek_api.cli")
+
+    assert cli_module.main is not None
+    assert cli_module.create_parser is not None
+    assert cli_module.register_subcommands is not None
+    assert cli_module.run_namespace is not None
+
+
+def test_register_subcommands_supports_embedding_under_parent_parser() -> None:
+    from agentseek_api import cli as cli_module
+
+    parser = argparse.ArgumentParser(prog="parent")
+    subparsers = parser.add_subparsers(dest="tool", required=True)
+    cli_module.register_subcommands(subparsers, command_name="agentseek")
+
+    parsed = parser.parse_args(["agentseek", "version"])
+
+    assert parsed.tool == "agentseek"
+    assert parsed.command == "version"
+
+
+def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
+    from agentseek_api import cli as cli_module
+
+    parser = argparse.ArgumentParser(prog="parent")
+    subparsers = parser.add_subparsers(dest="tool", required=True)
+    cli_module.register_subcommands(subparsers, command_name="agentseek")
+    parsed = parser.parse_args(["agentseek", "serve", "--host", "0.0.0.0", "--port", "3030"])
+    capture = _RunCapture()
+
+    exit_code = cli_module.run_namespace(parsed, runner=capture, cwd=tmp_path)
+
+    assert exit_code == 0
+    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
 
 
 def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: Path) -> None:
