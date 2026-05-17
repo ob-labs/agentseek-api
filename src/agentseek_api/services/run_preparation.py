@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -8,6 +9,10 @@ from agentseek_api.models.auth import User
 from agentseek_api.services.executor import get_executor
 from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
 from agentseek_api.services.run_state import run_broker
+
+
+def _is_cancelled_run(run: Run) -> bool:
+    return run.status == "error" and run.last_error == "Run cancelled"
 
 
 async def _execute_and_persist(
@@ -23,6 +28,8 @@ async def _execute_and_persist(
     async with session_factory() as execution_session:
         db_run = await execution_session.scalar(select(Run).where(Run.run_id == run_id))
         if db_run is None:
+            return
+        if _is_cancelled_run(db_run):
             return
 
         db_run.status = "running"
@@ -42,10 +49,14 @@ async def _execute_and_persist(
                 graph_id=graph_id,
                 resume=resume if is_resume else UNSET,
             )
-            _apply_execution_result(db_run, result)
+            await execution_session.refresh(db_run)
+            if not _is_cancelled_run(db_run):
+                _apply_execution_result(db_run, result)
         except Exception as exc:  # noqa: BLE001
-            db_run.status = "error"
-            db_run.last_error = str(exc)
+            await execution_session.refresh(db_run)
+            if not _is_cancelled_run(db_run):
+                db_run.status = "error"
+                db_run.last_error = str(exc)
 
         thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
         if thread is not None:
@@ -86,6 +97,8 @@ async def prepare_and_submit_run(
         if assistant is None:
             raise ValueError("Assistant not found")
         graph_id = assistant.graph_id
+        thread.status = "busy"
+        thread.state_updated_at = datetime.now(UTC)
         run = Run(
             thread_id=thread_id,
             assistant_id=assistant_id,
@@ -128,6 +141,10 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
         payload = run.input_json
         run.status = "pending"
         run.last_error = None
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        if thread is not None:
+            thread.status = "busy"
+            thread.state_updated_at = datetime.now(UTC)
         await session.commit()
 
     await get_executor().submit(

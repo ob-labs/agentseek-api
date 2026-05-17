@@ -1,10 +1,12 @@
+from datetime import UTC, datetime
+
 from sqlalchemy import select
 
 from fastapi import APIRouter, Depends, Response
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import Run
+from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreate, RunRead, RunsCancelRequest, ThreadCreate
 from agentseek_api.models.auth import User
 from agentseek_api.services.thread_service import create_thread_for_user
@@ -57,10 +59,21 @@ async def cancel_runs(payload: RunsCancelRequest, user: User = Depends(get_curre
         if payload.status is not None and payload.status != "all":
             query = query.where(Run.status == payload.status)
         rows = (await session.scalars(query)).all()
+        cancelled_thread_ids: set[str] = set()
         for row in rows:
             if row.status not in {"success", "error", "interrupted"}:
                 row.status = "error"
                 row.last_error = "Run cancelled"
+                cancelled_thread_ids.add(row.thread_id)
+        if cancelled_thread_ids:
+            threads = (
+                await session.scalars(
+                    select(Thread).where(Thread.thread_id.in_(cancelled_thread_ids), Thread.user_id == user.identity)
+                )
+            ).all()
+            for thread in threads:
+                thread.status = "error"
+                thread.state_updated_at = datetime.now(UTC)
         await session.commit()
     if rows:
         await _best_effort_delete_for_runs([row.run_id for row in rows])

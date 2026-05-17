@@ -1,12 +1,18 @@
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AssistantCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     name: str
     graph_id: str = "default"
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    description: str | None = None
 
 
 class AssistantSearchRequest(BaseModel):
@@ -42,7 +48,10 @@ class AssistantRead(BaseModel):
 
 
 class ThreadCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
 
 
 class ThreadSearchRequest(BaseModel):
@@ -56,6 +65,8 @@ class ThreadSearchRequest(BaseModel):
 
 
 class ThreadPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     metadata: dict[str, Any] | None = None
 
 

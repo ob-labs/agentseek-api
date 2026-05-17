@@ -14,8 +14,21 @@ async def _create_assistant(
     *,
     name: str,
     graph_id: str = "default",
+    metadata: dict[str, object] | None = None,
+    config: dict[str, object] | None = None,
+    context: dict[str, object] | None = None,
+    description: str | None = None,
 ) -> dict[str, object]:
-    response = await client.post("/assistants", json={"name": name, "graph_id": graph_id})
+    payload: dict[str, object] = {"name": name, "graph_id": graph_id}
+    if metadata is not None:
+        payload["metadata"] = metadata
+    if config is not None:
+        payload["config"] = config
+    if context is not None:
+        payload["context"] = context
+    if description is not None:
+        payload["description"] = description
+    response = await client.post("/assistants", json=payload)
     assert response.status_code == 200
     return response.json()
 
@@ -25,8 +38,12 @@ async def _create_thread(
     *,
     user_id: str,
     metadata: dict[str, object],
+    config: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    response = await client.post("/threads", json={"metadata": metadata}, headers=_user_headers(user_id))
+    payload: dict[str, object] = {"metadata": metadata}
+    if config is not None:
+        payload["config"] = config
+    response = await client.post("/threads", json=payload, headers=_user_headers(user_id))
     assert response.status_code == 200
     return response.json()
 
@@ -91,8 +108,20 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         assert metrics_json.status_code == 200
         assert metrics_json.json()["checks"]["checkpointer"] == "ok"
 
-        default_assistant = await _create_assistant(client, name="live-default", graph_id="default")
+        default_assistant = await _create_assistant(
+            client,
+            name="live-default",
+            graph_id="default",
+            metadata={"suite": "live-create"},
+            config={"temperature": 0},
+            context={"tenant": "mysql-family"},
+            description="live assistant create",
+        )
         react_assistant = await _create_assistant(client, name="live-react", graph_id="react_agent")
+        assert default_assistant["metadata"] == {"suite": "live-create"}
+        assert default_assistant["config"] == {"temperature": 0}
+        assert default_assistant["context"] == {"tenant": "mysql-family"}
+        assert default_assistant["description"] == "live assistant create"
 
         listed = await client.get("/assistants")
         assert listed.status_code == 200
@@ -177,6 +206,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
             client,
             user_id=user_id,
             metadata={"topic": "alpha", "tag": "keep", "suite": suite_id},
+            config={"retention": "short"},
         )
         beta_thread = await _create_thread(client, user_id=user_id, metadata={"topic": "beta"})
         _ = await _create_thread(client, user_id="thread-live-other", metadata={"topic": "alpha"})
@@ -220,18 +250,21 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         fetched = await client.get(f"/threads/{alpha_thread['thread_id']}", headers=_user_headers(user_id))
         assert fetched.status_code == 200
         assert fetched.json()["thread_id"] == alpha_thread["thread_id"]
+        assert fetched.json()["config"] == {"retention": "short"}
 
         patched = await client.patch(
             f"/threads/{alpha_thread['thread_id']}",
-            json={"metadata": {"topic": "alpha", "tag": "patched"}},
+            json={"metadata": {"tag": "patched"}},
             headers=_user_headers(user_id),
         )
         assert patched.status_code == 200
         assert patched.json()["metadata"]["tag"] == "patched"
+        assert patched.json()["metadata"]["topic"] == "alpha"
 
         state = await client.get(f"/threads/{alpha_thread['thread_id']}/state", headers=_user_headers(user_id))
         assert state.status_code == 200
         run_checkpoint_id = state.json()["checkpoint"]["checkpoint_id"]
+        assert "output" in state.json()["values"]
 
         history = await client.get(f"/threads/{alpha_thread['thread_id']}/history", headers=_user_headers(user_id))
         assert history.status_code == 200
@@ -265,11 +298,12 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
 
         snapshotted = await client.post(
             f"/threads/{alpha_thread['thread_id']}/state/checkpoint",
-            json={"values": {"snap": 1}},
+            json={"checkpoint_id": manual_checkpoint_id},
             headers=_user_headers(user_id),
         )
         assert snapshotted.status_code == 200
         assert snapshotted.json()["checkpoint"]["thread_id"] == alpha_thread["thread_id"]
+        assert snapshotted.json()["values"]["manual"] is True
 
         copied = await client.post(f"/threads/{alpha_thread['thread_id']}/copy", headers=_user_headers(user_id))
         assert copied.status_code == 200
@@ -318,7 +352,8 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
 
         pruned_history = await client.get(f"/threads/{alpha_thread['thread_id']}/history", headers=_user_headers(user_id))
         assert pruned_history.status_code == 200
-        assert len(pruned_history.json()) == 2
+        assert len(pruned_history.json()) == 1
+        assert pruned_history.json()[0]["values"]["manual"] == "second"
 
         thread_stream = await client.get(f"/threads/{alpha_thread['thread_id']}/stream", headers=_user_headers(user_id))
         assert thread_stream.status_code == 200

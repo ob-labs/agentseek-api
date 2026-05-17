@@ -1,16 +1,16 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 from sqlalchemy import delete, select
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from fastapi.responses import StreamingResponse
-from fastapi import Response
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import Run
+from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreate, RunRead, RunResume
 from agentseek_api.models.auth import User
 from agentseek_api.services.run_preparation import prepare_and_submit_run, resume_run
@@ -153,6 +153,12 @@ async def cancel_run(
         if row.status not in {"success", "error", "interrupted"}:
             row.status = "error"
             row.last_error = "Run cancelled"
+            thread = await session.scalar(
+                select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
+            )
+            if thread is not None:
+                thread.status = "error"
+                thread.state_updated_at = datetime.now(UTC)
             await session.commit()
     await _best_effort_delete_for_runs([run_id])
     return {}

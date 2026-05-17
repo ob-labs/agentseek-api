@@ -130,12 +130,18 @@ def test_thread_routes_cover_search_prune_delete_and_missing_paths(client: TestC
     assert client.get(f"/threads/{missing_id}/state", headers=missing_headers).status_code == 404
     assert client.get(f"/threads/{missing_id}/history", headers=missing_headers).status_code == 404
     assert client.post(f"/threads/{missing_id}/history", headers=missing_headers).status_code == 404
-    assert client.get(f"/threads/{missing_id}/state/checkpoint", headers=missing_headers).status_code == 404
+    missing_checkpoint = client.post(
+        f"/threads/{missing_id}/state/checkpoint",
+        json={"checkpoint_id": "missing"},
+        headers=missing_headers,
+    )
+    assert missing_checkpoint.status_code == 404
     assert client.post(f"/threads/{missing_id}/state", json={"values": {}}, headers=missing_headers).status_code == 404
     assert client.get(f"/threads/{missing_id}/stream", headers=missing_headers).status_code == 404
 
-    bad_checkpoint = client.get(
-        f"/threads/{keep_thread['thread_id']}/state/00000000-0000-0000-0000-000000000002",
+    bad_checkpoint = client.post(
+        f"/threads/{keep_thread['thread_id']}/state/checkpoint",
+        json={"checkpoint_id": "00000000-0000-0000-0000-000000000002"},
         headers=missing_headers,
     )
     assert bad_checkpoint.status_code == 404

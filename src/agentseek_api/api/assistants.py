@@ -44,7 +44,14 @@ def _filtered_assistant_rows(rows: list[Assistant], payload: AssistantSearchRequ
 async def create_assistant(payload: AssistantCreate) -> AssistantRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = Assistant(name=payload.name, graph_id=payload.graph_id)
+        row = Assistant(
+            name=payload.name,
+            graph_id=payload.graph_id,
+            metadata_json=payload.metadata,
+            config_json=payload.config,
+            context_json=payload.context,
+            description=payload.description,
+        )
         session.add(row)
         await session.commit()
         await session.refresh(row)
@@ -103,7 +110,7 @@ async def patch_assistant(assistant_id: str, payload: AssistantPatch) -> Assista
         if payload.context is not None:
             row.context_json = payload.context
         if payload.metadata is not None:
-            row.metadata_json = payload.metadata
+            row.metadata_json = {**row.metadata_json, **payload.metadata}
         if payload.name is not None:
             row.name = payload.name
         if payload.description is not None:

@@ -72,11 +72,18 @@ def test_checkpoint_state_thread_stream_and_protocol_endpoints(client: TestClien
         json={"assistant_id": assistant_id, "input": {"message": "protocol"}},
     )
     assert created.status_code == 200
-    run_id = created.json()["run_id"]
 
-    state = client.get(f"/threads/{thread_id}/state/{run_id}")
+    state = client.get(f"/threads/{thread_id}/state")
     assert state.status_code == 200
-    assert state.json()["checkpoint"]["checkpoint_id"] == run_id
+    checkpoint_id = state.json()["checkpoint"]["checkpoint_id"]
+    assert state.json()["values"]["output"] == {"echo": {"message": "protocol"}}
+
+    checkpoint_state = client.post(
+        f"/threads/{thread_id}/state/checkpoint",
+        json={"checkpoint_id": checkpoint_id},
+    )
+    assert checkpoint_state.status_code == 200
+    assert checkpoint_state.json()["checkpoint"]["checkpoint_id"] == checkpoint_id
 
     updated_state = client.post(f"/threads/{thread_id}/state", json={"values": {"manual": True}})
     assert updated_state.status_code == 200
@@ -87,13 +94,17 @@ def test_checkpoint_state_thread_stream_and_protocol_endpoints(client: TestClien
     assert latest_state.status_code == 200
     assert latest_state.json()["values"]["manual"] is True
 
-    manual_checkpoint = client.get(f"/threads/{thread_id}/state/{manual_checkpoint_id}")
+    manual_checkpoint = client.post(
+        f"/threads/{thread_id}/state/checkpoint",
+        json={"checkpoint_id": manual_checkpoint_id},
+    )
     assert manual_checkpoint.status_code == 200
     assert manual_checkpoint.json()["values"]["manual"] is True
 
-    checkpointed = client.post(f"/threads/{thread_id}/state/checkpoint", json={"values": {"snap": 1}})
+    checkpointed = client.get(f"/threads/{thread_id}/state/{manual_checkpoint_id}")
     assert checkpointed.status_code == 200
     assert checkpointed.json()["checkpoint"]["thread_id"] == thread_id
+    assert checkpointed.json()["values"]["manual"] is True
 
     thread_stream = client.get(f"/threads/{thread_id}/stream")
     assert thread_stream.status_code == 200

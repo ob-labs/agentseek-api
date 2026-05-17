@@ -5,7 +5,7 @@ from fastapi import HTTPException
 
 from agentseek_api.api import threads as threads_module
 from agentseek_api.core.orm import Run, Thread
-from agentseek_api.models.api import ThreadPatch, ThreadSearchRequest, ThreadPruneRequest
+from agentseek_api.models.api import ThreadPatch, ThreadPruneRequest, ThreadSearchRequest
 from agentseek_api.models.auth import User
 
 
@@ -96,7 +96,7 @@ def _run(*, run_id: str = "run-1", thread_id: str = "thread-1", user_id: str = "
         user_id=user_id,
         status=status,
         input_json={"message": "hello"},
-        output_json={"result": "ok", "interrupts": [{"value": "wait"}]},
+        output_json={"result": "ok"},
         metadata_json={"origin": "test"},
         kwargs_json={"config": {}},
         multitask_strategy="enqueue",
@@ -105,6 +105,23 @@ def _run(*, run_id: str = "run-1", thread_id: str = "thread-1", user_id: str = "
     row.created_at = datetime.now(UTC)
     row.updated_at = row.created_at
     return row
+
+
+def _checkpoint_payload(thread: Thread, checkpoint_id: str, *, values=None) -> dict[str, object]:
+    return {
+        "values": values or {"output": {"echo": {"message": "hello"}}},
+        "next": [],
+        "tasks": [],
+        "checkpoint": {
+            "thread_id": thread.thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": checkpoint_id,
+        },
+        "metadata": {"user_id": thread.user_id, "status": thread.status},
+        "created_at": datetime.now(UTC),
+        "parent_checkpoint": None,
+        "interrupts": [],
+    }
 
 
 @pytest.mark.asyncio
@@ -129,62 +146,36 @@ async def test_best_effort_checkpointer_call_covers_missing_and_not_implemented(
     await threads_module._best_effort_checkpointer_call("aprune", ["t1"])
 
 
-def test_thread_helper_functions_cover_manual_checkpoint_paths() -> None:
-    thread = _thread(
-        config={
-            "visible": True,
-            threads_module._MANUAL_CHECKPOINTS_KEY: [
-                {
-                    "checkpoint_id": "manual-1",
-                    "values": "not-a-dict",
-                    "interrupts": "not-a-list",
-                    "metadata": "not-a-dict",
-                    "created_at": "not-a-datetime",
-                }
-            ],
-        }
-    )
-    run = _run()
-
-    public_config = threads_module._public_thread_config(thread.config_json)
-    assert public_config == {"visible": True}
+def test_thread_helper_functions_cover_public_config_and_checkpoint_lookup() -> None:
+    assert threads_module._public_thread_config({"visible": True}) == {"visible": True}
     assert threads_module._public_thread_config(None) == {}
 
-    checkpoints = threads_module._manual_checkpoints(thread)
-    assert len(checkpoints) == 1
-
-    payload = threads_module._manual_checkpoint_payload(thread, checkpoints[0])
-    assert payload["values"] == {}
-    assert payload["interrupts"] == []
-    assert payload["metadata"]["user_id"] == thread.user_id
-
-    run_payload = threads_module._thread_state_payload(thread=thread, run=run)
-    assert run_payload["checkpoint"]["checkpoint_id"] == run.run_id
-    assert run_payload["interrupts"] == [{"value": "wait"}]
-
-    empty_payload = threads_module._thread_state_payload(thread=thread, run=None)
-    assert empty_payload["checkpoint"]["checkpoint_id"] == thread.thread_id
-    assert empty_payload["values"] == {}
-
-    latest_manual = threads_module._latest_state_payload(thread=thread, runs=[])
-    assert latest_manual["checkpoint"]["checkpoint_id"] == "manual-1"
-
-    newer_thread = _thread()
-    older_run = _run(thread_id=newer_thread.thread_id)
-    older_run.created_at = older_run.created_at.replace(year=older_run.created_at.year - 1)
-    latest_run = threads_module._latest_state_payload(thread=newer_thread, runs=[older_run])
-    assert latest_run["checkpoint"]["checkpoint_id"] == older_run.run_id
-
-    assert threads_module._state_payload_created_at({"created_at": "invalid"}).tzinfo is UTC
+    assert threads_module._checkpoint_lookup_payload({"checkpoint_id": "cp-1"}) == "cp-1"
+    assert threads_module._checkpoint_lookup_payload({"checkpoint": {"checkpoint_id": "cp-2"}}) == "cp-2"
+    assert (
+        threads_module._checkpoint_lookup_payload({"config": {"configurable": {"checkpoint_id": "cp-3"}}})
+        == "cp-3"
+    )
+    assert threads_module._checkpoint_lookup_payload({}) is None
 
 
 @pytest.mark.asyncio
-async def test_update_thread_state_persists_manual_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_update_thread_state_persists_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = _thread(config={"visible": True})
     session = FakeSession(scalar_rows=[thread])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
+    )
+
+    async def fake_put_checkpoint(*_args, **_kwargs):
+        return "checkpoint-token"
+
+    payload = _checkpoint_payload(thread, "cp-1", values={"manual": True})
+    monkeypatch.setattr("agentseek_api.api.threads.put_checkpoint", fake_put_checkpoint)
+    monkeypatch.setattr(
+        "agentseek_api.api.threads.checkpoint_to_payload",
+        lambda _checkpoint: payload,
     )
 
     response = await threads_module.update_thread_state(
@@ -194,40 +185,67 @@ async def test_update_thread_state_persists_manual_checkpoint(monkeypatch: pytes
     )
 
     assert response["values"] == {"manual": True}
-    checkpoints = thread.config_json[threads_module._MANUAL_CHECKPOINTS_KEY]
-    assert len(checkpoints) == 1
-    assert checkpoints[0]["values"] == {"manual": True}
-    assert thread.config_json["visible"] is True
+    assert thread.state_updated_at == payload["created_at"]
     assert session.commits == 1
 
 
 @pytest.mark.asyncio
-async def test_get_thread_state_at_checkpoint_returns_manual_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
-    thread = _thread(
-        config={
-            threads_module._MANUAL_CHECKPOINTS_KEY: [
-                {
-                    "checkpoint_id": "manual-1",
-                    "values": {"manual": True},
-                    "interrupts": [],
-                    "metadata": {"user_id": "user-1", "status": "idle"},
-                    "created_at": datetime.now(UTC).isoformat(),
-                }
-            ]
-        }
-    )
-    session = FakeSession(scalar_rows=[thread, None])
+async def test_get_thread_state_at_checkpoint_returns_checkpoint_payload(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = _thread()
+    session = FakeSession(scalar_rows=[thread])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
+    async def fake_get_checkpoint_by_id(*_args, **_kwargs):
+        return "checkpoint-token"
+
+    monkeypatch.setattr("agentseek_api.api.threads.get_checkpoint_by_id", fake_get_checkpoint_by_id)
+    monkeypatch.setattr(
+        "agentseek_api.api.threads.checkpoint_to_payload",
+        lambda _checkpoint: _checkpoint_payload(thread, "cp-1", values={"manual": True}),
+    )
+
     payload = await threads_module.get_thread_state_at_checkpoint(
         thread.thread_id,
-        "manual-1",
+        "cp-1",
         User(identity=thread.user_id, is_authenticated=True),
     )
     assert payload["values"] == {"manual": True}
+
+
+@pytest.mark.asyncio
+async def test_get_thread_state_prefers_latest_checkpoint_when_store_order_varies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = _thread()
+    old_payload = _checkpoint_payload(thread, "cp-old", values={"manual": "old"})
+    old_payload["created_at"] = datetime(2026, 1, 1, tzinfo=UTC)
+    new_payload = _checkpoint_payload(thread, "cp-new", values={"manual": "new"})
+    new_payload["created_at"] = datetime(2026, 1, 2, tzinfo=UTC)
+    session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
+    monkeypatch.setattr(
+        "agentseek_api.api.threads.db_manager.get_session_factory",
+        lambda: FakeSessionFactory([session]),
+    )
+
+    async def fake_list_checkpoints(*_args, **_kwargs):
+        return ["old", "new"]
+
+    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
+    monkeypatch.setattr(
+        "agentseek_api.api.threads.checkpoint_to_payload",
+        lambda token: old_payload if token == "old" else new_payload,
+    )
+
+    payload = await threads_module.get_thread_state(
+        thread.thread_id,
+        User(identity=thread.user_id, is_authenticated=True),
+    )
+
+    assert payload["checkpoint"]["checkpoint_id"] == "cp-new"
+    assert payload["values"] == {"manual": "new"}
 
 
 @pytest.mark.asyncio
@@ -248,14 +266,20 @@ async def test_patch_copy_and_delete_thread_routes_cover_new_paths(monkeypatch: 
     async def fake_best_effort(method_name: str, *args, **kwargs) -> None:
         best_effort_calls.append((method_name, args, kwargs))
 
+    copied_checkpoints = []
+
+    async def fake_copy_checkpoints(source_thread_id: str, target_thread_id: str) -> None:
+        copied_checkpoints.append((source_thread_id, target_thread_id))
+
     monkeypatch.setattr("agentseek_api.api.threads._best_effort_checkpointer_call", fake_best_effort)
+    monkeypatch.setattr("agentseek_api.api.threads.copy_checkpoints", fake_copy_checkpoints)
 
     patched = await threads_module.patch_thread(
         source.thread_id,
-        ThreadPatch(metadata={"topic": "patched"}),
+        ThreadPatch(metadata={"tag": "patched"}),
         User(identity=source.user_id, is_authenticated=True),
     )
-    assert patched.metadata == {"topic": "patched"}
+    assert patched.metadata == {"topic": "alpha", "tag": "patched"}
 
     copied = await threads_module.copy_thread(
         source.thread_id,
@@ -265,13 +289,13 @@ async def test_patch_copy_and_delete_thread_routes_cover_new_paths(monkeypatch: 
     copied_runs = [obj for obj in copy_session.added if isinstance(obj, Run)]
     assert len(copied_runs) == 1
     assert copied_runs[0].thread_id == "copied-thread"
+    assert copied_checkpoints == [(source.thread_id, "copied-thread")]
 
     deleted = await threads_module.delete_thread(
         source.thread_id,
         User(identity=source.user_id, is_authenticated=True),
     )
     assert deleted.status_code == 204
-    assert ("acopy_thread", (source.thread_id, "copied-thread"), {}) in best_effort_calls
     assert ("adelete_thread", (source.thread_id,), {}) in best_effort_calls
     assert ("adelete_for_runs", ([source_run.run_id],), {}) in best_effort_calls
 
@@ -279,11 +303,16 @@ async def test_patch_copy_and_delete_thread_routes_cover_new_paths(monkeypatch: 
 @pytest.mark.asyncio
 async def test_get_thread_state_at_checkpoint_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = _thread()
-    session = FakeSession(scalar_rows=[thread, None])
+    session = FakeSession(scalar_rows=[thread])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
+
+    async def fake_get_checkpoint_by_id(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr("agentseek_api.api.threads.get_checkpoint_by_id", fake_get_checkpoint_by_id)
 
     with pytest.raises(HTTPException, match="Checkpoint not found") as error:
         await threads_module.get_thread_state_at_checkpoint(
@@ -312,27 +341,8 @@ async def test_count_threads_returns_exact_count_beyond_page_limit(monkeypatch: 
 
 
 @pytest.mark.asyncio
-async def test_prune_threads_keep_latest_drops_older_manual_checkpoints(monkeypatch: pytest.MonkeyPatch) -> None:
-    thread = _thread(
-        config={
-            threads_module._MANUAL_CHECKPOINTS_KEY: [
-                {
-                    "checkpoint_id": "manual-older",
-                    "values": {"manual": 1},
-                    "interrupts": [],
-                    "metadata": {"user_id": "user-1", "status": "idle"},
-                    "created_at": "2026-01-01T00:00:00+00:00",
-                },
-                {
-                    "checkpoint_id": "manual-latest",
-                    "values": {"manual": 2},
-                    "interrupts": [],
-                    "metadata": {"user_id": "user-1", "status": "idle"},
-                    "created_at": "2026-01-02T00:00:00+00:00",
-                },
-            ]
-        }
-    )
+async def test_prune_threads_keep_latest_uses_checkpoint_pruner(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread = _thread()
     latest_run = _run(run_id="run-latest", thread_id=thread.thread_id)
     older_run = _run(run_id="run-older", thread_id=thread.thread_id)
     older_run.created_at = older_run.created_at.replace(year=older_run.created_at.year - 1)
@@ -342,12 +352,12 @@ async def test_prune_threads_keep_latest_drops_older_manual_checkpoints(monkeypa
         lambda: FakeSessionFactory([session]),
     )
 
-    best_effort_calls = []
+    prune_calls = []
 
-    async def fake_best_effort(method_name: str, *args, **kwargs) -> None:
-        best_effort_calls.append((method_name, args, kwargs))
+    async def fake_prune_checkpoints(thread_ids: list[str], *, strategy: str) -> None:
+        prune_calls.append((thread_ids, strategy))
 
-    monkeypatch.setattr("agentseek_api.api.threads._best_effort_checkpointer_call", fake_best_effort)
+    monkeypatch.setattr("agentseek_api.api.threads.prune_checkpoints", fake_prune_checkpoints)
 
     result = await threads_module.prune_threads(
         ThreadPruneRequest(thread_ids=[thread.thread_id], strategy="keep_latest"),
@@ -355,7 +365,5 @@ async def test_prune_threads_keep_latest_drops_older_manual_checkpoints(monkeypa
     )
 
     assert result == {"pruned_count": 1}
-    checkpoints = thread.config_json[threads_module._MANUAL_CHECKPOINTS_KEY]
-    assert [item["checkpoint_id"] for item in checkpoints] == ["manual-latest"]
     assert len(session.executed) == 1
-    assert ("aprune", ([thread.thread_id],), {"strategy": "keep_latest"}) in best_effort_calls
+    assert prune_calls == [([thread.thread_id], "keep_latest")]

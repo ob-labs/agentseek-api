@@ -105,9 +105,22 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
         lambda: session_factory,
     )
 
-    created = await assistants_module.create_assistant(AssistantCreate(name="created", graph_id="react_agent"))
+    created = await assistants_module.create_assistant(
+        AssistantCreate(
+            name="created",
+            graph_id="react_agent",
+            metadata={"suite": "unit"},
+            config={"temperature": 0},
+            context={"tenant": "tests"},
+            description="created assistant",
+        )
+    )
     assert created.assistant_id == "assistant-1"
     assert created.graph_id == "react_agent"
+    assert created.metadata == {"suite": "unit"}
+    assert created.config == {"temperature": 0}
+    assert created.context == {"tenant": "tests"}
+    assert created.description == "created assistant"
 
     listed = await assistants_module.list_assistants()
     assert [item.assistant_id for item in listed] == ["assistant-existing"]

@@ -1,8 +1,17 @@
 from fastapi.testclient import TestClient
 
 
-def _create_thread(client: TestClient, *, user_id: str, metadata: dict[str, object]) -> str:
-    response = client.post("/threads", json={"metadata": metadata}, headers={"x-user-id": user_id})
+def _create_thread(
+    client: TestClient,
+    *,
+    user_id: str,
+    metadata: dict[str, object],
+    config: dict[str, object] | None = None,
+) -> str:
+    payload: dict[str, object] = {"metadata": metadata}
+    if config is not None:
+        payload["config"] = config
+    response = client.post("/threads", json=payload, headers={"x-user-id": user_id})
     assert response.status_code == 200
     return response.json()["thread_id"]
 
@@ -12,7 +21,12 @@ def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
 
-    thread_id = _create_thread(client, user_id="u1", metadata={"topic": "alpha", "tag": "keep"})
+    thread_id = _create_thread(
+        client,
+        user_id="u1",
+        metadata={"topic": "alpha", "tag": "keep"},
+        config={"retention": "short"},
+    )
     _create_thread(client, user_id="u1", metadata={"topic": "beta"})
     _create_thread(client, user_id="u2", metadata={"topic": "alpha"})
 
@@ -33,9 +47,17 @@ def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
     assert count.status_code == 200
     assert count.json() == 1
 
-    patched = client.patch(f"/threads/{thread_id}", json={"metadata": {"topic": "alpha", "tag": "patched"}}, headers={"x-user-id": "u1"})
+    patched = client.patch(f"/threads/{thread_id}", json={"metadata": {"tag": "patched"}}, headers={"x-user-id": "u1"})
     assert patched.status_code == 200
-    assert patched.json()["metadata"]["tag"] == "patched"
+    assert patched.json()["metadata"] == {"topic": "alpha", "tag": "patched"}
+    assert patched.json()["config"] == {"retention": "short"}
+
+    unsupported_patch = client.patch(
+        f"/threads/{thread_id}",
+        json={"config": {"retention": "long"}},
+        headers={"x-user-id": "u1"},
+    )
+    assert unsupported_patch.status_code == 422
 
     copied = client.post(f"/threads/{thread_id}/copy", headers={"x-user-id": "u1"})
     assert copied.status_code == 200
@@ -73,6 +95,8 @@ def test_thread_state_and_history_endpoints(client: TestClient) -> None:
     assert "values" in state_body
     assert "checkpoint" in state_body
     assert state_body["checkpoint"]["thread_id"] == thread_id
+    assert state_body["values"]["input"] == {"message": "hello"}
+    assert state_body["values"]["output"] == {"echo": {"message": "hello"}}
 
     history = client.get(f"/threads/{thread_id}/history", headers={"x-user-id": "u1"})
     assert history.status_code == 200
