@@ -9,10 +9,34 @@ from agentseek_api.models.auth import User
 from agentseek_api.services.executor import get_executor
 from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
 from agentseek_api.services.run_state import run_broker
+from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
 
 
 def _is_cancelled_run(run: Run) -> bool:
     return run.status == "error" and run.last_error == "Run cancelled"
+
+
+async def _persist_submission_failure(
+    *,
+    thread_id: str,
+    run_id: str,
+    error: str,
+    run_status: str,
+    thread_status: str,
+) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        db_run = await session.scalar(select(Run).where(Run.run_id == run_id))
+        if db_run is not None:
+            db_run.status = run_status
+            db_run.last_error = error
+
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+        if thread is not None:
+            thread.status = thread_status
+            thread.state_updated_at = datetime.now(UTC)
+
+        await session.commit()
 
 
 async def _execute_and_persist(
@@ -25,45 +49,71 @@ async def _execute_and_persist(
     is_resume: bool = False,
 ) -> None:
     session_factory = db_manager.get_session_factory()
-    async with session_factory() as execution_session:
-        db_run = await execution_session.scalar(select(Run).where(Run.run_id == run_id))
-        if db_run is None:
-            return
-        if _is_cancelled_run(db_run):
-            return
+    try:
+        async with session_factory() as execution_session:
+            db_run = await execution_session.scalar(select(Run).where(Run.run_id == run_id))
+            if db_run is None:
+                publish_lifecycle_event(
+                    thread_id,
+                    event="failed",
+                    graph_name=graph_id,
+                    error="Run was deleted before execution started",
+                )
+                return
+            if _is_cancelled_run(db_run):
+                publish_lifecycle_event(
+                    thread_id,
+                    event="failed",
+                    graph_name=graph_id,
+                    error=db_run.last_error,
+                )
+                return
 
-        db_run.status = "running"
-        db_run.last_error = None
-        thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
-        if thread is not None:
-            thread.status = "busy"
-            thread.state_updated_at = db_run.updated_at
-        await execution_session.commit()
-        run_broker.publish(run_id, "start")
+            db_run.status = "running"
+            db_run.last_error = None
+            thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+            if thread is not None:
+                thread.status = "busy"
+                thread.state_updated_at = db_run.updated_at
+            await execution_session.commit()
+            run_broker.publish(run_id, "start")
 
-        try:
-            result = await execute_run(
-                thread_id=thread_id,
-                run_id=run_id,
-                payload=payload,
-                graph_id=graph_id,
-                resume=resume if is_resume else UNSET,
+            try:
+                result = await execute_run(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    payload=payload,
+                    graph_id=graph_id,
+                    resume=resume if is_resume else UNSET,
+                )
+                await execution_session.refresh(db_run)
+                if not _is_cancelled_run(db_run):
+                    _apply_execution_result(db_run, result)
+            except Exception as exc:  # noqa: BLE001
+                await execution_session.refresh(db_run)
+                if not _is_cancelled_run(db_run):
+                    db_run.status = "error"
+                    db_run.last_error = str(exc)
+
+            thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+            if thread is not None:
+                thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
+                thread.state_updated_at = db_run.updated_at
+            await execution_session.commit()
+            lifecycle_state = "completed"
+            if db_run.status == "interrupted":
+                lifecycle_state = "interrupted"
+            elif db_run.status == "error":
+                lifecycle_state = "failed"
+            publish_lifecycle_event(
+                thread_id,
+                event=lifecycle_state,
+                graph_name=graph_id,
+                error=db_run.last_error,
             )
-            await execution_session.refresh(db_run)
-            if not _is_cancelled_run(db_run):
-                _apply_execution_result(db_run, result)
-        except Exception as exc:  # noqa: BLE001
-            await execution_session.refresh(db_run)
-            if not _is_cancelled_run(db_run):
-                db_run.status = "error"
-                db_run.last_error = str(exc)
-
-        thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
-        if thread is not None:
-            thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
-            thread.state_updated_at = db_run.updated_at
-        await execution_session.commit()
-        run_broker.publish(run_id, "end", status=db_run.status)
+            run_broker.publish(run_id, "end", status=db_run.status)
+    finally:
+        thread_protocol_broker.run_finished(thread_id)
 
 
 def _apply_execution_result(db_run: Run, result: RunExecutionResult) -> None:
@@ -113,14 +163,33 @@ async def prepare_and_submit_run(
         await session.commit()
         await session.refresh(run)
 
-    await get_executor().submit(
-        lambda: _execute_and_persist(
-            run_id=run.run_id,
-            thread_id=run.thread_id,
-            payload=run.input_json,
-            graph_id=graph_id,
+    thread_protocol_broker.run_started(thread_id)
+    publish_lifecycle_event(thread_id, event="started", graph_name=graph_id)
+    try:
+        await get_executor().submit(
+            lambda: _execute_and_persist(
+                run_id=run.run_id,
+                thread_id=run.thread_id,
+                payload=run.input_json,
+                graph_id=graph_id,
+            )
         )
-    )
+    except Exception as exc:
+        await _persist_submission_failure(
+            thread_id=thread_id,
+            run_id=run.run_id,
+            error=str(exc),
+            run_status="error",
+            thread_status="error",
+        )
+        publish_lifecycle_event(
+            thread_id,
+            event="failed",
+            graph_name=graph_id,
+            error=str(exc),
+        )
+        thread_protocol_broker.run_finished(thread_id)
+        raise
     return await _load_run(run.run_id) or run
 
 
@@ -147,14 +216,33 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
             thread.state_updated_at = datetime.now(UTC)
         await session.commit()
 
-    await get_executor().submit(
-        lambda: _execute_and_persist(
-            run_id=run_id,
-            thread_id=thread_id,
-            payload=payload,
-            graph_id=graph_id,
-            resume=resume,
-            is_resume=True,
+    thread_protocol_broker.run_started(thread_id)
+    publish_lifecycle_event(thread_id, event="started", graph_name=graph_id)
+    try:
+        await get_executor().submit(
+            lambda: _execute_and_persist(
+                run_id=run_id,
+                thread_id=thread_id,
+                payload=payload,
+                graph_id=graph_id,
+                resume=resume,
+                is_resume=True,
+            )
         )
-    )
+    except Exception as exc:
+        await _persist_submission_failure(
+            thread_id=thread_id,
+            run_id=run_id,
+            error=str(exc),
+            run_status="interrupted",
+            thread_status="interrupted",
+        )
+        publish_lifecycle_event(
+            thread_id,
+            event="failed",
+            graph_name=graph_id,
+            error=str(exc),
+        )
+        thread_protocol_broker.run_finished(thread_id)
+        raise
     return await _load_run(run_id) or run

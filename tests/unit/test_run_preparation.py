@@ -5,6 +5,7 @@ import pytest
 
 from agentseek_api.models.auth import User
 from agentseek_api.services import run_preparation as run_prep_module
+from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
 
 class FakeSession:
@@ -24,6 +25,16 @@ class FakeSession:
 
     async def refresh(self, _obj: object) -> None:
         return None
+
+
+class CallbackSession(FakeSession):
+    def __init__(self, scalar_values: list[Callable[[], object | None] | object | None]) -> None:
+        super().__init__([])
+        self.scalar_values = scalar_values
+
+    async def scalar(self, _query: Any) -> object | None:
+        value = self.scalar_values.pop(0) if self.scalar_values else None
+        return value() if callable(value) else value
 
 
 class FakeSessionContext:
@@ -56,6 +67,11 @@ class DeferredExecutor:
 
     async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
         self.submitted.append(func)
+
+
+class RaisingExecutor:
+    async def submit(self, _func: Callable[[], Awaitable[None]]) -> None:
+        raise RuntimeError("submit failed")
 
 
 @pytest.mark.asyncio
@@ -175,6 +191,71 @@ async def test_prepare_run_marks_thread_busy_before_background_execution(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_prepare_run_cleans_protocol_state_when_submit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
+    fake_assistant = type("FakeAssistant", (), {"graph_id": "default"})()
+    create_session = FakeSession([fake_thread, fake_assistant])
+    persist_session = CallbackSession([lambda: create_session.added[-1], fake_thread])
+    session_factory = FakeSessionFactory([create_session, persist_session])
+    protocol_broker = ThreadProtocolEventBroker()
+    published_lifecycle: list[dict[str, Any]] = []
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: RaisingExecutor())
+    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
+    monkeypatch.setattr(
+        "agentseek_api.services.run_preparation.publish_lifecycle_event",
+        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
+    )
+
+    with pytest.raises(RuntimeError, match="submit failed"):
+        await run_prep_module.prepare_and_submit_run(
+            thread_id="t1",
+            assistant_id="a1",
+            payload={"x": 1},
+            user=User(identity="u1", is_authenticated=True),
+        )
+
+    created_run = create_session.added[-1]
+    assert created_run.status == "error"
+    assert created_run.last_error == "submit failed"
+    assert fake_thread.status == "error"
+    assert protocol_broker._active_runs["t1"] == 0
+    assert published_lifecycle == [
+        {"thread_id": "t1", "event": "started", "graph_name": "default"},
+        {"thread_id": "t1", "event": "failed", "graph_name": "default", "error": "submit failed"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    cancelled_run = type("DbRun", (), {"run_id": "r1", "status": "error", "last_error": "Run cancelled"})()
+    session_factory = FakeSessionFactory([FakeSession([cancelled_run])])
+    protocol_broker = ThreadProtocolEventBroker()
+    published_lifecycle: list[dict[str, Any]] = []
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
+    monkeypatch.setattr(
+        "agentseek_api.services.run_preparation.publish_lifecycle_event",
+        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
+    )
+
+    protocol_broker.run_started("t1")
+    await run_prep_module._execute_and_persist(
+        run_id="r1",
+        thread_id="t1",
+        payload={"x": 1},
+        graph_id="default",
+    )
+
+    assert protocol_broker._active_runs["t1"] == 0
+    assert published_lifecycle == [
+        {"thread_id": "t1", "event": "failed", "graph_name": "default", "error": "Run cancelled"}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_resume_run_marks_row_pending_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
@@ -213,3 +294,53 @@ async def test_resume_run_marks_row_pending_before_background_execution(monkeypa
     assert fake_thread.state_updated_at is not None
     assert load_session.commits == 1
     assert len(executor.submitted) == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
+    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
+    db_run = type(
+        "DbRun",
+        (),
+        {
+            "run_id": "r1",
+            "thread_id": "t1",
+            "assistant_id": "a1",
+            "user_id": "u1",
+            "status": "interrupted",
+            "input_json": {"foo": "hello "},
+            "output_json": {"interrupts": [{"value": "Provide value:"}], "interrupted": True},
+            "last_error": None,
+        },
+    )()
+    load_session = FakeSession([db_run, fake_assistant, fake_thread])
+    persist_session = CallbackSession([db_run, fake_thread])
+    session_factory = FakeSessionFactory([load_session, persist_session])
+    protocol_broker = ThreadProtocolEventBroker()
+    published_lifecycle: list[dict[str, Any]] = []
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: RaisingExecutor())
+    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
+    monkeypatch.setattr(
+        "agentseek_api.services.run_preparation.publish_lifecycle_event",
+        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
+    )
+
+    with pytest.raises(RuntimeError, match="submit failed"):
+        await run_prep_module.resume_run(
+            thread_id="t1",
+            run_id="r1",
+            resume="world",
+            user=User(identity="u1", is_authenticated=True),
+        )
+
+    assert db_run.status == "interrupted"
+    assert db_run.last_error == "submit failed"
+    assert fake_thread.status == "interrupted"
+    assert protocol_broker._active_runs["t1"] == 0
+    assert published_lifecycle == [
+        {"thread_id": "t1", "event": "started", "graph_name": "subgraph_hitl_agent"},
+        {"thread_id": "t1", "event": "failed", "graph_name": "subgraph_hitl_agent", "error": "submit failed"},
+    ]

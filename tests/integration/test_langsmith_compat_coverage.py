@@ -149,13 +149,15 @@ def test_thread_routes_cover_search_prune_delete_and_missing_paths(client: TestC
 
     unsupported = client.post(
         f"/threads/{keep_thread['thread_id']}/commands",
-        json={"method": "not-supported", "params": ["ignored"]},
+        json={"id": 99, "method": "not-supported", "params": {}},
         headers=missing_headers,
     )
-    assert unsupported.status_code == 200
+    assert unsupported.status_code == 400
     assert unsupported.json() == {
-        "ok": False,
-        "error": {"code": "not_supported", "message": "Unsupported method: not-supported"},
+        "type": "error",
+        "id": 99,
+        "error": "unknown_command",
+        "message": "Unsupported command 'not-supported'",
     }
 
 

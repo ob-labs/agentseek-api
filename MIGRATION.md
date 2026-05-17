@@ -317,6 +317,15 @@ with minimal or no adaptation.
 
 - Milestone 5's core assistants / threads / runs / stateless-runs
   compatibility slice is now implemented and verified.
+- The protocol-v2 command/event-streaming slice is now implemented with:
+  - `POST /threads/{thread_id}/commands` supporting `run.start` and
+    `input.respond`
+  - `POST /threads/{thread_id}/stream` and
+    `POST /threads/{thread_id}/stream/events` exposing protocol-v2 SSE
+    lifecycle, message, tool, `updates`, `values`, and `input.requested`
+    events
+  - namespace filtering for subgraph events and LangGraph checkpoint namespace
+    fidelity
 - The mysql-family checkpoint backend is now pinned to published
   `langchain-oceanbase==0.4.0` rather than a git dependency.
 - The compatibility layer is CI-verified across:
@@ -325,7 +334,7 @@ with minimal or no adaptation.
     `oceanbase`
   - Docker runtime smoke through `CLI Docker Runtime`
   - Manifest-driven live sample graphs through `CLI Dev Sample Graphs`
-- Latest green proof run: GitHub Actions run `25984792293`, including:
+- Latest green proof run: GitHub Actions run `25991946287`, including:
   - `CLI Docker Runtime`
   - `CLI Dev Sample Graphs`
   - `MySQL-Family Checkpoint Validation` (`mysql`, `seekdb`, `oceanbase`)
@@ -335,10 +344,9 @@ with minimal or no adaptation.
   `POST /threads/prune`, and `POST /runs/batch` are now shipped and no longer
   tracked as deferred scope.
 - Locally re-verified on this branch with:
-  - `uv run pytest -q` → `212 passed, 7 skipped`
+  - `make test-cov` → `233 passed, 1 skipped` with `91.38%` coverage
+  - `uv run pytest tests/unit/test_run_executor.py tests/unit/test_run_preparation.py tests/unit/test_thread_protocol.py tests/integration/test_protocol_v2_streaming.py -q` → `32 passed`
   - `uv run ruff check src tests`
-  - `uv run python -m py_compile $(rg --files src tests scripts examples -g '*.py')`
-  - `SEEKDB_MODE=embed bash ./scripts/test-checkpoints.sh`
 
 **Implemented compatibility surface**
 
@@ -378,6 +386,7 @@ with minimal or no adaptation.
   - `POST /threads/{thread_id}/state`
   - `POST /threads/{thread_id}/state/checkpoint`
   - `GET /threads/{thread_id}/stream`
+  - `POST /threads/{thread_id}/stream`
   - `POST /threads/{thread_id}/commands`
   - `POST /threads/{thread_id}/stream/events`
 - Thread runs:
@@ -417,6 +426,10 @@ with minimal or no adaptation.
   on saver iteration order.
 - `/info` now advertises `protocol_v2: true` to match the mounted protocol-v2
   routes.
+- Protocol-v2 message replay now preserves full
+  `langgraph_checkpoint_ns` segments, splits `updates` from final `values`,
+  reconciles streamed message blocks against final transcripts, and avoids
+  duplicate structured tool-call blocks in transcript replay.
 
 ## Phase 5.1: Spec-Native Surface for Existing Core Flows
 
@@ -503,7 +516,8 @@ LangSmith clients expect, not just metadata rows plus run records.
   through LangSmith protocol/state commands.
   Current status: kept as a compatibility extension for now.
 - [x] Add the protocol-v2 surfaces:
-  `POST /threads/{thread_id}/commands` and
+  `POST /threads/{thread_id}/commands`,
+  `POST /threads/{thread_id}/stream`, and
   `POST /threads/{thread_id}/stream/events`.
 
 **Verify**
