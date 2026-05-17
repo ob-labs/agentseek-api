@@ -251,6 +251,9 @@ async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_cu
             raise HTTPException(status_code=400, detail=f"Unsupported prune strategy: {payload.strategy}")
         await session.commit()
     await prune_checkpoints(thread_ids, strategy=payload.strategy)
+    if payload.strategy == "delete":
+        for thread_id in thread_ids:
+            thread_protocol_broker.delete_thread(thread_id)
     return {"pruned_count": len(thread_ids)}
 
 
@@ -303,6 +306,7 @@ async def delete_thread(thread_id: str, user: User = Depends(get_current_user)) 
     await _best_effort_checkpointer_call("adelete_thread", thread_id)
     if run_ids:
         await _best_effort_checkpointer_call("adelete_for_runs", list(run_ids))
+    thread_protocol_broker.delete_thread(thread_id)
     return Response(status_code=204)
 
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import defaultdict
+from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -33,24 +33,64 @@ def _namespace_matches(
 
 
 class ThreadProtocolEventBroker:
-    def __init__(self) -> None:
+    def __init__(self, *, max_events_per_thread: int = 2048, max_idle_threads: int = 1024) -> None:
         self._events: dict[str, list[dict[str, Any]]] = defaultdict(list)
         self._signals: dict[str, asyncio.Event] = defaultdict(asyncio.Event)
         self._next_seq: dict[str, int] = defaultdict(lambda: 1)
         self._active_runs: dict[str, int] = defaultdict(int)
+        self._idle_threads: deque[str] = deque()
+        self._idle_thread_set: set[str] = set()
+        self._max_events_per_thread = max_events_per_thread
+        self._max_idle_threads = max_idle_threads
+
+    def _mark_active(self, thread_id: str) -> None:
+        if thread_id not in self._idle_thread_set:
+            return
+        self._idle_thread_set.discard(thread_id)
+        try:
+            self._idle_threads.remove(thread_id)
+        except ValueError:
+            return
+
+    def _prune_thread_events(self, thread_id: str) -> None:
+        events = self._events.get(thread_id)
+        if events is None or len(events) <= self._max_events_per_thread:
+            return
+        self._events[thread_id] = events[-self._max_events_per_thread :]
+
+    def _drop_thread(self, thread_id: str) -> None:
+        self._events.pop(thread_id, None)
+        self._signals.pop(thread_id, None)
+        self._next_seq.pop(thread_id, None)
+        self._active_runs.pop(thread_id, None)
+        self._idle_thread_set.discard(thread_id)
+
+    def _prune_idle_threads(self) -> None:
+        while len(self._idle_threads) > self._max_idle_threads:
+            stale_thread_id = self._idle_threads.popleft()
+            if stale_thread_id not in self._idle_thread_set:
+                continue
+            self._idle_thread_set.discard(stale_thread_id)
+            self._drop_thread(stale_thread_id)
 
     def latest_seq(self, thread_id: str) -> int:
         return self._next_seq[thread_id] - 1
 
     def run_started(self, thread_id: str) -> None:
+        self._mark_active(thread_id)
         self._active_runs[thread_id] += 1
         self._signals[thread_id].set()
 
     def run_finished(self, thread_id: str) -> None:
         self._active_runs[thread_id] = max(0, self._active_runs[thread_id] - 1)
+        if self._active_runs[thread_id] == 0 and thread_id not in self._idle_thread_set:
+            self._idle_thread_set.add(thread_id)
+            self._idle_threads.append(thread_id)
+            self._prune_idle_threads()
         self._signals[thread_id].set()
 
     def publish(self, thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        self._mark_active(thread_id)
         seq = self._next_seq[thread_id]
         self._next_seq[thread_id] += 1
         event = {
@@ -60,8 +100,12 @@ class ThreadProtocolEventBroker:
             **payload,
         }
         self._events[thread_id].append(event)
+        self._prune_thread_events(thread_id)
         self._signals[thread_id].set()
         return event
+
+    def delete_thread(self, thread_id: str) -> None:
+        self._drop_thread(thread_id)
 
     async def stream(
         self,
@@ -200,6 +244,118 @@ def publish_input_requested(
                 "data": {
                     "interrupt_id": interrupt_id,
                     "payload": payload,
+                },
+            },
+        },
+    )
+
+
+def publish_message_chunk(
+    thread_id: str,
+    *,
+    message_id: str,
+    role: str,
+    text: str,
+    namespace: list[str] | None = None,
+) -> None:
+    thread_protocol_broker.publish(
+        thread_id,
+        {
+            "method": "messages",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": {
+                    "event": "message-start",
+                    "role": role,
+                    "id": message_id,
+                },
+            },
+        },
+    )
+    thread_protocol_broker.publish(
+        thread_id,
+        {
+            "method": "messages",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": {
+                    "event": "content-block-start",
+                    "index": 0,
+                    "content": {"type": "text", "text": ""},
+                },
+            },
+        },
+    )
+    thread_protocol_broker.publish(
+        thread_id,
+        {
+            "method": "messages",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "text-delta", "text": text},
+                },
+            },
+        },
+    )
+
+
+def publish_message_chunk_delta(
+    thread_id: str,
+    *,
+    text: str,
+    namespace: list[str] | None = None,
+) -> None:
+    thread_protocol_broker.publish(
+        thread_id,
+        {
+            "method": "messages",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": {
+                    "event": "content-block-delta",
+                    "index": 0,
+                    "delta": {"type": "text-delta", "text": text},
+                },
+            },
+        },
+    )
+
+
+def publish_message_finish(
+    thread_id: str,
+    *,
+    namespace: list[str] | None = None,
+) -> None:
+    thread_protocol_broker.publish(
+        thread_id,
+        {
+            "method": "messages",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": {
+                    "event": "content-block-finish",
+                    "index": 0,
+                },
+            },
+        },
+    )
+    thread_protocol_broker.publish(
+        thread_id,
+        {
+            "method": "messages",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": {
+                    "event": "message-finish",
                 },
             },
         },

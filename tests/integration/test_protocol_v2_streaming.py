@@ -162,3 +162,38 @@ def test_protocol_input_respond_resumes_interrupted_run(client: TestClient) -> N
     waited = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
     assert waited.status_code == 200
     assert waited.json()["status"] == "success"
+
+
+def test_protocol_stream_filters_subgraph_namespace_events(client: TestClient) -> None:
+    assistant = client.post("/assistants", json={"name": "protocol-subgraph-namespace", "graph_id": "subgraph_hitl_agent"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "protocol-subgraph-namespace"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    command = client.post(
+        f"/threads/{thread_id}/commands",
+        json={
+            "id": 20,
+            "method": "run.start",
+            "params": {
+                "assistant_id": assistant_id,
+                "input": {"foo": "hello "},
+            },
+        },
+    )
+    assert command.status_code == 200
+    assert command.json()["type"] == "success"
+
+    stream = client.post(
+        f"/threads/{thread_id}/stream/events",
+        json={"channels": ["values", "input"], "namespaces": [["node_1"]]},
+    )
+    assert stream.status_code == 200
+
+    events = _parse_sse_events(stream.text)
+    assert events
+    assert {event["event"] for event in events} <= {"values", "input.requested"}
+    assert all(event["data"]["params"]["namespace"][:1] == ["node_1"] for event in events)
