@@ -84,7 +84,7 @@ def _assert_subgraph_hitl(output: dict) -> None:
 
 
 def main() -> None:
-    base_url = os.getenv("EXAMPLE_BASE_URL", "http://127.0.0.1:2026")
+    base_url = os.getenv("EXAMPLE_BASE_URL", "http://127.0.0.1:2024")
     user_id = os.getenv("EXAMPLE_USER_ID", "sample-user")
     headers = {"x-user-id": user_id}
 
