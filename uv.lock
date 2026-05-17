@@ -49,7 +49,7 @@ requires-dist = [
     { name = "greenlet", specifier = ">=3.1.0" },
     { name = "langchain-anthropic", specifier = ">=1.0.0" },
     { name = "langchain-core", specifier = ">=1.0.0" },
-    { name = "langchain-oceanbase", git = "https://github.com/oceanbase/langchain-oceanbase.git?rev=release%2F0.4.0" },
+    { name = "langchain-oceanbase", specifier = "==0.4.0" },
     { name = "langchain-openai", specifier = ">=1.0.0" },
     { name = "langgraph", specifier = ">=1.0.3" },
     { name = "langgraph-sdk", specifier = ">=0.3.5" },
@@ -1115,8 +1115,8 @@ wheels = [
 
 [[package]]
 name = "langchain-oceanbase"
-version = "0.3.3"
-source = { git = "https://github.com/oceanbase/langchain-oceanbase.git?rev=release%2F0.4.0#222a77b768ef88bd79f3a67722203f1bb69d8927" }
+version = "0.4.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "langchain-core" },
@@ -1125,6 +1125,10 @@ dependencies = [
     { name = "pylibseekdb", marker = "(platform_machine == 'arm64' and sys_platform == 'darwin') or sys_platform == 'linux'" },
     { name = "pyobvector" },
     { name = "pyseekdb" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/1d/47/736248b202306abc038d4ad06d638b5de06349e7fdf64b9b60f74808fe3f/langchain_oceanbase-0.4.0.tar.gz", hash = "sha256:81597ea953f42c045281f3fc0cdbff36e395eb0acf634445d6751a86296d263e", size = 55944, upload-time = "2026-05-13T11:50:13.077Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ce/5d/fc7d2f05427747bd878c480b15c04bb8053f40f7b25bde698fda713c4af4/langchain_oceanbase-0.4.0-py3-none-any.whl", hash = "sha256:6dac9938066568757f62b0e25cc3bc778b091e18fe2a7cc445bd75b55291282c", size = 55623, upload-time = "2026-05-13T11:50:11.355Z" },
 ]
 
 [[package]]

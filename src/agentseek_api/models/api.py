@@ -9,15 +9,59 @@ class AssistantCreate(BaseModel):
     graph_id: str = "default"
 
 
+class AssistantSearchRequest(BaseModel):
+    metadata: dict[str, Any] | None = None
+    graph_id: str | None = None
+    name: str | None = None
+    limit: int = 10
+    offset: int = 0
+    sort_by: str = "created_at"
+    sort_order: str = "desc"
+
+
+class AssistantPatch(BaseModel):
+    graph_id: str | None = None
+    config: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
+    metadata: dict[str, Any] | None = None
+    name: str | None = None
+    description: str | None = None
+
+
 class AssistantRead(BaseModel):
     assistant_id: str
     name: str
     graph_id: str
     created_at: datetime
+    updated_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    version: int = 1
+    description: str | None = None
 
 
 class ThreadCreate(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class ThreadSearchRequest(BaseModel):
+    ids: list[str] | None = None
+    metadata: dict[str, Any] | None = None
+    status: str | None = None
+    limit: int = 10
+    offset: int = 0
+    sort_by: str = "created_at"
+    sort_order: str = "desc"
+
+
+class ThreadPatch(BaseModel):
+    metadata: dict[str, Any] | None = None
+
+
+class ThreadPruneRequest(BaseModel):
+    thread_ids: list[str]
+    strategy: str = "keep_latest"
 
 
 class ThreadRead(BaseModel):
@@ -25,11 +69,25 @@ class ThreadRead(BaseModel):
     user_id: str
     metadata: dict[str, Any]
     created_at: datetime
+    updated_at: datetime | None = None
+    state_updated_at: datetime | None = None
+    config: dict[str, Any] = Field(default_factory=dict)
+    status: str = "idle"
 
 
 class RunCreate(BaseModel):
     assistant_id: str
-    input: dict[str, Any]
+    input: Any
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    multitask_strategy: str = "enqueue"
+
+
+class RunsCancelRequest(BaseModel):
+    status: str | None = None
+    thread_id: str | None = None
+    run_ids: list[str] | None = None
 
 
 class RunResume(BaseModel):
@@ -44,3 +102,8 @@ class RunRead(BaseModel):
     output: dict[str, Any] | None
     interrupts: list[dict[str, Any]] | None = None
     last_error: str | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    multitask_strategy: str = "enqueue"

@@ -27,6 +27,10 @@ async def _execute_and_persist(
 
         db_run.status = "running"
         db_run.last_error = None
+        thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+        if thread is not None:
+            thread.status = "busy"
+            thread.state_updated_at = db_run.updated_at
         await execution_session.commit()
         run_broker.publish(run_id, "start")
 
@@ -43,6 +47,10 @@ async def _execute_and_persist(
             db_run.status = "error"
             db_run.last_error = str(exc)
 
+        thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+        if thread is not None:
+            thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
+            thread.state_updated_at = db_run.updated_at
         await execution_session.commit()
         run_broker.publish(run_id, "end", status=db_run.status)
 
@@ -59,7 +67,16 @@ async def _load_run(run_id: str) -> Run | None:
         return await session.scalar(select(Run).where(Run.run_id == run_id))
 
 
-async def prepare_and_submit_run(*, thread_id: str, assistant_id: str, payload: dict, user: User) -> Run:
+async def prepare_and_submit_run(
+    *,
+    thread_id: str,
+    assistant_id: str,
+    payload: dict,
+    user: User,
+    metadata: dict | None = None,
+    kwargs: dict | None = None,
+    multitask_strategy: str = "enqueue",
+) -> Run:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
@@ -75,6 +92,9 @@ async def prepare_and_submit_run(*, thread_id: str, assistant_id: str, payload: 
             user_id=user.identity,
             status="pending",
             input_json=payload,
+            metadata_json=metadata or {},
+            kwargs_json=kwargs or {},
+            multitask_strategy=multitask_strategy,
         )
         session.add(run)
         await session.commit()

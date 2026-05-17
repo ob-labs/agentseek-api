@@ -1,0 +1,121 @@
+from fastapi.testclient import TestClient
+
+
+def _create_assistant(client: TestClient, *, graph_id: str = "default") -> str:
+    response = client.post("/assistants", json={"name": f"{graph_id}-assistant", "graph_id": graph_id})
+    assert response.status_code == 200
+    return response.json()["assistant_id"]
+
+
+def _create_thread(client: TestClient) -> str:
+    response = client.post("/threads", json={"metadata": {"extra": True}})
+    assert response.status_code == 200
+    return response.json()["thread_id"]
+
+
+def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> None:
+    assistant_id = _create_assistant(client, graph_id="react_agent")
+
+    graph = client.get(f"/assistants/{assistant_id}/graph")
+    assert graph.status_code == 200
+    assert graph.json()["graph_id"] == "react_agent"
+
+    schemas = client.get(f"/assistants/{assistant_id}/schemas")
+    assert schemas.status_code == 200
+    assert "input_schema" in schemas.json()
+    assert "output_schema" in schemas.json()
+
+    subgraphs = client.get(f"/assistants/{assistant_id}/subgraphs")
+    assert subgraphs.status_code == 200
+    assert isinstance(subgraphs.json(), list)
+
+    namespaced = client.get(f"/assistants/{assistant_id}/subgraphs/root")
+    assert namespaced.status_code == 200
+    assert isinstance(namespaced.json(), list)
+
+    versioned = client.post(f"/assistants/{assistant_id}/versions")
+    assert versioned.status_code == 200
+    assert versioned.json()["version"] >= 1
+
+    latest = client.post(f"/assistants/{assistant_id}/latest")
+    assert latest.status_code == 200
+    assert latest.json()["assistant_id"] == assistant_id
+
+
+def test_run_join_and_delete_endpoints(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "join me"}},
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    joined = client.get(f"/threads/{thread_id}/runs/{run_id}/join")
+    assert joined.status_code == 200
+    assert joined.json()["run_id"] == run_id
+
+    deleted = client.delete(f"/threads/{thread_id}/runs/{run_id}")
+    assert deleted.status_code == 204
+
+    fetched = client.get(f"/threads/{thread_id}/runs/{run_id}")
+    assert fetched.status_code == 404
+
+
+def test_checkpoint_state_thread_stream_and_protocol_endpoints(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "protocol"}},
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    state = client.get(f"/threads/{thread_id}/state/{run_id}")
+    assert state.status_code == 200
+    assert state.json()["checkpoint"]["checkpoint_id"] == run_id
+
+    updated_state = client.post(f"/threads/{thread_id}/state", json={"values": {"manual": True}})
+    assert updated_state.status_code == 200
+    assert updated_state.json()["values"]["manual"] is True
+    manual_checkpoint_id = updated_state.json()["checkpoint"]["checkpoint_id"]
+
+    latest_state = client.get(f"/threads/{thread_id}/state")
+    assert latest_state.status_code == 200
+    assert latest_state.json()["values"]["manual"] is True
+
+    manual_checkpoint = client.get(f"/threads/{thread_id}/state/{manual_checkpoint_id}")
+    assert manual_checkpoint.status_code == 200
+    assert manual_checkpoint.json()["values"]["manual"] is True
+
+    checkpointed = client.post(f"/threads/{thread_id}/state/checkpoint", json={"values": {"snap": 1}})
+    assert checkpointed.status_code == 200
+    assert checkpointed.json()["checkpoint"]["thread_id"] == thread_id
+
+    thread_stream = client.get(f"/threads/{thread_id}/stream")
+    assert thread_stream.status_code == 200
+    assert thread_stream.headers["content-type"].startswith("text/event-stream")
+
+    command = client.post(
+        f"/threads/{thread_id}/commands",
+        json={"method": "run.start", "params": {"assistant_id": assistant_id, "input": {"message": "from command"}}},
+    )
+    assert command.status_code == 200
+    assert command.json()["ok"] is True
+
+    events = client.post(f"/threads/{thread_id}/stream/events", json={"channels": ["messages"]})
+    assert events.status_code == 200
+    assert events.headers["content-type"].startswith("text/event-stream")
+
+
+def test_empty_thread_state_returns_empty_payload(client: TestClient) -> None:
+    thread_id = _create_thread(client)
+
+    state = client.get(f"/threads/{thread_id}/state")
+    assert state.status_code == 200
+    assert state.json()["values"] == {}
+    assert state.json()["checkpoint"]["thread_id"] == thread_id
+    assert state.json()["metadata"]["status"] == "idle"

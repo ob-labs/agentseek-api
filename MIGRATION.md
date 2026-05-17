@@ -45,7 +45,7 @@ across six phases. All checkboxes below are satisfied.
 - [x] Confirm metadata DB URL resolution + driver normalization (`mysql+aiomysql`, `postgresql+asyncpg`).
 - [x] Ensure checkpointer setup runs once during lifecycle startup.
 - [x] Keep async checkpoint mode blocked with a clear runtime guard message.
-- [x] Depend on upstream `langchain-oceanbase` branch `release/0.4.0` until checkpoint package is published.
+- [x] Depend on published `langchain-oceanbase==0.4.0` for the LangGraph mysql-family checkpoint backend.
 
 **Verify** — `uv run pytest tests/unit/test_database_manager.py tests/unit/test_oceanbase_checkpointer.py tests/integration/test_metadata_db_config.py -q`
 
@@ -91,7 +91,7 @@ across six phases. All checkboxes below are satisfied.
 - `make test-e2e`: 2 passed against embedded SeekDB.
 - `make test-seekdb`: direct checkpoint smoke + live HTTP flow + multi-graph live HTTP — all green.
 - Embedded SeekDB launcher (`scripts/seekdb_embed_launcher.py`) wraps `pylibseekdb.open_with_service`; the Docker path still works unchanged.
-- `pyproject.toml` carries `[tool.hatch.metadata] allow-direct-references = true` so the git-sourced `langchain-oceanbase` dependency builds cleanly under hatchling.
+- `pyproject.toml` now depends on published `langchain-oceanbase==0.4.0`; the earlier git-source hatchling workaround is no longer needed.
 
 ### Sample Graph Apps (shipped in Milestone 1)
 
@@ -307,9 +307,144 @@ HTTP routes mounted on the same app.
 
 ---
 
-# Deferred Scope (Explicitly Out of Milestone 1 & 2)
+# Milestone 5 — LangSmith Agent Server API Compatibility (next sprint)
+
+**Goal:** Close the largest gaps between AgentSeek's current HTTP surface and
+the current LangSmith Agent Server API so LangSmith-style clients can use this
+server with minimal or no adaptation.
+
+**Current compatibility snapshot (2026-05-17)**
+
+- Shared method+path operations with the published LangSmith Agent Server
+  OpenAPI: **10**
+- Local-only method+path operations: **5**
+- LangSmith method+path operations still missing: **53**
+- Practical compatibility is lower than raw path overlap because several shared
+  routes still differ in request/response schema or lifecycle semantics.
+
+## Phase 5.1: Spec-Native Surface for Existing Core Flows
+
+- [ ] Add `GET /ok` alongside the existing health endpoint, returning the
+  LangSmith-style `{ "ok": true }` shape.
+- [ ] Add `GET /metrics` with at least the documented `prometheus|json` output
+  switch, even if the first cut is minimal runtime/process metrics.
+- [ ] Keep existing legacy endpoints (`GET /assistants`, `GET /threads`,
+  `GET /threads/{thread_id}/runs/{run_id}/wait`, etc.) for backward
+  compatibility, but add the spec-native route variants first.
+- [ ] Add `POST /assistants/search` and `POST /threads/search` so list/search
+  follows the LangSmith contract instead of custom `GET` list-only behavior.
+- [ ] Add `POST /threads/{thread_id}/runs/wait` and
+  `POST /threads/{thread_id}/runs/stream` so stateful run creation matches the
+  documented background/wait/stream split.
+- [ ] Add `POST /runs/wait` and `POST /runs/stream` so stateless runs expose
+  the same wait/stream variants as LangSmith deployments.
+
+**Verify**
+- `uv run pytest tests/integration/test_system_endpoints.py -q`
+- `uv run pytest tests/integration/test_assistants_crud.py tests/integration/test_threads_crud.py tests/integration/test_runs_crud.py tests/integration/test_stateless_runs_crud.py -q`
+
+**Exit criteria** — A LangSmith-oriented client sees the expected first-wave
+paths for health, list/search, and run creation modes without relying on
+AgentSeek-specific aliases.
+
+## Phase 5.2: Schema Expansion and Response Parity
+
+- [ ] Expand `AssistantCreate` / `AssistantRead` toward the LangSmith contract:
+  `assistant_id`, `graph_id`, `config`, `context`, `metadata`, `name`,
+  `description`, `created_at`, `updated_at`, and version tracking fields.
+- [ ] Expand `ThreadCreate` / `ThreadRead` toward the LangSmith contract:
+  optional caller-provided `thread_id`, `if_exists`, `ttl`, `supersteps`,
+  plus response fields for `updated_at`, `state_updated_at`, `config`,
+  `status`, and current state-derived fields where available.
+- [ ] Expand run payloads to accept the higher-value LangSmith fields first:
+  assistant-or-graph selector, arbitrary JSON input, `command`, `metadata`,
+  `config`, `context`, `stream_mode`, `stream_resumable`,
+  `multitask_strategy`, and `if_not_exists`.
+- [ ] Expand `RunRead` toward LangSmith's run resource shape:
+  `created_at`, `updated_at`, `metadata`, `kwargs`, and
+  `multitask_strategy`, while preserving AgentSeek's useful `output`,
+  `interrupts`, and `last_error` fields where they do not conflict.
+- [ ] Align `GET /info` with the documented server info payload:
+  `version`, `langgraph_py_version`, `flags`, and `metadata`.
+
+**Verify**
+- `uv run pytest tests/integration/test_assistants_crud.py tests/integration/test_threads_crud.py tests/integration/test_runs_validation.py tests/integration/test_system_endpoints.py -q`
+
+**Exit criteria** — Shared routes no longer just look similar; their request
+and response bodies are close enough to satisfy LangSmith client expectations.
+
+## Phase 5.3: Thread State and History on Top of Existing Checkpoints
+
+- [ ] Add `GET /threads/{thread_id}/state`.
+- [ ] Add `GET /threads/{thread_id}/history` and `POST /threads/{thread_id}/history`.
+- [ ] Add `POST /threads/{thread_id}/state` and
+  `POST /threads/{thread_id}/state/checkpoint` where feasible from the current
+  LangGraph checkpointer wiring.
+- [ ] Add thread patch/delete/copy primitives incrementally:
+  `PATCH /threads/{thread_id}`, `DELETE /threads/{thread_id}`,
+  `POST /threads/{thread_id}/copy`.
+- [ ] Ensure thread status (`idle`, `busy`, `interrupted`, `error`) is derived
+  deterministically from persisted run/checkpoint state rather than inferred
+  ad hoc per request.
+
+**Verify**
+- `uv run pytest tests/integration/test_threads_crud.py tests/integration/test_core_api_flow.py -q`
+- Add targeted tests for state/history/checkpoint retrieval once endpoints land.
+
+**Exit criteria** — The server exposes the checkpoint-backed thread state that
+LangSmith clients expect, not just metadata rows plus run records.
+
+## Phase 5.4: Streaming, Resume, and Cancellation Parity
+
+- [ ] Keep the current SSE `message_chunk` proof path intact while adding the
+  documented request paths and query/header semantics.
+- [ ] Add `POST /threads/{thread_id}/runs/{run_id}/cancel` and
+  `POST /runs/cancel`.
+- [ ] Support resumable run streaming semantics where practical:
+  `stream_resumable`, `Last-Event-ID`, and explicit persisted event replay
+  instead of the current in-memory-only broker.
+- [ ] Evaluate whether the existing custom
+  `POST /threads/{thread_id}/runs/{run_id}/resume` should remain as a
+  compatibility extension, or whether resume should be represented primarily
+  through LangSmith protocol/state commands.
+- [ ] Add the protocol-v2 surfaces:
+  `POST /threads/{thread_id}/commands` and
+  `POST /threads/{thread_id}/stream/events`.
+
+**Verify**
+- `uv run pytest tests/integration/test_runs_streaming.py tests/integration/test_runs_streaming_errors.py tests/integration/test_runs_resume.py tests/integration/test_runs_wait_and_get.py -q`
+- `uv run pytest tests/integration/test_live_provider_streaming.py -q`
+
+**Exit criteria** — Streaming is compatible at both the basic run SSE layer
+and the newer protocol-v2 command/event layer, with restart-safe replay rather
+than process-local buffering only.
+
+## Phase 5.5: Auth and Remaining High-Value Surface
+
+- [ ] Add a first-class `X-Api-Key` auth mode suitable for LangSmith-style
+  deployments instead of requiring a custom backend for that contract.
+- [ ] Preserve the existing `noop` and `custom` modes for local dev and custom
+  platform integrations.
+- [ ] Add assistants patch/delete/count and the highest-value assistant
+  introspection endpoints (`graph`, `schemas`, `subgraphs`) if the data is
+  derivable from the registered graph registry.
+- [ ] Defer Store, Crons, MCP, and A2A until the assistants/threads/runs
+  compatibility work above is stable, but keep them tracked as explicit
+  follow-on milestones rather than silent gaps.
+
+**Verify**
+- `uv run pytest tests/unit/test_auth.py tests/unit/test_auth_deps.py tests/integration/test_auth_scope_matrix.py -q`
+- Add targeted assistant compatibility tests as the new routes land.
+
+**Exit criteria** — Core LangSmith deployment auth and assistant lifecycle
+operations are covered well enough that the remaining gaps are mostly advanced
+surfaces, not first-contact blockers.
+
+---
+
+# Deferred Scope (Explicitly Out of Milestone 1, 2, and 5)
 
 - Crons / scheduler.
 - MCP and A2A endpoint parity.
-- Thread copy/prune and run-batch APIs.
+- Full Store API parity.
 - Distributed worker topology and lease/reaper production architecture.
