@@ -163,6 +163,34 @@ def test_publish_message_transcript_handles_structured_content_blocks(monkeypatc
     assert block_starts[1]["content"]["type"] == "reasoning"
 
 
+def test_publish_message_transcript_does_not_duplicate_structured_tool_call_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(protocol, "thread_protocol_broker", broker)
+
+    protocol.publish_message_transcript(
+        "thread-1",
+        run_id="run-1",
+        messages=[
+            {
+                "type": "AIMessage",
+                "content": [
+                    {"type": "tool_call", "id": "tool-1", "name": "search", "args": {"q": "weather"}},
+                ],
+                "tool_calls": [{"id": "tool-1", "name": "search", "args": {"q": "weather"}}],
+            }
+        ],
+    )
+
+    block_starts = [
+        event["params"]["data"]["content"]
+        for event in broker._events["thread-1"]
+        if event["params"]["data"]["event"] == "content-block-start"
+    ]
+    assert block_starts == [{"type": "tool_call", "id": "tool-1", "name": "search", "args": {"q": "weather"}}]
+
+
 def test_message_chunk_finish_order_is_stable(monkeypatch: pytest.MonkeyPatch) -> None:
     broker = ThreadProtocolEventBroker()
     monkeypatch.setattr(protocol, "thread_protocol_broker", broker)

@@ -449,7 +449,11 @@ def _message_blocks(message: dict[str, Any]) -> tuple[str | None, list[dict[str,
         for block in content:
             if isinstance(block, dict) and isinstance(block.get("type"), str):
                 blocks.append(block)
-    if role == "ai" and isinstance(tool_calls, list):
+    has_tool_call_block = any(
+        isinstance(block, dict) and block.get("type") in {"tool_call", "tool_call_chunk"}
+        for block in blocks
+    )
+    if role == "ai" and isinstance(tool_calls, list) and not has_tool_call_block:
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
                 continue
