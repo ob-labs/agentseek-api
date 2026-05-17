@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -9,12 +9,15 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.thread_protocol import (
+    publish_content_block_delta,
+    publish_content_block_finish,
+    publish_content_block_start,
     publish_input_requested,
-    publish_message_chunk,
-    publish_message_chunk_delta,
-    publish_message_finish,
+    publish_message_complete,
+    publish_message_start,
     publish_message_transcript,
     publish_tool_event,
+    publish_updates_event,
     publish_values_event,
 )
 
@@ -98,34 +101,274 @@ def _protocol_role_for_message(message: BaseMessage) -> str | None:
 
 
 class _ProtocolMessageStreamState:
+    @dataclass
+    class _OpenMessage:
+        role: str
+        namespace: list[str] | None
+        open_blocks: dict[int, str] = field(default_factory=dict)
+        text_contents: dict[int, str] = field(default_factory=dict)
+
     def __init__(self, *, thread_id: str) -> None:
         self.thread_id = thread_id
-        self._open_message_ids: dict[str, list[str] | None] = {}
+        self._open_message_ids: dict[str, _ProtocolMessageStreamState._OpenMessage] = {}
         self.saw_live_messages = False
 
-    def publish_chunk(self, *, message_id: str, role: str, text: str, namespace: list[str] | None = None) -> None:
-        if message_id not in self._open_message_ids:
-            publish_message_chunk(
+    def _finish_blocks(
+        self,
+        state: "_ProtocolMessageStreamState._OpenMessage",
+        *,
+        namespace: list[str] | None = None,
+        before_index: int | None = None,
+    ) -> None:
+        effective_namespace = state.namespace or namespace
+        for index in sorted(list(state.open_blocks)):
+            if before_index is not None and index >= before_index:
+                continue
+            publish_content_block_finish(
+                self.thread_id,
+                index=index,
+                namespace=effective_namespace,
+            )
+            del state.open_blocks[index]
+
+    def _publish_text_block(
+        self,
+        state: "_ProtocolMessageStreamState._OpenMessage",
+        *,
+        index: int,
+        text: str,
+        namespace: list[str] | None = None,
+    ) -> None:
+        effective_namespace = state.namespace or namespace
+        if index not in state.open_blocks:
+            publish_content_block_start(
+                self.thread_id,
+                index=index,
+                content={"type": "text", "text": ""},
+                namespace=effective_namespace,
+            )
+            state.open_blocks[index] = "text"
+        previous_text = state.text_contents.get(index, "")
+        if text == previous_text:
+            return
+        delta_text = text[len(previous_text) :] if text.startswith(previous_text) else text
+        if delta_text:
+            publish_content_block_delta(
+                self.thread_id,
+                index=index,
+                delta={"type": "text-delta", "text": delta_text},
+                namespace=effective_namespace,
+            )
+        state.text_contents[index] = text
+
+    def _publish_nontext_block(
+        self,
+        state: "_ProtocolMessageStreamState._OpenMessage",
+        *,
+        index: int,
+        block: dict[str, Any],
+        namespace: list[str] | None = None,
+        final: bool = False,
+    ) -> None:
+        effective_namespace = state.namespace or namespace
+        if index not in state.open_blocks:
+            publish_content_block_start(
+                self.thread_id,
+                index=index,
+                content=block,
+                namespace=effective_namespace,
+            )
+            if final:
+                publish_content_block_finish(
+                    self.thread_id,
+                    index=index,
+                    content=block,
+                    namespace=effective_namespace,
+                )
+                return
+            state.open_blocks[index] = str(block.get("type", "block"))
+            return
+
+        publish_content_block_delta(
+            self.thread_id,
+            index=index,
+            delta=block,
+            namespace=effective_namespace,
+        )
+        if final:
+            publish_content_block_finish(
+                self.thread_id,
+                index=index,
+                content=block,
+                namespace=effective_namespace,
+            )
+            del state.open_blocks[index]
+
+    def publish_blocks(
+        self,
+        *,
+        message_id: str,
+        role: str,
+        blocks: list[dict[str, Any]],
+        namespace: list[str] | None = None,
+    ) -> None:
+        state = self._open_message_ids.get(message_id)
+        if state is None:
+            publish_message_start(
                 self.thread_id,
                 message_id=message_id,
                 role=role,
-                text=text,
                 namespace=namespace,
             )
-            self._open_message_ids[message_id] = list(namespace) if namespace is not None else None
-        else:
-            publish_message_chunk_delta(
-                self.thread_id,
-                text=text,
-                namespace=namespace,
+            state = self._OpenMessage(
+                role=role,
+                namespace=list(namespace) if namespace is not None else None,
             )
+            self._open_message_ids[message_id] = state
+        elif state.namespace is None and namespace is not None:
+            state.namespace = list(namespace)
+
+        for index, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            self._finish_blocks(state, namespace=namespace, before_index=index)
+            if block_type == "text":
+                text = block.get("text")
+                if not isinstance(text, str):
+                    continue
+                self._publish_text_block(state, index=index, text=text, namespace=namespace)
+                continue
+
+            self._publish_nontext_block(state, index=index, block=block, namespace=namespace)
         self.saw_live_messages = True
+
+    def merge_final_messages(self, *, messages: list[dict[str, Any]], run_id: str) -> None:
+        transcript_messages = [
+            item
+            for item in (_protocol_message_from_transcript(message) for message in messages)
+            if item is not None
+        ]
+        open_items = list(self._open_message_ids.items())
+        matched = min(len(open_items), len(transcript_messages))
+
+        for (_message_id, state), (role, blocks) in zip(open_items[:matched], transcript_messages[:matched], strict=False):
+            if role != state.role:
+                continue
+            for index, block in enumerate(blocks):
+                if not isinstance(block, dict):
+                    continue
+                self._finish_blocks(state, before_index=index)
+                if block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        self._publish_text_block(state, index=index, text=text)
+                    continue
+                self._publish_nontext_block(state, index=index, block=block, final=True)
+
+        if matched < len(transcript_messages):
+            remaining = messages[-(len(transcript_messages) - matched) :]
+            publish_message_transcript(
+                self.thread_id,
+                run_id=run_id,
+                messages=remaining,
+                start_index=matched,
+            )
 
     def finish_all(self, *, namespace: list[str] | None = None) -> None:
         while self._open_message_ids:
             message_id = next(iter(self._open_message_ids))
-            message_namespace = self._open_message_ids.pop(message_id)
-            publish_message_finish(self.thread_id, namespace=message_namespace or namespace)
+            state = self._open_message_ids.pop(message_id)
+            message_namespace = state.namespace or namespace
+            self._finish_blocks(state, namespace=message_namespace)
+            publish_message_complete(self.thread_id, namespace=message_namespace)
+
+
+def _protocol_blocks_for_message(message: BaseMessage) -> list[dict[str, Any]]:
+    blocks: list[dict[str, Any]] = []
+    content_blocks = getattr(message, "content_blocks", None)
+    saw_tool_call_block = False
+    if isinstance(content_blocks, list):
+        for block in content_blocks:
+            if isinstance(block, dict) and isinstance(block.get("type"), str):
+                normalized_block = _normalize_stream_value(block)
+                if not isinstance(normalized_block, dict):
+                    continue
+                if normalized_block.get("type") in {"tool_call", "tool_call_chunk"}:
+                    saw_tool_call_block = True
+                blocks.append(normalized_block)
+    else:
+        content = getattr(message, "content", None)
+        if isinstance(content, str) and content:
+            blocks.append({"type": "text", "text": content})
+
+    if _protocol_role_for_message(message) == "ai" and not saw_tool_call_block:
+        tool_calls = getattr(message, "tool_calls", None) or []
+        for tool_call in tool_calls:
+            normalized_tool_call = _normalize_stream_value(tool_call)
+            if not isinstance(normalized_tool_call, dict):
+                continue
+            blocks.append(
+                {
+                    "type": "tool_call",
+                    "id": normalized_tool_call.get("id"),
+                    "name": normalized_tool_call.get("name", "tool"),
+                    "args": normalized_tool_call.get("args", {}),
+                }
+            )
+    return blocks
+
+
+def _protocol_message_from_transcript(message: dict[str, Any]) -> tuple[str, list[dict[str, Any]]] | None:
+    message_type = str(message.get("type", ""))
+    role_map = {
+        "HumanMessage": "human",
+        "AIMessage": "ai",
+        "SystemMessage": "system",
+    }
+    role = role_map.get(message_type)
+    if role is None:
+        return None
+
+    blocks: list[dict[str, Any]] = []
+    content = message.get("content")
+    if isinstance(content, str) and content:
+        blocks.append({"type": "text", "text": content})
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("type"), str):
+                blocks.append(block)
+
+    if role == "ai" and not any(
+        isinstance(block, dict) and block.get("type") in {"tool_call", "tool_call_chunk"}
+        for block in blocks
+    ):
+        tool_calls = message.get("tool_calls") or []
+        if isinstance(tool_calls, list):
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                blocks.append(
+                    {
+                        "type": "tool_call",
+                        "id": tool_call.get("id"),
+                        "name": tool_call.get("name", "tool"),
+                        "args": tool_call.get("args", {}),
+                    }
+                )
+    return (role, blocks) if blocks else None
+
+
+def _extract_protocol_result_messages(normalized_result: dict[str, Any]) -> list[dict[str, Any]] | None:
+    messages = normalized_result.get("messages")
+    if isinstance(messages, list):
+        return messages
+    output = normalized_result.get("output")
+    if isinstance(output, dict):
+        nested_messages = output.get("messages")
+        if isinstance(nested_messages, list):
+            return nested_messages
+    return None
 
 
 def _protocol_namespace_for_event(event: dict[str, Any]) -> list[str]:
@@ -135,11 +378,7 @@ def _protocol_namespace_for_event(event: dict[str, Any]) -> list[str]:
 
     checkpoint_ns = metadata.get("langgraph_checkpoint_ns") or metadata.get("checkpoint_ns")
     if isinstance(checkpoint_ns, str) and checkpoint_ns:
-        namespace: list[str] = []
-        for segment in checkpoint_ns.split("|"):
-            node_name = segment.split(":", 1)[0].strip()
-            if node_name:
-                namespace.append(node_name)
+        namespace = [segment.strip() for segment in checkpoint_ns.split("|") if segment.strip()]
         if namespace:
             return namespace
 
@@ -267,24 +506,29 @@ async def execute_run(
         if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:
             data = stream_event.get("data", {})
             chunk = data.get("chunk") if isinstance(data, dict) else None
-            for message in _extract_chunk_messages(chunk):
+            for message_index, message in enumerate(_extract_chunk_messages(chunk)):
                 role = _protocol_role_for_message(message)
-                text = _extract_text_chunk(getattr(message, "content", None))
-                if role is None or text in ("", None):
+                blocks = _protocol_blocks_for_message(message)
+                if role is None or not blocks:
                     continue
-                protocol_messages.publish_chunk(
-                    message_id=str(stream_event.get("run_id", "")) or f"{run_id}:message",
+                explicit_message_id = getattr(message, "id", None)
+                if isinstance(explicit_message_id, str) and explicit_message_id:
+                    message_id = explicit_message_id
+                else:
+                    message_id = f"{str(stream_event.get('run_id', '')) or run_id}:message:{message_index}"
+                protocol_messages.publish_blocks(
+                    message_id=message_id,
                     role=role,
-                    text=text,
+                    blocks=blocks,
                     namespace=protocol_namespace,
                 )
             if raw_event_name == "on_llm_stream":
                 text = _extract_text_chunk(chunk)
                 if text not in ("", None):
-                    protocol_messages.publish_chunk(
-                        message_id=str(stream_event.get("run_id", "")) or f"{run_id}:message",
+                    protocol_messages.publish_blocks(
+                        message_id=f"{str(stream_event.get('run_id', '')) or run_id}:message:0",
                         role="ai",
-                        text=text,
+                        blocks=[{"type": "text", "text": text}],
                         namespace=protocol_namespace,
                     )
         if raw_event_name == "on_tool_start":
@@ -321,17 +565,20 @@ async def execute_run(
             if isinstance(normalized_chunk, dict):
                 normalized_chunk.pop("__interrupt__", None)
                 if normalized_chunk:
-                    publish_values_event(thread_id, values=normalized_chunk, namespace=protocol_namespace)
+                    publish_updates_event(thread_id, values=normalized_chunk, namespace=protocol_namespace)
         if stream_event.get("event") == "on_chain_end" and _is_root_stream_event(stream_event):
             data = stream_event.get("data", {})
             if isinstance(data, dict) and "output" in data:
                 result = data["output"]
                 normalized_result = _normalize_stream_value(result)
                 if isinstance(normalized_result, dict):
-                    messages = normalized_result.get("messages")
+                    messages = _extract_protocol_result_messages(normalized_result)
+                    if isinstance(messages, list):
+                        if protocol_messages.saw_live_messages:
+                            protocol_messages.merge_final_messages(messages=messages, run_id=run_id)
+                        else:
+                            publish_message_transcript(thread_id, run_id=run_id, messages=messages)
                     protocol_messages.finish_all()
-                    if isinstance(messages, list) and not protocol_messages.saw_live_messages:
-                        publish_message_transcript(thread_id, run_id=run_id, messages=messages)
                     publish_values_event(thread_id, values=normalized_result, namespace=protocol_namespace)
 
     if interrupt_chunk is not None:

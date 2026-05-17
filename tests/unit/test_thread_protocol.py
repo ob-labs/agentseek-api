@@ -136,6 +136,33 @@ def test_publish_message_transcript_handles_text_tool_calls_and_unknown_roles(mo
     assert events[-1]["params"]["data"] == {"event": "message-finish"}
 
 
+def test_publish_message_transcript_handles_structured_content_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(protocol, "thread_protocol_broker", broker)
+
+    protocol.publish_message_transcript(
+        "thread-1",
+        run_id="run-1",
+        messages=[
+            {
+                "type": "AIMessage",
+                "content": [
+                    {"type": "text", "text": "hello"},
+                    {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
+                ],
+            }
+        ],
+    )
+
+    block_starts = [
+        event["params"]["data"]
+        for event in broker._events["thread-1"]
+        if event["params"]["data"]["event"] == "content-block-start"
+    ]
+    assert block_starts[0]["content"] == {"type": "text", "text": "hello"}
+    assert block_starts[1]["content"]["type"] == "reasoning"
+
+
 def test_message_chunk_finish_order_is_stable(monkeypatch: pytest.MonkeyPatch) -> None:
     broker = ThreadProtocolEventBroker()
     monkeypatch.setattr(protocol, "thread_protocol_broker", broker)

@@ -187,13 +187,22 @@ def test_protocol_stream_filters_subgraph_namespace_events(client: TestClient) -
     assert command.status_code == 200
     assert command.json()["type"] == "success"
 
+    unfiltered_stream = client.post(
+        f"/threads/{thread_id}/stream/events",
+        json={"channels": ["updates", "input"]},
+    )
+    assert unfiltered_stream.status_code == 200
+    unfiltered_events = _parse_sse_events(unfiltered_stream.text)
+    update_event = next(event for event in unfiltered_events if event["event"] == "updates")
+    namespace_prefix = update_event["data"]["params"]["namespace"][:1]
+
     stream = client.post(
         f"/threads/{thread_id}/stream/events",
-        json={"channels": ["values", "input"], "namespaces": [["node_1"]]},
+        json={"channels": ["updates", "input"], "namespaces": [namespace_prefix]},
     )
     assert stream.status_code == 200
 
     events = _parse_sse_events(stream.text)
     assert events
-    assert {event["event"] for event in events} <= {"values", "input.requested"}
-    assert all(event["data"]["params"]["namespace"][:1] == ["node_1"] for event in events)
+    assert {event["event"] for event in events} <= {"updates", "input.requested"}
+    assert all(event["data"]["params"]["namespace"][:1] == namespace_prefix for event in events)

@@ -227,6 +227,25 @@ def publish_values_event(
     )
 
 
+def publish_updates_event(
+    thread_id: str,
+    *,
+    values: Any,
+    namespace: list[str] | None = None,
+) -> dict[str, Any]:
+    return thread_protocol_broker.publish(
+        thread_id,
+        {
+            "method": "updates",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": values,
+            },
+        },
+    )
+
+
 def publish_input_requested(
     thread_id: str,
     *,
@@ -250,12 +269,11 @@ def publish_input_requested(
     )
 
 
-def publish_message_chunk(
+def publish_message_start(
     thread_id: str,
     *,
     message_id: str,
     role: str,
-    text: str,
     namespace: list[str] | None = None,
 ) -> None:
     thread_protocol_broker.publish(
@@ -273,6 +291,15 @@ def publish_message_chunk(
             },
         },
     )
+
+
+def publish_content_block_start(
+    thread_id: str,
+    *,
+    index: int,
+    content: dict[str, Any],
+    namespace: list[str] | None = None,
+) -> None:
     thread_protocol_broker.publish(
         thread_id,
         {
@@ -282,33 +309,19 @@ def publish_message_chunk(
                 "timestamp": protocol_timestamp_ms(),
                 "data": {
                     "event": "content-block-start",
-                    "index": 0,
-                    "content": {"type": "text", "text": ""},
-                },
-            },
-        },
-    )
-    thread_protocol_broker.publish(
-        thread_id,
-        {
-            "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "content-block-delta",
-                    "index": 0,
-                    "delta": {"type": "text-delta", "text": text},
+                    "index": index,
+                    "content": content,
                 },
             },
         },
     )
 
 
-def publish_message_chunk_delta(
+def publish_content_block_delta(
     thread_id: str,
     *,
-    text: str,
+    index: int,
+    delta: dict[str, Any],
     namespace: list[str] | None = None,
 ) -> None:
     thread_protocol_broker.publish(
@@ -320,19 +333,27 @@ def publish_message_chunk_delta(
                 "timestamp": protocol_timestamp_ms(),
                 "data": {
                     "event": "content-block-delta",
-                    "index": 0,
-                    "delta": {"type": "text-delta", "text": text},
+                    "index": index,
+                    "delta": delta,
                 },
             },
         },
     )
 
 
-def publish_message_finish(
+def publish_content_block_finish(
     thread_id: str,
     *,
+    index: int,
+    content: dict[str, Any] | None = None,
     namespace: list[str] | None = None,
 ) -> None:
+    data: dict[str, Any] = {
+        "event": "content-block-finish",
+        "index": index,
+    }
+    if content is not None:
+        data["content"] = content
     thread_protocol_broker.publish(
         thread_id,
         {
@@ -340,13 +361,17 @@ def publish_message_finish(
             "params": {
                 "namespace": namespace or [],
                 "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "content-block-finish",
-                    "index": 0,
-                },
+                "data": data,
             },
         },
     )
+
+
+def publish_message_complete(
+    thread_id: str,
+    *,
+    namespace: list[str] | None = None,
+) -> None:
     thread_protocol_broker.publish(
         thread_id,
         {
@@ -360,6 +385,47 @@ def publish_message_finish(
             },
         },
     )
+
+
+def publish_message_chunk(
+    thread_id: str,
+    *,
+    message_id: str,
+    role: str,
+    text: str,
+    namespace: list[str] | None = None,
+) -> None:
+    publish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace)
+    publish_content_block_start(thread_id, index=0, content={"type": "text", "text": ""}, namespace=namespace)
+    publish_content_block_delta(
+        thread_id,
+        index=0,
+        delta={"type": "text-delta", "text": text},
+        namespace=namespace,
+    )
+
+
+def publish_message_chunk_delta(
+    thread_id: str,
+    *,
+    text: str,
+    namespace: list[str] | None = None,
+) -> None:
+    publish_content_block_delta(
+        thread_id,
+        index=0,
+        delta={"type": "text-delta", "text": text},
+        namespace=namespace,
+    )
+
+
+def publish_message_finish(
+    thread_id: str,
+    *,
+    namespace: list[str] | None = None,
+) -> None:
+    publish_content_block_finish(thread_id, index=0, namespace=namespace)
+    publish_message_complete(thread_id, namespace=namespace)
 
 
 def _message_blocks(message: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -379,6 +445,10 @@ def _message_blocks(message: dict[str, Any]) -> tuple[str | None, list[dict[str,
     blocks: list[dict[str, Any]] = []
     if isinstance(content, str) and content:
         blocks.append({"type": "text", "text": content})
+    elif isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and isinstance(block.get("type"), str):
+                blocks.append(block)
     if role == "ai" and isinstance(tool_calls, list):
         for tool_call in tool_calls:
             if not isinstance(tool_call, dict):
@@ -400,70 +470,16 @@ def publish_message_transcript(
     run_id: str,
     messages: list[dict[str, Any]],
     namespace: list[str] | None = None,
+    start_index: int = 0,
 ) -> None:
-    timestamp = protocol_timestamp_ms()
     for index, message in enumerate(messages):
         role, blocks = _message_blocks(message)
         if role is None or not blocks:
             continue
 
-        message_id = f"{run_id}:{index}"
-        thread_protocol_broker.publish(
-            thread_id,
-            {
-                "method": "messages",
-                "params": {
-                    "namespace": namespace or [],
-                    "timestamp": timestamp,
-                    "data": {
-                        "event": "message-start",
-                        "role": role,
-                        "id": message_id,
-                    },
-                },
-            },
-        )
+        message_id = f"{run_id}:{start_index + index}"
+        publish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace)
         for block_index, block in enumerate(blocks):
-            thread_protocol_broker.publish(
-                thread_id,
-                {
-                    "method": "messages",
-                    "params": {
-                        "namespace": namespace or [],
-                        "timestamp": timestamp,
-                        "data": {
-                            "event": "content-block-start",
-                            "index": block_index,
-                            "content": block,
-                        },
-                    },
-                },
-            )
-            thread_protocol_broker.publish(
-                thread_id,
-                {
-                    "method": "messages",
-                    "params": {
-                        "namespace": namespace or [],
-                        "timestamp": timestamp,
-                        "data": {
-                            "event": "content-block-finish",
-                            "index": block_index,
-                            "content": block,
-                        },
-                    },
-                },
-            )
-        thread_protocol_broker.publish(
-            thread_id,
-            {
-                "method": "messages",
-                "params": {
-                    "namespace": namespace or [],
-                    "timestamp": timestamp,
-                    "data": {
-                        "event": "message-finish",
-                    },
-                },
-            },
-        )
+            publish_content_block_start(thread_id, index=block_index, content=block, namespace=namespace)
+            publish_content_block_finish(thread_id, index=block_index, content=block, namespace=namespace)
+        publish_message_complete(thread_id, namespace=namespace)
