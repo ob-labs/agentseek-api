@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import TextIO
 
 from agentseek_api import __version__
+from agentseek_api.settings import DEFAULT_API_PORT
 
 __all__ = [
     "CliError",
@@ -467,8 +468,8 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
             *[f"RUN {pip_install_prefix}{command}" for command in dependency_install_commands],
             *config.dockerfile_lines,
             f"ENV AGENTSEEK_GRAPHS={container_config}",
-            "EXPOSE 2026",
-            'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2026"]',
+            f"EXPOSE {DEFAULT_API_PORT}",
+            f'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "{DEFAULT_API_PORT}"]',
             "",
         ]
     )
@@ -606,7 +607,7 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
         "--add-host",
         "host.docker.internal:host-gateway",
         "-p",
-        f"{args.port}:2026",
+        f"{args.port}:{DEFAULT_API_PORT}",
     ]
     for key, value in sorted(container_env.items()):
         command.extend(["-e", f"{key}={value}"])
@@ -645,7 +646,7 @@ def _add_command_parsers(
 ) -> None:
     dev_parser = subparsers.add_parser("dev", parents=[runtime_parent])
     dev_parser.add_argument("--host", default="127.0.0.1")
-    dev_parser.add_argument("--port", default=2026, type=int)
+    dev_parser.add_argument("--port", default=DEFAULT_API_PORT, type=int)
     dev_parser.add_argument("--no-reload", action="store_true")
     dev_parser.add_argument("--n-jobs-per-worker", type=int)
     dev_parser.add_argument("--debug-port", type=int)
@@ -657,7 +658,7 @@ def _add_command_parsers(
 
     serve_parser = subparsers.add_parser("serve", parents=[runtime_parent])
     serve_parser.add_argument("--host", default="127.0.0.1")
-    serve_parser.add_argument("--port", default=2026, type=int)
+    serve_parser.add_argument("--port", default=DEFAULT_API_PORT, type=int)
 
     subparsers.add_parser("version")
 

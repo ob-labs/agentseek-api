@@ -11,7 +11,7 @@ Core Agent Protocol runtime for LangGraph / LangChain apps, with OceanBase as th
 3. Run:
    - `uv run agentseek dev`
    - optional explicit config: `uv run agentseek dev --config ./langgraph.json`
-   - raw fallback: `uv run uvicorn agentseek_api.main:app --reload --port 2026`
+   - raw fallback: `uv run uvicorn agentseek_api.main:app --reload --port 2024`
    - generate a container file from an explicit config: `uv run agentseek dockerfile --config ./examples/external_graph/manifest.json ./Dockerfile.agentseek`
    - plan a local image build: `uv run agentseek build --config ./examples/external_graph/manifest.json -t agentseek-api:dev`
 4. Exercise the bundled sample graphs in-process:

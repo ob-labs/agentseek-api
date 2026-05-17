@@ -91,7 +91,7 @@ def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) 
     exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2026"]
+    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -329,7 +329,7 @@ def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: P
     assert 'COPY . /deps/agent' in content
     assert 'ENV PYTHONPATH=/deps/agent' in content
     assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json' in content
-    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2026"]' in content
+    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]' in content
 
 
 def test_dockerfile_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:
@@ -587,7 +587,7 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Pa
     assert 'RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*' in generated
     assert 'ENV PYTHONPATH=/deps/agent' in generated
     assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json' in generated
-    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2026"]' in generated
+    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]' in generated
 
 
 def test_build_runtime_env_rejects_invalid_env_lines(tmp_path: Path) -> None:
@@ -859,7 +859,7 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
         "--add-host",
         "host.docker.internal:host-gateway",
         "-p",
-        "8123:2026",
+        "8123:2024",
     ]
     assert capture.calls[1][-1] == "agentseek:test"
     container_env = _docker_env_from_run_command(capture.calls[1])
@@ -998,7 +998,7 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: 
         "--add-host",
         "host.docker.internal:host-gateway",
         "-p",
-        "8124:2026",
+        "8124:2024",
     ]
     assert capture.calls[2][-1] == "agentseek-up:8124"
     container_env = _docker_env_from_run_command(capture.calls[2])
@@ -1058,7 +1058,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path
         "--add-host",
         "host.docker.internal:host-gateway",
         "-p",
-        "8123:2026",
+        "8123:2024",
     ]
     assert capture.calls[1][-1] == "agentseek:test"
     container_env = _docker_env_from_run_command(capture.calls[1])

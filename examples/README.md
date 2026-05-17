@@ -36,27 +36,27 @@ SeekDB. Useful during development when you want a tight feedback loop.
 Start the server:
 
 ```bash
-uv run agentseek dev --config examples/sample_graphs_manifest.json --no-reload --port 2026
+uv run agentseek dev --config examples/sample_graphs_manifest.json --no-reload --port 2024
 ```
 
 Create an assistant bound to the sample you want, submit a run, and wait
 for the result:
 
 ```bash
-curl -s -X POST http://127.0.0.1:2026/assistants \
+curl -s -X POST http://127.0.0.1:2024/assistants \
   -H 'x-user-id: dev' -H 'content-type: application/json' \
   -d '{"name": "stress", "graph_id": "stress_test"}'
 
-curl -s -X POST http://127.0.0.1:2026/threads \
+curl -s -X POST http://127.0.0.1:2024/threads \
   -H 'x-user-id: dev' -H 'content-type: application/json' \
   -d '{"metadata": {}}'
 
 # plug the ids into the run submission:
-curl -s -X POST http://127.0.0.1:2026/threads/$THREAD_ID/runs \
+curl -s -X POST http://127.0.0.1:2024/threads/$THREAD_ID/runs \
   -H 'x-user-id: dev' -H 'content-type: application/json' \
   -d '{"assistant_id": "'$ASSISTANT_ID'", "input": {"delay": 0.01, "steps": 2}}'
 
-curl -s http://127.0.0.1:2026/threads/$THREAD_ID/runs/$RUN_ID/wait \
+curl -s http://127.0.0.1:2024/threads/$THREAD_ID/runs/$RUN_ID/wait \
   -H 'x-user-id: dev'
 ```
 

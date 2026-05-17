@@ -1,11 +1,13 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+DEFAULT_API_PORT = 2024
+
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     APP_NAME: str = "AgentSeek API"
-    PORT: int = 2026
+    PORT: int = DEFAULT_API_PORT
     METADATA_DB_URL: str | None = None
     METADATA_DB_BACKEND: str = "auto"
     SEEKDB_URL: str = "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
