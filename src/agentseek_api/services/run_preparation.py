@@ -9,6 +9,7 @@ from agentseek_api.models.auth import User
 from agentseek_api.services.executor import get_executor
 from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
 from agentseek_api.services.run_state import run_broker
+from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
 
 
 def _is_cancelled_run(run: Run) -> bool:
@@ -63,6 +64,18 @@ async def _execute_and_persist(
             thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
             thread.state_updated_at = db_run.updated_at
         await execution_session.commit()
+        lifecycle_state = "completed"
+        if db_run.status == "interrupted":
+            lifecycle_state = "interrupted"
+        elif db_run.status == "error":
+            lifecycle_state = "failed"
+        publish_lifecycle_event(
+            thread_id,
+            event=lifecycle_state,
+            graph_name=graph_id,
+            error=db_run.last_error,
+        )
+        thread_protocol_broker.run_finished(thread_id)
         run_broker.publish(run_id, "end", status=db_run.status)
 
 
@@ -113,6 +126,8 @@ async def prepare_and_submit_run(
         await session.commit()
         await session.refresh(run)
 
+    thread_protocol_broker.run_started(thread_id)
+    publish_lifecycle_event(thread_id, event="started", graph_name=graph_id)
     await get_executor().submit(
         lambda: _execute_and_persist(
             run_id=run.run_id,
@@ -147,6 +162,8 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
             thread.state_updated_at = datetime.now(UTC)
         await session.commit()
 
+    thread_protocol_broker.run_started(thread_id)
+    publish_lifecycle_event(thread_id, event="started", graph_name=graph_id)
     await get_executor().submit(
         lambda: _execute_and_persist(
             run_id=run_id,

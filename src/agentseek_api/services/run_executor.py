@@ -8,6 +8,12 @@ from langgraph.types import Command
 from agentseek_api.core.database import db_manager
 from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
 from agentseek_api.services.run_state import run_broker
+from agentseek_api.services.thread_protocol import (
+    publish_input_requested,
+    publish_message_transcript,
+    publish_tool_event,
+    publish_values_event,
+)
 
 UNSET = object()
 
@@ -177,6 +183,29 @@ async def execute_run(
     async for stream_event in graph.astream_events(invocation, config, version="v2"):
         for event_name, event_payload in _translate_stream_events(stream_event):
             run_broker.publish(run_id, event_name, **event_payload)
+        raw_event_name = stream_event.get("event")
+        if raw_event_name == "on_tool_start":
+            metadata = stream_event.get("metadata", {})
+            data = stream_event.get("data", {})
+            publish_tool_event(
+                thread_id,
+                tool_event="tool-started",
+                tool_call_id=str(stream_event.get("run_id", "")),
+                tool_name=str(stream_event.get("name", "tool")),
+                node=str(metadata.get("langgraph_node")) if isinstance(metadata, dict) and metadata.get("langgraph_node") else None,
+                input_payload=_normalize_stream_value(data.get("input")) if isinstance(data, dict) and "input" in data else None,
+            )
+        if raw_event_name == "on_tool_end":
+            metadata = stream_event.get("metadata", {})
+            data = stream_event.get("data", {})
+            publish_tool_event(
+                thread_id,
+                tool_event="tool-finished",
+                tool_call_id=str(stream_event.get("run_id", "")),
+                tool_name=str(stream_event.get("name", "tool")),
+                node=str(metadata.get("langgraph_node")) if isinstance(metadata, dict) and metadata.get("langgraph_node") else None,
+                output_payload=_normalize_stream_value(data.get("output")) if isinstance(data, dict) and "output" in data else None,
+            )
         if stream_event.get("event") == "on_chain_stream" and _is_root_stream_event(stream_event):
             data = stream_event.get("data", {})
             chunk = data.get("chunk") if isinstance(data, dict) else None
@@ -186,12 +215,26 @@ async def execute_run(
             data = stream_event.get("data", {})
             if isinstance(data, dict) and "output" in data:
                 result = data["output"]
+                normalized_result = _normalize_stream_value(result)
+                if isinstance(normalized_result, dict):
+                    messages = normalized_result.get("messages")
+                    if isinstance(messages, list):
+                        publish_message_transcript(thread_id, run_id=run_id, messages=messages)
+                    publish_values_event(thread_id, values=normalized_result)
 
     if interrupt_chunk is not None:
         if isinstance(result, dict):
             result = {**result, "__interrupt__": interrupt_chunk}
         else:
             result = {"result": result, "__interrupt__": interrupt_chunk}
+        for item in _normalize_stream_value(interrupt_chunk):
+            if not isinstance(item, dict):
+                continue
+            publish_input_requested(
+                thread_id,
+                interrupt_id=str(item.get("id", "")),
+                payload=item.get("value"),
+            )
 
     output = entry.extract_output(result, payload)
     interrupts = output.get("interrupts", []) if isinstance(output, dict) else []
