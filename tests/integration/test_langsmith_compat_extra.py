@@ -112,10 +112,16 @@ def test_checkpoint_state_thread_stream_and_protocol_endpoints(client: TestClien
 
     command = client.post(
         f"/threads/{thread_id}/commands",
-        json={"method": "run.start", "params": {"assistant_id": assistant_id, "input": {"message": "from command"}}},
+        json={
+            "id": 7,
+            "method": "run.start",
+            "params": {"assistant_id": assistant_id, "input": {"message": "from command"}},
+        },
     )
     assert command.status_code == 200
-    assert command.json()["ok"] is True
+    assert command.json()["type"] == "success"
+    assert command.json()["id"] == 7
+    assert command.json()["result"]["run_id"]
 
     events = client.post(f"/threads/{thread_id}/stream/events", json={"channels": ["messages"]})
     assert events.status_code == 200

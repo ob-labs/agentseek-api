@@ -609,6 +609,7 @@ async def handle_protocol_command(
 
 
 @router.post("/{thread_id}/stream")
+@router.post("/{thread_id}/stream/events")
 async def stream_thread_protocol_events(
     thread_id: str,
     payload: ProtocolEventStreamRequest,
