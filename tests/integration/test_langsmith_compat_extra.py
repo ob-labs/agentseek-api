@@ -129,4 +129,16 @@ def test_empty_thread_state_returns_empty_payload(client: TestClient) -> None:
     assert state.status_code == 200
     assert state.json()["values"] == {}
     assert state.json()["checkpoint"]["thread_id"] == thread_id
+    assert state.json()["checkpoint"]["checkpoint_id"] == thread_id
     assert state.json()["metadata"]["status"] == "idle"
+
+    checkpoint = client.get(f"/threads/{thread_id}/state/{thread_id}")
+    assert checkpoint.status_code == 200
+    assert checkpoint.json()["values"] == {}
+
+    checkpoint_post = client.post(
+        f"/threads/{thread_id}/state/checkpoint",
+        json={"checkpoint_id": thread_id},
+    )
+    assert checkpoint_post.status_code == 200
+    assert checkpoint_post.json()["checkpoint"]["checkpoint_id"] == thread_id

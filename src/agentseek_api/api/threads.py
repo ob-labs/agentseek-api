@@ -17,7 +17,6 @@ from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.thread_checkpoint_store import (
     checkpoint_to_payload,
     copy_checkpoints,
-    get_checkpoint_by_id,
     list_checkpoints,
     put_checkpoint,
     prune_checkpoints,
@@ -152,6 +151,23 @@ def _visible_checkpoint_payloads(thread: Thread, runs: list[Run], payloads: list
         if _is_checkpoint_visible(payload, cancelled_windows)
     ]
     return sorted(visible, key=_payload_created_at, reverse=True)
+
+
+def _empty_thread_state_payload(thread: Thread) -> dict[str, object]:
+    return {
+        "values": {},
+        "next": [],
+        "tasks": [],
+        "checkpoint": {
+            "thread_id": thread.thread_id,
+            "checkpoint_ns": "",
+            "checkpoint_id": thread.thread_id,
+        },
+        "metadata": {"user_id": thread.user_id, "status": thread.status},
+        "created_at": thread.created_at,
+        "parent_checkpoint": None,
+        "interrupts": [],
+    }
 
 
 @router.post("", response_model=ThreadRead)
@@ -340,20 +356,7 @@ async def get_thread_state(thread_id: str, user: User = Depends(get_current_user
         [checkpoint_to_payload(item) for item in checkpoints],
     )
     if not visible:
-        return {
-            "values": {},
-            "next": [],
-            "tasks": [],
-            "checkpoint": {
-                "thread_id": thread.thread_id,
-                "checkpoint_ns": "",
-                "checkpoint_id": thread.thread_id,
-            },
-            "metadata": {"user_id": thread.user_id, "status": thread.status},
-            "created_at": thread.created_at,
-            "parent_checkpoint": None,
-            "interrupts": [],
-        }
+        return _empty_thread_state_payload(thread)
     return visible[0]
 
 
@@ -392,14 +395,18 @@ async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str,
                 select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
             )
         ).all()
-    checkpoint = await get_checkpoint_by_id(thread_id, checkpoint_id)
-    if checkpoint is None:
-        raise HTTPException(status_code=404, detail="Checkpoint not found")
-    payload = checkpoint_to_payload(checkpoint)
-    visible = _visible_checkpoint_payloads(thread, runs, [payload])
-    if not visible:
-        raise HTTPException(status_code=404, detail="Checkpoint not found")
-    return visible[0]
+    visible = _visible_checkpoint_payloads(
+        thread,
+        runs,
+        [checkpoint_to_payload(item) for item in await list_checkpoints(thread_id)],
+    )
+    if checkpoint_id == thread.thread_id and not visible:
+        return _empty_thread_state_payload(thread)
+    for payload in visible:
+        checkpoint = payload.get("checkpoint")
+        if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_id") == checkpoint_id:
+            return payload
+    raise HTTPException(status_code=404, detail="Checkpoint not found")
 
 
 @router.get("/{thread_id}/state/{checkpoint_id}")

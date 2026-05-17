@@ -44,10 +44,25 @@ def _checkpoint_step(checkpoint_tuple: CheckpointTuple | None) -> int:
     return 0
 
 
+def _checkpoint_id(checkpoint_tuple: CheckpointTuple) -> str:
+    configurable = checkpoint_tuple.config.get("configurable", {})
+    return str(configurable.get("checkpoint_id", checkpoint_tuple.checkpoint.get("id", "")))
+
+
+def _parent_checkpoint_id(checkpoint_tuple: CheckpointTuple) -> str | None:
+    if checkpoint_tuple.parent_config is None:
+        return None
+    configurable = checkpoint_tuple.parent_config.get("configurable", {})
+    raw_parent_id = configurable.get("checkpoint_id")
+    if isinstance(raw_parent_id, str) and raw_parent_id:
+        return raw_parent_id
+    return None
+
+
 def checkpoint_to_payload(checkpoint_tuple: CheckpointTuple) -> dict[str, Any]:
     configurable = checkpoint_tuple.config.get("configurable", {})
     checkpoint = checkpoint_tuple.checkpoint
-    checkpoint_id = str(configurable.get("checkpoint_id", checkpoint.get("id", "")))
+    checkpoint_id = _checkpoint_id(checkpoint_tuple)
     checkpoint_ns = str(configurable.get("checkpoint_ns", ""))
     thread_id = str(configurable.get("thread_id", ""))
     metadata = deepcopy(checkpoint_tuple.metadata) if isinstance(checkpoint_tuple.metadata, dict) else {}
@@ -88,9 +103,7 @@ async def list_checkpoints(thread_id: str, *, limit: int | None = None) -> list[
 
 async def get_checkpoint_by_id(thread_id: str, checkpoint_id: str) -> CheckpointTuple | None:
     async for item in db_manager.get_langgraph_checkpointer().alist(_config(thread_id)):
-        configurable = item.config.get("configurable", {})
-        current_id = str(configurable.get("checkpoint_id", item.checkpoint.get("id", "")))
-        if current_id == checkpoint_id:
+        if _checkpoint_id(item) == checkpoint_id:
             return item
     return None
 
@@ -148,25 +161,39 @@ async def copy_checkpoints(source_thread_id: str, target_thread_id: str) -> None
     if not checkpoints:
         return
 
-    checkpoints.reverse()
+    checkpoints_by_id = {_checkpoint_id(item): item for item in checkpoints}
+    pending_ids = set(checkpoints_by_id)
     copied_configs: dict[str, dict[str, dict[str, str]]] = {}
 
-    for item in checkpoints:
-        source_configurable = item.config.get("configurable", {})
-        checkpoint_ns = str(source_configurable.get("checkpoint_ns", ""))
-        checkpoint_id = str(source_configurable.get("checkpoint_id", item.checkpoint.get("id", "")))
-        parent_config = None
-        if item.parent_config is not None:
-            parent_configurable = item.parent_config.get("configurable", {})
-            parent_id = str(parent_configurable.get("checkpoint_id", ""))
-            parent_config = copied_configs.get(parent_id)
-        next_config = await saver.aput(
-            parent_config or _config(target_thread_id, checkpoint_ns=checkpoint_ns),
-            deepcopy(item.checkpoint),
-            deepcopy(item.metadata) if isinstance(item.metadata, dict) else {},
-            deepcopy(item.checkpoint.get("channel_versions", {})),
+    while pending_ids:
+        progressed = False
+        ordered_pending = sorted(
+            (checkpoints_by_id[checkpoint_id] for checkpoint_id in pending_ids),
+            key=lambda item: (_checkpoint_created_at(item.checkpoint), _checkpoint_id(item)),
         )
-        copied_configs[checkpoint_id] = next_config
+
+        for item in ordered_pending:
+            checkpoint_id = _checkpoint_id(item)
+            parent_id = _parent_checkpoint_id(item)
+            if parent_id is not None and parent_id in pending_ids:
+                continue
+
+            source_configurable = item.config.get("configurable", {})
+            checkpoint_ns = str(source_configurable.get("checkpoint_ns", ""))
+            parent_config = copied_configs.get(parent_id) if parent_id is not None else None
+            next_config = await saver.aput(
+                parent_config or _config(target_thread_id, checkpoint_ns=checkpoint_ns),
+                deepcopy(item.checkpoint),
+                deepcopy(item.metadata) if isinstance(item.metadata, dict) else {},
+                deepcopy(item.checkpoint.get("channel_versions", {})),
+            )
+            copied_configs[checkpoint_id] = next_config
+            pending_ids.remove(checkpoint_id)
+            progressed = True
+
+        if not progressed:
+            unresolved = ", ".join(sorted(pending_ids))
+            raise RuntimeError(f"Unable to copy checkpoints with unresolved parent references: {unresolved}")
 
 
 async def prune_checkpoints(thread_ids: list[str], *, strategy: str) -> None:

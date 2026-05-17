@@ -20,6 +20,7 @@ def test_info_endpoint(client: TestClient) -> None:
     assert body["version"]
     assert body["langgraph_py_version"]
     assert body["flags"]["assistants"] is True
+    assert body["flags"]["protocol_v2"] is True
     assert isinstance(body["metadata"], dict)
 
 

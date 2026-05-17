@@ -96,6 +96,7 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         assert info.status_code == 200
         info_body = info.json()
         assert info_body["flags"]["assistants"] is True
+        assert info_body["flags"]["protocol_v2"] is True
         assert info_body["metadata"]["checkpoint_backend"] == "langchain-oceanbase"
         assert info_body["metadata"]["checkpoint_backend_version"] == "0.4.0"
 

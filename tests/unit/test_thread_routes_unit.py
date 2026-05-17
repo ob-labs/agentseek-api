@@ -192,16 +192,16 @@ async def test_update_thread_state_persists_checkpoint(monkeypatch: pytest.Monke
 @pytest.mark.asyncio
 async def test_get_thread_state_at_checkpoint_returns_checkpoint_payload(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = _thread()
-    session = FakeSession(scalar_rows=[thread])
+    session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
-    async def fake_get_checkpoint_by_id(*_args, **_kwargs):
-        return "checkpoint-token"
+    async def fake_list_checkpoints(*_args, **_kwargs):
+        return ["checkpoint-token"]
 
-    monkeypatch.setattr("agentseek_api.api.threads.get_checkpoint_by_id", fake_get_checkpoint_by_id)
+    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
     monkeypatch.setattr(
         "agentseek_api.api.threads.checkpoint_to_payload",
         lambda _checkpoint: _checkpoint_payload(thread, "cp-1", values={"manual": True}),
@@ -213,6 +213,32 @@ async def test_get_thread_state_at_checkpoint_returns_checkpoint_payload(monkeyp
         User(identity=thread.user_id, is_authenticated=True),
     )
     assert payload["values"] == {"manual": True}
+
+
+@pytest.mark.asyncio
+async def test_get_thread_state_at_checkpoint_returns_empty_payload_for_synthetic_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = _thread()
+    session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
+    monkeypatch.setattr(
+        "agentseek_api.api.threads.db_manager.get_session_factory",
+        lambda: FakeSessionFactory([session]),
+    )
+
+    async def fake_list_checkpoints(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
+
+    payload = await threads_module.get_thread_state_at_checkpoint(
+        thread.thread_id,
+        thread.thread_id,
+        User(identity=thread.user_id, is_authenticated=True),
+    )
+
+    assert payload["values"] == {}
+    assert payload["checkpoint"]["checkpoint_id"] == thread.thread_id
 
 
 @pytest.mark.asyncio
@@ -303,16 +329,16 @@ async def test_patch_copy_and_delete_thread_routes_cover_new_paths(monkeypatch: 
 @pytest.mark.asyncio
 async def test_get_thread_state_at_checkpoint_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
     thread = _thread()
-    session = FakeSession(scalar_rows=[thread])
+    session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
-    async def fake_get_checkpoint_by_id(*_args, **_kwargs):
-        return None
+    async def fake_list_checkpoints(*_args, **_kwargs):
+        return []
 
-    monkeypatch.setattr("agentseek_api.api.threads.get_checkpoint_by_id", fake_get_checkpoint_by_id)
+    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
 
     with pytest.raises(HTTPException, match="Checkpoint not found") as error:
         await threads_module.get_thread_state_at_checkpoint(

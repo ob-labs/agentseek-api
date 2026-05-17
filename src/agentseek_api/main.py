@@ -39,7 +39,7 @@ def _feature_flags() -> dict[str, bool]:
         "store": False,
         "a2a": False,
         "mcp": False,
-        "protocol_v2": False,
+        "protocol_v2": True,
     }
 
 
