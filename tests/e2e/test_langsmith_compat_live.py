@@ -362,19 +362,30 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
 
         command = await client.post(
             f"/threads/{alpha_thread['thread_id']}/commands",
-            json={"method": "run.start", "params": {"assistant_id": assistant["assistant_id"], "input": {"message": "command"}}},
+            json={
+                "id": 21,
+                "method": "run.start",
+                "params": {"assistant_id": assistant["assistant_id"], "input": {"message": "command"}},
+            },
             headers=_user_headers(user_id),
         )
         assert command.status_code == 200
-        assert command.json()["ok"] is True
+        assert command.json()["type"] == "success"
+        assert command.json()["id"] == 21
+        assert command.json()["result"]["run_id"]
 
         unsupported_command = await client.post(
             f"/threads/{alpha_thread['thread_id']}/commands",
-            json={"method": "not-supported", "params": {}},
+            json={"id": 22, "method": "not-supported", "params": {}},
             headers=_user_headers(user_id),
         )
-        assert unsupported_command.status_code == 200
-        assert unsupported_command.json()["ok"] is False
+        assert unsupported_command.status_code == 400
+        assert unsupported_command.json() == {
+            "type": "error",
+            "id": 22,
+            "error": "unknown_command",
+            "message": "Unsupported command 'not-supported'",
+        }
 
         event_stream = await client.post(
             f"/threads/{alpha_thread['thread_id']}/stream/events",
