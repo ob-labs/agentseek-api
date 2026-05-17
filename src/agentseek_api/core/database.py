@@ -23,7 +23,9 @@ def _resolve_metadata_backend(*, configured_backend: str, url_drivername: str) -
     normalized_backend = configured_backend.strip().lower()
     if normalized_backend in {"postgres", "postgresql"}:
         return "postgresql"
-    if normalized_backend in {"mysql", "sqlite"}:
+    if normalized_backend in {"mysql", "seekdb", "oceanbase"}:
+        return "mysql"
+    if normalized_backend == "sqlite":
         return normalized_backend
     if normalized_backend != "auto":
         raise ValueError(f"Unsupported METADATA_DB_BACKEND: {configured_backend}")

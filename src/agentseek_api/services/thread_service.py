@@ -11,4 +11,13 @@ async def create_thread_for_user(*, payload: ThreadCreate, user: User) -> Thread
         session.add(row)
         await session.commit()
         await session.refresh(row)
-        return ThreadRead(thread_id=row.thread_id, user_id=row.user_id, metadata=row.metadata_json, created_at=row.created_at)
+        return ThreadRead(
+            thread_id=row.thread_id,
+            user_id=row.user_id,
+            metadata=row.metadata_json,
+            created_at=row.created_at,
+            updated_at=row.updated_at,
+            state_updated_at=row.state_updated_at,
+            config=row.config_json,
+            status=row.status,
+        )

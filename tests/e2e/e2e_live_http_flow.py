@@ -8,7 +8,7 @@ def main() -> None:
     user_id = os.getenv("EXAMPLE_USER_ID", "example-user")
     headers = {"x-user-id": user_id}
 
-    with httpx.Client(base_url=base_url, timeout=30.0, headers=headers) as client:
+    with httpx.Client(base_url=base_url, timeout=30.0, headers=headers, trust_env=False) as client:
         assistant = client.post("/assistants", json={"name": "live-example-assistant", "graph_id": "default"})
         assistant.raise_for_status()
         assistant_id = assistant.json()["assistant_id"]

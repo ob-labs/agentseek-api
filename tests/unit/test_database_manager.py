@@ -50,6 +50,16 @@ async def test_checkpointer_setup_called_once(monkeypatch: pytest.MonkeyPatch) -
             "mysql+aiomysql://root%40test:@localhost:2881/seekdb",
         ),
         (
+            "mysql://root%40test:@localhost:2881/seekdb",
+            "seekdb",
+            "mysql+aiomysql://root%40test:@localhost:2881/seekdb",
+        ),
+        (
+            "mysql://root%40test:@localhost:2881/seekdb",
+            "oceanbase",
+            "mysql+aiomysql://root%40test:@localhost:2881/seekdb",
+        ),
+        (
             "postgresql://postgres:postgres@localhost:5432/agentseek",
             "postgresql",
             "postgresql+asyncpg://postgres:postgres@localhost:5432/agentseek",

@@ -89,7 +89,8 @@ async def test_prepare_run_raises_when_assistant_missing(monkeypatch: pytest.Mon
 @pytest.mark.asyncio
 async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_assistant = type("FakeAssistant", (), {"graph_id": "stress_test"})()
-    create_session = FakeSession([object(), fake_assistant])
+    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
+    create_session = FakeSession([fake_thread, fake_assistant])
     db_run = type("DbRun", (), {"run_id": "r1", "status": "pending", "output_json": None, "last_error": None})()
     exec_session = FakeSession([db_run])
     reload_session = FakeSession([db_run])
@@ -135,8 +136,48 @@ async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pyt
 
 
 @pytest.mark.asyncio
+async def test_prepare_run_marks_thread_busy_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
+    fake_assistant = type("FakeAssistant", (), {"graph_id": "default"})()
+    db_run = type(
+        "DbRun",
+        (),
+        {
+            "run_id": "r1",
+            "thread_id": "t1",
+            "assistant_id": "a1",
+            "user_id": "u1",
+            "status": "pending",
+            "input_json": {"x": 1},
+            "output_json": None,
+            "last_error": None,
+        },
+    )()
+    create_session = FakeSession([fake_thread, fake_assistant])
+    reload_session = FakeSession([db_run])
+    session_factory = FakeSessionFactory([create_session, reload_session])
+    executor = DeferredExecutor()
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: executor)
+
+    run = await run_prep_module.prepare_and_submit_run(
+        thread_id="t1",
+        assistant_id="a1",
+        payload={"x": 1},
+        user=User(identity="u1", is_authenticated=True),
+    )
+
+    assert run.status == "pending"
+    assert fake_thread.status == "busy"
+    assert fake_thread.state_updated_at is not None
+    assert len(executor.submitted) == 1
+
+
+@pytest.mark.asyncio
 async def test_resume_run_marks_row_pending_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
+    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
     db_run = type(
         "DbRun",
         (),
@@ -151,7 +192,7 @@ async def test_resume_run_marks_row_pending_before_background_execution(monkeypa
             "last_error": None,
         },
     )()
-    load_session = FakeSession([db_run, fake_assistant])
+    load_session = FakeSession([db_run, fake_assistant, fake_thread])
     reload_session = FakeSession([db_run])
     session_factory = FakeSessionFactory([load_session, reload_session])
     executor = DeferredExecutor()
@@ -168,5 +209,7 @@ async def test_resume_run_marks_row_pending_before_background_execution(monkeypa
 
     assert run.status == "pending"
     assert db_run.status == "pending"
+    assert fake_thread.status == "busy"
+    assert fake_thread.state_updated_at is not None
     assert load_session.commits == 1
     assert len(executor.submitted) == 1

@@ -2,6 +2,7 @@ import os
 import subprocess
 import time
 from collections.abc import Generator
+from pathlib import Path
 
 import httpx
 import pymysql
@@ -32,7 +33,7 @@ def _seekdb_reachable() -> bool:
 
 def _wait_for_health(base_url: str, timeout_seconds: float) -> bool:
     deadline = time.time() + timeout_seconds
-    with httpx.Client(timeout=2.0) as client:
+    with httpx.Client(timeout=2.0, trust_env=False) as client:
         while time.time() < deadline:
             try:
                 response = client.get(f"{base_url}/health")
@@ -55,8 +56,12 @@ def _seekdb_url() -> str:
 
 @pytest.fixture(scope="session")
 def e2e_base_url() -> Generator[str, None, None]:
+    running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
     if not _seekdb_reachable():
-        pytest.skip("SeekDB/OceanBase backend is not reachable for e2e tests.")
+        message = "SeekDB/OceanBase backend is not reachable for e2e tests."
+        if running_in_ci:
+            pytest.fail(message)
+        pytest.skip(message)
 
     host = os.getenv("E2E_HOST", "127.0.0.1")
     port = int(os.getenv("E2E_PORT", "2030"))
@@ -66,6 +71,9 @@ def e2e_base_url() -> Generator[str, None, None]:
     env.setdefault("SEEKDB_URL", _seekdb_url())
     env.setdefault("AUTH_TYPE", "noop")
 
+    log_path = Path(os.getenv("E2E_SERVER_LOG", ".tmp/e2e-server.log"))
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = log_path.open("w+", encoding="utf-8")
     process = subprocess.Popen(
         [
             "uv",
@@ -77,13 +85,19 @@ def e2e_base_url() -> Generator[str, None, None]:
             "--port",
             str(port),
         ],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
         env=env,
     )
     try:
         if not _wait_for_health(base_url=base_url, timeout_seconds=30.0):
-            pytest.skip("E2E server failed to become healthy.")
+            log_file.flush()
+            log_file.seek(0)
+            logs = log_file.read()
+            message = f"E2E server failed to become healthy.\n\n{logs}"
+            if running_in_ci:
+                pytest.fail(message)
+            pytest.skip(message)
         yield base_url
     finally:
         process.terminate()
@@ -92,3 +106,4 @@ def e2e_base_url() -> Generator[str, None, None]:
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait(timeout=5)
+        log_file.close()
