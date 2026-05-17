@@ -2,7 +2,12 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 
-from agentseek_api.services.run_executor import RunExecutionResult, _translate_stream_events, execute_run
+from agentseek_api.services.run_executor import (
+    RunExecutionResult,
+    _ProtocolMessageStreamState,
+    _translate_stream_events,
+    execute_run,
+)
 from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
 
@@ -747,6 +752,30 @@ async def test_execute_run_merges_final_structured_blocks_after_live_text(monkey
     message_events = [event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"]
     block_starts = [event for event in message_events if event["event"] == "content-block-start"]
     assert any(block["content"]["type"] == "reasoning" for block in block_starts)
+
+
+def test_protocol_message_stream_state_merges_open_messages_against_transcript_tail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    protocol_broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    state = _ProtocolMessageStreamState(thread_id="t1")
+    state.publish_blocks(message_id="m1", role="ai", blocks=[{"type": "text", "text": "hel"}])
+    state.merge_final_messages(
+        messages=[
+            {"type": "HumanMessage", "content": "hi"},
+            {"type": "AIMessage", "content": "hello"},
+        ],
+        run_id="r1",
+    )
+    state.finish_all()
+
+    message_events = [event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"]
+    message_starts = [event for event in message_events if event["event"] == "message-start"]
+    assert message_starts == [{"event": "message-start", "role": "ai", "id": "m1"}]
+    assert {"event": "content-block-delta", "index": 0, "delta": {"type": "text-delta", "text": "lo"}} in message_events
+    assert [event for event in message_events if event["event"] == "message-finish"] == [{"event": "message-finish"}]
 
 
 @pytest.mark.asyncio

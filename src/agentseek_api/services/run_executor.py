@@ -250,11 +250,27 @@ class _ProtocolMessageStreamState:
             if item is not None
         ]
         open_items = list(self._open_message_ids.items())
-        matched = min(len(open_items), len(transcript_messages))
+        merged_pairs: list[
+            tuple[
+                tuple[str, "_ProtocolMessageStreamState._OpenMessage"],
+                tuple[str, list[dict[str, Any]]],
+            ]
+        ] = []
+        open_index = len(open_items) - 1
+        transcript_index = len(transcript_messages) - 1
+        while open_index >= 0 and transcript_index >= 0:
+            open_item = open_items[open_index]
+            transcript_item = transcript_messages[transcript_index]
+            if open_item[1].role != transcript_item[0]:
+                break
+            merged_pairs.append((open_item, transcript_item))
+            open_index -= 1
+            transcript_index -= 1
 
-        for (_message_id, state), (role, blocks) in zip(open_items[:matched], transcript_messages[:matched], strict=False):
-            if role != state.role:
-                continue
+        merged_pairs.reverse()
+        merged_count = len(merged_pairs)
+
+        for (_message_id, state), (_role, blocks) in merged_pairs:
             for index, block in enumerate(blocks):
                 if not isinstance(block, dict):
                     continue
@@ -266,13 +282,13 @@ class _ProtocolMessageStreamState:
                     continue
                 self._publish_nontext_block(state, index=index, block=block, final=True)
 
-        if matched < len(transcript_messages):
-            remaining = messages[-(len(transcript_messages) - matched) :]
+        if merged_count == 0 and transcript_messages:
+            remaining = messages[-len(transcript_messages) :]
             publish_message_transcript(
                 self.thread_id,
                 run_id=run_id,
                 messages=remaining,
-                start_index=matched,
+                start_index=max(0, len(open_items)),
             )
 
     def finish_all(self, *, namespace: list[str] | None = None) -> None:

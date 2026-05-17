@@ -16,6 +16,29 @@ def _is_cancelled_run(run: Run) -> bool:
     return run.status == "error" and run.last_error == "Run cancelled"
 
 
+async def _persist_submission_failure(
+    *,
+    thread_id: str,
+    run_id: str,
+    error: str,
+    run_status: str,
+    thread_status: str,
+) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        db_run = await session.scalar(select(Run).where(Run.run_id == run_id))
+        if db_run is not None:
+            db_run.status = run_status
+            db_run.last_error = error
+
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+        if thread is not None:
+            thread.status = thread_status
+            thread.state_updated_at = datetime.now(UTC)
+
+        await session.commit()
+
+
 async def _execute_and_persist(
     *,
     run_id: str,
@@ -152,6 +175,13 @@ async def prepare_and_submit_run(
             )
         )
     except Exception as exc:
+        await _persist_submission_failure(
+            thread_id=thread_id,
+            run_id=run.run_id,
+            error=str(exc),
+            run_status="error",
+            thread_status="error",
+        )
         publish_lifecycle_event(
             thread_id,
             event="failed",
@@ -200,6 +230,13 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
             )
         )
     except Exception as exc:
+        await _persist_submission_failure(
+            thread_id=thread_id,
+            run_id=run_id,
+            error=str(exc),
+            run_status="interrupted",
+            thread_status="interrupted",
+        )
         publish_lifecycle_event(
             thread_id,
             event="failed",
