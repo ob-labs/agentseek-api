@@ -88,7 +88,7 @@ def main() -> None:
     user_id = os.getenv("EXAMPLE_USER_ID", "sample-user")
     headers = {"x-user-id": user_id}
 
-    with httpx.Client(base_url=base_url, timeout=60.0, headers=headers) as client:
+    with httpx.Client(base_url=base_url, timeout=60.0, headers=headers, trust_env=False) as client:
         _run_case(
             client,
             graph_id="stress_test",

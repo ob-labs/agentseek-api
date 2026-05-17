@@ -32,7 +32,7 @@ def _seekdb_reachable() -> bool:
 
 def _wait_for_health(base_url: str, timeout_seconds: float) -> bool:
     deadline = time.time() + timeout_seconds
-    with httpx.Client(timeout=2.0) as client:
+    with httpx.Client(timeout=2.0, trust_env=False) as client:
         while time.time() < deadline:
             try:
                 response = client.get(f"{base_url}/health")

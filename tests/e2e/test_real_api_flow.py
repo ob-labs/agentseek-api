@@ -8,7 +8,7 @@ import pytest
 @pytest.mark.asyncio
 async def test_real_api_flow(e2e_base_url: str) -> None:
     timeout = httpx.Timeout(30.0)
-    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=timeout) as client:
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=timeout, trust_env=False) as client:
         assistant_create = await client.post("/assistants", json={"name": "e2e-assistant", "graph_id": "default"})
         assert assistant_create.status_code == 200
         assistant_id = assistant_create.json()["assistant_id"]
@@ -66,7 +66,7 @@ async def test_real_api_flow(e2e_base_url: str) -> None:
 @pytest.mark.asyncio
 async def test_stream_payload_contains_json_event(e2e_base_url: str) -> None:
     timeout = httpx.Timeout(30.0)
-    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=timeout) as client:
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=timeout, trust_env=False) as client:
         assistant_create = await client.post("/assistants", json={"name": "stream-assistant", "graph_id": "default"})
         assert assistant_create.status_code == 200
         assistant_id = assistant_create.json()["assistant_id"]
@@ -94,7 +94,7 @@ async def test_stream_payload_contains_json_event(e2e_base_url: str) -> None:
 @pytest.mark.asyncio
 async def test_hitl_run_can_resume_via_http(e2e_base_url: str) -> None:
     timeout = httpx.Timeout(30.0)
-    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=timeout) as client:
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=timeout, trust_env=False) as client:
         assistant_create = await client.post(
             "/assistants",
             json={"name": "resume-assistant", "graph_id": "subgraph_hitl_agent"},
