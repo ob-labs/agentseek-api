@@ -67,6 +67,8 @@ class StoreItem(Base):
     namespace_json: Mapped[list] = mapped_column("namespace", JSON, default=list, nullable=False)
     key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     value_json: Mapped[dict] = mapped_column("value", JSON, default=dict, nullable=False)
+    embedding_json: Mapped[list | None] = mapped_column("embedding", JSON, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
 

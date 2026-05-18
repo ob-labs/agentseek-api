@@ -126,6 +126,7 @@ class StorePutRequest(BaseModel):
     namespace: list[str]
     key: str
     value: dict[str, Any]
+    ttl: float | None = None
 
 
 class StoreDeleteRequest(BaseModel):
@@ -140,6 +141,8 @@ class StoreSearchRequest(BaseModel):
 
     namespace_prefix: list[str] | None = None
     filter: dict[str, Any] | None = None
+    query: str | None = None
+    refresh_ttl: bool | None = None
     limit: int = 10
     offset: int = 0
 
