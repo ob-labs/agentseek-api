@@ -7,7 +7,7 @@ project, wire it into your registry, and you're running.
 
 ## Included samples
 
-Every sample is keyed in the API registry by its directory name:
+These graph IDs are available from the bundled sample registry:
 
 | graph_id             | file                                   | what it shows                                              |
 | -------------------- | -------------------------------------- | ---------------------------------------------------------- |
@@ -16,12 +16,23 @@ Every sample is keyed in the API registry by its directory name:
 | `react_agent`        | `graphs/react_agent/graph.py`          | Tool-calling ReAct loop (uses a fake chat model, offline). |
 | `stress_tool_agent`  | `graphs/stress_tool_agent/graph.py`    | Sequential tool-calling stress loop, offline and repeatable. |
 | `subgraph_hitl_agent`| `graphs/subgraph_hitl_agent/graph.py`  | Nested subgraph + `interrupt()` human-in-the-loop pattern. |
-| `external_hello`     | `external_graph/graph.py`              | Manifest-registered external graph example.                |
+
+This sample is registered by its own manifest:
+
+| graph_id         | file                      | what it shows                               |
+| ---------------- | ------------------------- | ------------------------------------------- |
+| `external_hello` | `external_graph/graph.py` | Manifest-registered external graph example. |
+
+These directories are config-file starters. Their graph IDs become available
+when you run the server with the example `agentseek.json` in that directory:
+
+| graph_id             | file                                   | what it shows                                              |
+| -------------------- | -------------------------------------- | ---------------------------------------------------------- |
 | `chat`               | `minimal_agentseek/graph.py`           | Minimal `agentseek.json` starter for first-time users.      |
 | `assistant_config`   | `assistant_config/graph.py`            | Config/context/metadata starter for assistant examples.     |
 
-See `src/agentseek_api/services/sample_graphs.py` for how each graph is
-registered and how its input / output is adapted to the API's JSON contract.
+See `src/agentseek_api/services/sample_graphs.py` for how bundled samples are
+registered and how their input / output is adapted to the API's JSON contract.
 
 ## Running them in-process
 
