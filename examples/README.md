@@ -17,6 +17,8 @@ Every sample is keyed in the API registry by its directory name:
 | `stress_tool_agent`  | `graphs/stress_tool_agent/graph.py`    | Sequential tool-calling stress loop, offline and repeatable. |
 | `subgraph_hitl_agent`| `graphs/subgraph_hitl_agent/graph.py`  | Nested subgraph + `interrupt()` human-in-the-loop pattern. |
 | `external_hello`     | `external_graph/graph.py`              | Manifest-registered external graph example.                |
+| `chat`               | `minimal_agentseek/graph.py`           | Minimal `agentseek.json` starter for first-time users.      |
+| `assistant_config`   | `assistant_config/graph.py`            | Config/context/metadata starter for assistant examples.     |
 
 See `src/agentseek_api/services/sample_graphs.py` for how each graph is
 registered and how its input / output is adapted to the API's JSON contract.
@@ -36,7 +38,7 @@ SeekDB. Useful during development when you want a tight feedback loop.
 Start the server:
 
 ```bash
-uv run agentseek dev --config examples/sample_graphs_manifest.json --no-reload --port 2024
+uv run agentseek-api dev --config examples/sample_graphs_manifest.json --no-reload --port 2024
 ```
 
 Create an assistant bound to the sample you want, submit a run, and wait
@@ -100,3 +102,10 @@ Preferred path for this sprint:
 
 See `examples/external_graph/manifest.json` and
 `examples/external_graph/run.py` for a minimal end-to-end example.
+
+## Auth and app mounting examples
+
+- `examples/auth/custom_backend.py` shows an `AUTH_TYPE=custom` backend object.
+- `examples/auth/jwt.md` documents the `AUTH_TYPE=jwt` environment contract.
+- `examples/custom_routes/app.py` shows how to mount custom routes around
+  `agentseek_api.main.create_app()`.
