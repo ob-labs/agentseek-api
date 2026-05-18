@@ -102,7 +102,25 @@ class ThreadProtocolEventBroker:
         self._events[thread_id].append(event)
         self._prune_thread_events(thread_id)
         self._signals[thread_id].set()
+        self._persist_event(thread_id, event)
         return event
+
+    def _persist_event(self, thread_id: str, event: dict[str, Any]) -> None:
+        try:
+            from agentseek_api.services.stream_persistence import persist_thread_stream_event
+        except Exception:
+            return
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                asyncio.run(persist_thread_stream_event(thread_id, event))
+            except Exception:
+                return
+            return
+
+        loop.create_task(persist_thread_stream_event(thread_id, event))
 
     def delete_thread(self, thread_id: str) -> None:
         self._drop_thread(thread_id)

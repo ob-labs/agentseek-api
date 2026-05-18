@@ -229,12 +229,16 @@ async def count_threads(payload: ThreadSearchRequest, user: User = Depends(get_c
 @router.post("/prune")
 async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_current_user)) -> dict[str, int]:
     session_factory = db_manager.get_session_factory()
+    pruned_run_ids: list[str] = []
     async with session_factory() as session:
         rows = (
             await session.scalars(select(Thread).where(Thread.thread_id.in_(payload.thread_ids), Thread.user_id == user.identity))
         ).all()
         thread_ids = [row.thread_id for row in rows]
         if payload.strategy == "delete":
+            pruned_run_ids = (
+                await session.scalars(select(Run.run_id).where(Run.thread_id.in_(thread_ids), Run.user_id == user.identity))
+            ).all()
             await session.execute(delete(Run).where(Run.thread_id.in_(thread_ids), Run.user_id == user.identity))
             await session.execute(delete(Thread).where(Thread.thread_id.in_(thread_ids), Thread.user_id == user.identity))
         elif payload.strategy == "keep_latest":
@@ -253,11 +257,14 @@ async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_cu
                     continue
                 seen_thread_ids.add(run.thread_id)
             if stale_run_ids:
+                pruned_run_ids = stale_run_ids
                 await session.execute(delete(Run).where(Run.run_id.in_(stale_run_ids), Run.user_id == user.identity))
         else:
             raise HTTPException(status_code=400, detail=f"Unsupported prune strategy: {payload.strategy}")
         await session.commit()
     await prune_checkpoints(thread_ids, strategy=payload.strategy)
+    if pruned_run_ids:
+        await delete_run_stream_events(pruned_run_ids)
     if payload.strategy == "delete":
         for thread_id in thread_ids:
             thread_protocol_broker.delete_thread(thread_id)
@@ -503,18 +510,20 @@ async def stream_thread(
         ).all()
 
     async def _event_iter() -> AsyncIterator[str]:
-        seen: set[tuple[str, int]] = set()
+        thread_event_id = 0
         for run_id in run_ids:
             records_by_seq: dict[int, dict[str, object]] = {
-                seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
+                seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=0)
             }
-            records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=after_seq)})
+            records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=0)})
             for seq in sorted(records_by_seq):
+                thread_event_id += 1
+                if thread_event_id <= after_seq:
+                    continue
                 event = records_by_seq[seq]
-                seen.add((run_id, seq))
                 event_name = str(event.get("event", "message"))
                 event_payload: dict[str, object] = {"run_id": run_id, **event}
-                yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
+                yield f"id: {thread_event_id}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")
 

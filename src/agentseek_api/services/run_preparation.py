@@ -56,12 +56,20 @@ async def _publish_lifecycle(
     await persist_thread_stream_event(thread_id, published)
 
 
-async def _publish_run_event(run_id: str, event: str, **payload: Any) -> None:
+async def _publish_run_event(
+    run_id: str,
+    event: str,
+    *,
+    persist: bool = True,
+    **payload: Any,
+) -> tuple[int, dict[str, Any]] | None:
     published = run_broker.publish(run_id, event, **payload)
     if published is None:
-        return
+        return None
     seq, event_payload = published
-    await persist_run_stream_event(run_id, seq=seq, payload=event_payload)
+    if persist:
+        await persist_run_stream_event(run_id, seq=seq, payload=event_payload)
+    return seq, event_payload
 
 
 async def _persist_thread_snapshot(thread_id: str) -> None:
@@ -130,7 +138,11 @@ async def _execute_and_persist(
             if thread is not None:
                 thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
                 thread.state_updated_at = db_run.updated_at
+            terminal_run_event = await _publish_run_event(run_id, "end", status=db_run.status, persist=False)
             await execution_session.commit()
+            if terminal_run_event is not None:
+                seq, event_payload = terminal_run_event
+                await persist_run_stream_event(run_id, seq=seq, payload=event_payload)
             lifecycle_state = "completed"
             if db_run.status == "interrupted":
                 lifecycle_state = "interrupted"
@@ -142,7 +154,6 @@ async def _execute_and_persist(
                 graph_name=graph_id,
                 error=db_run.last_error,
             )
-            await _publish_run_event(run_id, "end", status=db_run.status)
     finally:
         thread_protocol_broker.run_finished(thread_id)
 
