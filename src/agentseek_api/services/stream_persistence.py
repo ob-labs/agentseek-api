@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy import delete, select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import RunStreamEvent, ThreadStreamEvent
@@ -52,6 +53,28 @@ async def persist_run_stream_event(run_id: str, *, seq: int, payload: dict[str, 
                 await session.commit()
     except Exception:
         return
+
+
+async def add_run_stream_event_to_session(
+    session: AsyncSession,
+    run_id: str,
+    *,
+    seq: int,
+    payload: dict[str, Any],
+) -> None:
+    existing = await session.scalar(
+        select(RunStreamEvent.id).where(RunStreamEvent.run_id == run_id, RunStreamEvent.seq == seq)
+    )
+    if existing is not None:
+        return
+    session.add(
+        RunStreamEvent(
+            run_id=run_id,
+            seq=seq,
+            event=str(payload.get("event", "message")),
+            payload_json=dict(payload),
+        )
+    )
 
 
 async def load_run_stream_events(run_id: str, *, after_seq: int = 0) -> list[tuple[int, dict[str, Any]]]:

@@ -9,7 +9,11 @@ from agentseek_api.models.auth import User
 from agentseek_api.services.executor import get_executor
 from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
 from agentseek_api.services.run_state import run_broker
-from agentseek_api.services.stream_persistence import persist_run_stream_event, persist_thread_stream_event
+from agentseek_api.services.stream_persistence import (
+    add_run_stream_event_to_session,
+    persist_run_stream_event,
+    persist_thread_stream_event,
+)
 from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
 
 
@@ -139,10 +143,10 @@ async def _execute_and_persist(
                 thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
                 thread.state_updated_at = db_run.updated_at
             terminal_run_event = await _publish_run_event(run_id, "end", status=db_run.status, persist=False)
-            await execution_session.commit()
             if terminal_run_event is not None:
                 seq, event_payload = terminal_run_event
-                await persist_run_stream_event(run_id, seq=seq, payload=event_payload)
+                await add_run_stream_event_to_session(execution_session, run_id, seq=seq, payload=event_payload)
+            await execution_session.commit()
             lifecycle_state = "completed"
             if db_run.status == "interrupted":
                 lifecycle_state = "interrupted"

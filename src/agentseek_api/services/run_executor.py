@@ -10,16 +10,22 @@ from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import persist_run_stream_event
 from agentseek_api.services.thread_protocol import (
+    apublish_content_block_delta,
+    apublish_content_block_finish,
+    apublish_content_block_start,
+    apublish_input_requested,
+    apublish_message_complete,
+    apublish_message_start,
+    apublish_message_transcript,
+    apublish_tool_event,
+    apublish_updates_event,
+    apublish_values_event,
     publish_content_block_delta,
     publish_content_block_finish,
     publish_content_block_start,
-    publish_input_requested,
     publish_message_complete,
     publish_message_start,
     publish_message_transcript,
-    publish_tool_event,
-    publish_updates_event,
-    publish_values_event,
 )
 
 UNSET = object()
@@ -300,6 +306,192 @@ class _ProtocolMessageStreamState:
             self._finish_blocks(state, namespace=message_namespace)
             publish_message_complete(self.thread_id, namespace=message_namespace)
 
+    async def afinish_blocks(
+        self,
+        state: "_ProtocolMessageStreamState._OpenMessage",
+        *,
+        namespace: list[str] | None = None,
+        before_index: int | None = None,
+    ) -> None:
+        effective_namespace = state.namespace or namespace
+        for index in sorted(list(state.open_blocks)):
+            if before_index is not None and index >= before_index:
+                continue
+            await apublish_content_block_finish(
+                self.thread_id,
+                index=index,
+                namespace=effective_namespace,
+            )
+            del state.open_blocks[index]
+
+    async def apublish_text_block(
+        self,
+        state: "_ProtocolMessageStreamState._OpenMessage",
+        *,
+        index: int,
+        text: str,
+        namespace: list[str] | None = None,
+    ) -> None:
+        effective_namespace = state.namespace or namespace
+        if index not in state.open_blocks:
+            await apublish_content_block_start(
+                self.thread_id,
+                index=index,
+                content={"type": "text", "text": ""},
+                namespace=effective_namespace,
+            )
+            state.open_blocks[index] = "text"
+        previous_text = state.text_contents.get(index, "")
+        if text == previous_text:
+            return
+        delta_text = text[len(previous_text) :] if text.startswith(previous_text) else text
+        if delta_text:
+            await apublish_content_block_delta(
+                self.thread_id,
+                index=index,
+                delta={"type": "text-delta", "text": delta_text},
+                namespace=effective_namespace,
+            )
+        state.text_contents[index] = text
+
+    async def apublish_nontext_block(
+        self,
+        state: "_ProtocolMessageStreamState._OpenMessage",
+        *,
+        index: int,
+        block: dict[str, Any],
+        namespace: list[str] | None = None,
+        final: bool = False,
+    ) -> None:
+        effective_namespace = state.namespace or namespace
+        if index not in state.open_blocks:
+            await apublish_content_block_start(
+                self.thread_id,
+                index=index,
+                content=block,
+                namespace=effective_namespace,
+            )
+            if final:
+                await apublish_content_block_finish(
+                    self.thread_id,
+                    index=index,
+                    content=block,
+                    namespace=effective_namespace,
+                )
+                return
+            state.open_blocks[index] = str(block.get("type", "block"))
+            return
+
+        await apublish_content_block_delta(
+            self.thread_id,
+            index=index,
+            delta=block,
+            namespace=effective_namespace,
+        )
+        if final:
+            await apublish_content_block_finish(
+                self.thread_id,
+                index=index,
+                content=block,
+                namespace=effective_namespace,
+            )
+            del state.open_blocks[index]
+
+    async def apublish_blocks(
+        self,
+        *,
+        message_id: str,
+        role: str,
+        blocks: list[dict[str, Any]],
+        namespace: list[str] | None = None,
+    ) -> None:
+        state = self._open_message_ids.get(message_id)
+        if state is None:
+            await apublish_message_start(
+                self.thread_id,
+                message_id=message_id,
+                role=role,
+                namespace=namespace,
+            )
+            state = self._OpenMessage(
+                role=role,
+                namespace=list(namespace) if namespace is not None else None,
+            )
+            self._open_message_ids[message_id] = state
+        elif state.namespace is None and namespace is not None:
+            state.namespace = list(namespace)
+
+        for index, block in enumerate(blocks):
+            if not isinstance(block, dict):
+                continue
+            block_type = block.get("type")
+            await self.afinish_blocks(state, namespace=namespace, before_index=index)
+            if block_type == "text":
+                text = block.get("text")
+                if not isinstance(text, str):
+                    continue
+                await self.apublish_text_block(state, index=index, text=text, namespace=namespace)
+                continue
+
+            await self.apublish_nontext_block(state, index=index, block=block, namespace=namespace)
+        self.saw_live_messages = True
+
+    async def amerge_final_messages(self, *, messages: list[dict[str, Any]], run_id: str) -> None:
+        transcript_messages = [
+            item
+            for item in (_protocol_message_from_transcript(message) for message in messages)
+            if item is not None
+        ]
+        open_items = list(self._open_message_ids.items())
+        merged_pairs: list[
+            tuple[
+                tuple[str, "_ProtocolMessageStreamState._OpenMessage"],
+                tuple[str, list[dict[str, Any]]],
+            ]
+        ] = []
+        open_index = len(open_items) - 1
+        transcript_index = len(transcript_messages) - 1
+        while open_index >= 0 and transcript_index >= 0:
+            open_item = open_items[open_index]
+            transcript_item = transcript_messages[transcript_index]
+            if open_item[1].role != transcript_item[0]:
+                break
+            merged_pairs.append((open_item, transcript_item))
+            open_index -= 1
+            transcript_index -= 1
+
+        merged_pairs.reverse()
+        merged_count = len(merged_pairs)
+
+        for (_message_id, state), (_role, blocks) in merged_pairs:
+            for index, block in enumerate(blocks):
+                if not isinstance(block, dict):
+                    continue
+                await self.afinish_blocks(state, before_index=index)
+                if block.get("type") == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        await self.apublish_text_block(state, index=index, text=text)
+                    continue
+                await self.apublish_nontext_block(state, index=index, block=block, final=True)
+
+        if merged_count == 0 and transcript_messages:
+            remaining = messages[-len(transcript_messages) :]
+            await apublish_message_transcript(
+                self.thread_id,
+                run_id=run_id,
+                messages=remaining,
+                start_index=max(0, len(open_items)),
+            )
+
+    async def afinish_all(self, *, namespace: list[str] | None = None) -> None:
+        while self._open_message_ids:
+            message_id = next(iter(self._open_message_ids))
+            state = self._open_message_ids.pop(message_id)
+            message_namespace = state.namespace or namespace
+            await self.afinish_blocks(state, namespace=message_namespace)
+            await apublish_message_complete(self.thread_id, namespace=message_namespace)
+
 
 def _protocol_blocks_for_message(message: BaseMessage) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
@@ -534,7 +726,7 @@ async def execute_run(
                     message_id = explicit_message_id
                 else:
                     message_id = f"{str(stream_event.get('run_id', '')) or run_id}:message:{message_index}"
-                protocol_messages.publish_blocks(
+                await protocol_messages.apublish_blocks(
                     message_id=message_id,
                     role=role,
                     blocks=blocks,
@@ -543,7 +735,7 @@ async def execute_run(
             if raw_event_name == "on_llm_stream":
                 text = _extract_text_chunk(chunk)
                 if text not in ("", None):
-                    protocol_messages.publish_blocks(
+                    await protocol_messages.apublish_blocks(
                         message_id=f"{str(stream_event.get('run_id', '')) or run_id}:message:0",
                         role="ai",
                         blocks=[{"type": "text", "text": text}],
@@ -552,7 +744,7 @@ async def execute_run(
         if raw_event_name == "on_tool_start":
             metadata = stream_event.get("metadata", {})
             data = stream_event.get("data", {})
-            publish_tool_event(
+            await apublish_tool_event(
                 thread_id,
                 tool_event="tool-started",
                 tool_call_id=str(stream_event.get("run_id", "")),
@@ -564,7 +756,7 @@ async def execute_run(
         if raw_event_name == "on_tool_end":
             metadata = stream_event.get("metadata", {})
             data = stream_event.get("data", {})
-            publish_tool_event(
+            await apublish_tool_event(
                 thread_id,
                 tool_event="tool-finished",
                 tool_call_id=str(stream_event.get("run_id", "")),
@@ -583,7 +775,7 @@ async def execute_run(
             if isinstance(normalized_chunk, dict):
                 normalized_chunk.pop("__interrupt__", None)
                 if normalized_chunk:
-                    publish_updates_event(thread_id, values=normalized_chunk, namespace=protocol_namespace)
+                    await apublish_updates_event(thread_id, values=normalized_chunk, namespace=protocol_namespace)
         if stream_event.get("event") == "on_chain_end" and _is_root_stream_event(stream_event):
             data = stream_event.get("data", {})
             if isinstance(data, dict) and "output" in data:
@@ -593,11 +785,11 @@ async def execute_run(
                     messages = _extract_protocol_result_messages(normalized_result)
                     if isinstance(messages, list):
                         if protocol_messages.saw_live_messages:
-                            protocol_messages.merge_final_messages(messages=messages, run_id=run_id)
+                            await protocol_messages.amerge_final_messages(messages=messages, run_id=run_id)
                         else:
-                            publish_message_transcript(thread_id, run_id=run_id, messages=messages)
-                    protocol_messages.finish_all()
-                    publish_values_event(thread_id, values=normalized_result, namespace=protocol_namespace)
+                            await apublish_message_transcript(thread_id, run_id=run_id, messages=messages)
+                    await protocol_messages.afinish_all()
+                    await apublish_values_event(thread_id, values=normalized_result, namespace=protocol_namespace)
 
     if interrupt_chunk is not None:
         if isinstance(result, dict):
@@ -607,7 +799,7 @@ async def execute_run(
         for item in _normalize_stream_value(interrupt_chunk):
             if not isinstance(item, dict):
                 continue
-            publish_input_requested(
+            await apublish_input_requested(
                 thread_id,
                 interrupt_id=str(item.get("id", "")),
                 payload=item.get("value"),

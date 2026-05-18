@@ -32,6 +32,28 @@ def test_thread_protocol_broker_discards_stale_idle_threads() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_protocol_broker_apublish_waits_for_persistence(monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = ThreadProtocolEventBroker()
+    persisted: list[tuple[str, int]] = []
+
+    async def fake_persist_thread_stream_event(thread_id: str, event: dict) -> None:
+        persisted.append((thread_id, event["seq"]))
+
+    monkeypatch.setattr(
+        "agentseek_api.services.stream_persistence.persist_thread_stream_event",
+        fake_persist_thread_stream_event,
+    )
+
+    event = await broker.apublish(
+        "thread-1",
+        {"method": "values", "params": {"namespace": [], "timestamp": 1, "data": {"n": 1}}},
+    )
+
+    assert event["seq"] == 1
+    assert persisted == [("thread-1", 1)]
+
+
+@pytest.mark.asyncio
 async def test_thread_protocol_stream_filters_channels_namespaces_depth_and_since() -> None:
     broker = ThreadProtocolEventBroker()
     broker.run_started("thread-1")
