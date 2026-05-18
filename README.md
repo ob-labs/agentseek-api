@@ -282,7 +282,7 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 
 ## 🗺️ Future Work
 
-1. [ ] Add restart-safe event replay and `Last-Event-ID` support
+1. [ ] Add Redis-backed task queue and worker handoff for durable run execution
 2. [ ] Add Store API parity
 3. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
 4. [ ] Add crons and scheduler support
