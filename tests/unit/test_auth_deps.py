@@ -1,5 +1,5 @@
 import pytest
-from fastapi import Request
+from fastapi import HTTPException, Request
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.models.auth import User
@@ -15,3 +15,18 @@ async def test_get_current_user_delegates_to_auth_backend(monkeypatch: pytest.Mo
     request = Request({"type": "http", "headers": []})
     user = await get_current_user(request)
     assert user.identity == "from_backend"
+
+
+@pytest.mark.asyncio
+async def test_get_current_user_rejects_unauthenticated_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeBackend:
+        async def authenticate(self, _request: Request) -> User:
+            return User(identity="anonymous", is_authenticated=False)
+
+    monkeypatch.setattr("agentseek_api.core.auth_deps.get_auth_backend", lambda: FakeBackend())
+    request = Request({"type": "http", "headers": []})
+
+    with pytest.raises(HTTPException) as exc_info:
+        await get_current_user(request)
+
+    assert exc_info.value.status_code == 401

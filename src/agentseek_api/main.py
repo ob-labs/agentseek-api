@@ -11,6 +11,7 @@ from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
 from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
+from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
 from agentseek_api.settings import settings
 
@@ -53,8 +54,35 @@ def _server_metadata() -> dict[str, str]:
     }
 
 
+def _apply_auth_openapi(app: FastAPI) -> None:
+    auth_openapi = get_config_auth_openapi()
+    if not auth_openapi:
+        return
+
+    original_openapi = app.openapi
+
+    def custom_openapi() -> dict[str, object]:
+        if app.openapi_schema:
+            return app.openapi_schema
+        schema = original_openapi()
+        security_schemes = auth_openapi.get("securitySchemes")
+        if isinstance(security_schemes, dict):
+            components = schema.setdefault("components", {})
+            existing_schemes = components.setdefault("securitySchemes", {})
+            if isinstance(existing_schemes, dict):
+                existing_schemes.update(security_schemes)
+        security = auth_openapi.get("security")
+        if isinstance(security, list):
+            schema["security"] = security
+        app.openapi_schema = schema
+        return app.openapi_schema
+
+    app.openapi = custom_openapi  # type: ignore[method-assign]
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
+    _apply_auth_openapi(app)
 
     @app.get("/health")
     async def health() -> dict[str, str]:

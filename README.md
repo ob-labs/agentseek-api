@@ -153,12 +153,40 @@ Useful config fields:
 - `graphs`: graph id to graph reference mapping
 - `env`: either a dotenv file path or an object of scalar environment values
 - `auth.path`: custom auth backend reference
+- `auth.openapi`: OpenAPI `securitySchemes` and `security` metadata for auth
+- `auth.disable_studio_auth`: accepted for LangGraph config compatibility
 - `base_image`, `python_version`, `image_distro`, `pip_config_file`,
   `dockerfile_lines`: Docker build customization fields
 
 Endpoint-level LangGraph config keys such as `store`, `http`, and
 `api_version` are tolerated by the CLI layer where possible, but they are not
 fully wired to runtime behavior yet.
+
+Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
+
+```json
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "auth": {
+    "path": "./auth.py:auth",
+    "openapi": {
+      "securitySchemes": {
+        "apiKeyAuth": {
+          "type": "apiKey",
+          "in": "header",
+          "name": "X-API-Key"
+        }
+      },
+      "security": [{ "apiKeyAuth": [] }]
+    },
+    "disable_studio_auth": false
+  }
+}
+```
 
 ## 📚 Use As A Library
 
@@ -204,6 +232,19 @@ parent api build --config ./langgraph.json -t my-api:dev
 - Auth modes:
   - `AUTH_TYPE=noop`
   - `AUTH_TYPE=custom` with `AUTH_MODULE_PATH=module:backend_symbol`
+  - `AUTH_TYPE=api_key` with `AUTH_API_KEYS=key=user_id[,key2=user2]`
+  - `AUTH_TYPE=jwt` with `AUTH_JWT_SECRET`, optional
+    `AUTH_JWT_ALGORITHM=HS256`, and `sub` as the user identity
+- Assistant management, thread, and run endpoints enforce configured auth.
+
+## 🧭 Examples
+
+- `examples/minimal_agentseek/agentseek.json`: minimal first-time config
+- `examples/assistant_config/`: assistant config/context/metadata starter
+- `examples/auth/custom_backend.py`: custom auth backend
+- `examples/auth/jwt.md`: JWT auth environment contract
+- `examples/custom_routes/app.py`: mounting custom FastAPI routes around the
+  AgentSeek API app
 
 ## 🧪 Contributing
 
@@ -241,12 +282,8 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 
 ## 🗺️ Future Work
 
-1. [ ] Add direct `/agents` route aliases over the current assistant surface
-2. [ ] Align request and response schemas more closely with Agent Protocol
-3. [ ] Add restart-safe event replay and `Last-Event-ID` support
-4. [ ] Add first-class `X-Api-Key` auth
-5. [ ] Add more assistant config, JWT auth, and custom route examples
-6. [ ] Add a minimal `agentseek.json` example for first-time users
-7. [ ] Add Store API parity
-8. [ ] Add crons and scheduler support
-9. [ ] Add MCP and A2A endpoint parity
+1. [ ] Add Redis-backed task queue and worker handoff for durable run execution
+2. [ ] Add Store API parity
+3. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
+4. [ ] Add crons and scheduler support
+5. [ ] Add MCP and A2A endpoint parity

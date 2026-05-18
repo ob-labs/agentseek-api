@@ -1,4 +1,5 @@
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -25,6 +26,16 @@ class FakeSession:
 
     async def refresh(self, _obj: object) -> None:
         return None
+
+
+class TrackingSession(FakeSession):
+    def __init__(self, scalar_values: list[object | None], operations: list[str]) -> None:
+        super().__init__(scalar_values)
+        self.operations = operations
+
+    async def commit(self) -> None:
+        self.operations.append("commit")
+        await super().commit()
 
 
 class CallbackSession(FakeSession):
@@ -149,6 +160,77 @@ async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pyt
     assert events[-1][1] == "end"
     assert events[-1][2]["status"] == "error"
     assert captured["graph_id"] == "stress_test"
+
+
+@pytest.mark.asyncio
+async def test_execute_and_persist_publishes_terminal_run_event_before_terminal_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    db_run = type(
+        "DbRun",
+        (),
+        {
+            "run_id": "r1",
+            "status": "pending",
+            "output_json": None,
+            "last_error": None,
+            "updated_at": datetime.now(UTC),
+        },
+    )()
+    fake_thread = type("FakeThread", (), {"thread_id": "t1", "status": "idle", "state_updated_at": None})()
+    operations: list[str] = []
+    exec_session = TrackingSession([db_run, fake_thread, fake_thread], operations)
+    session_factory = FakeSessionFactory([exec_session])
+    published_run_events: list[tuple[str, int, dict[str, Any]]] = []
+
+    async def successful_execute_run(**_kwargs: Any) -> run_prep_module.RunExecutionResult:
+        return run_prep_module.RunExecutionResult(output={"ok": True}, interrupted=False, interrupts=[])
+
+    async def fake_publish_run_event(_run_id: str, event: str, *, persist: bool = True, **payload: Any) -> tuple[int, dict[str, Any]]:
+        _ = persist
+        operations.append(f"publish:{event}")
+        published_run_events.append((event, exec_session.commits, payload))
+        return len(published_run_events), {"event": event, **payload}
+
+    async def fake_publish_lifecycle(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    async def fake_persist_thread_snapshot(_thread_id: str) -> None:
+        return None
+
+    async def fake_add_run_stream_event_to_session(
+        _session: FakeSession,
+        _run_id: str,
+        *,
+        seq: int,
+        payload: dict[str, Any],
+    ) -> None:
+        operations.append(f"persist:{payload['event']}:{seq}")
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("agentseek_api.services.run_preparation.execute_run", successful_execute_run)
+    monkeypatch.setattr("agentseek_api.services.run_preparation._publish_run_event", fake_publish_run_event)
+    monkeypatch.setattr("agentseek_api.services.run_preparation._publish_lifecycle", fake_publish_lifecycle)
+    monkeypatch.setattr("agentseek_api.services.run_preparation._persist_thread_snapshot", fake_persist_thread_snapshot)
+    monkeypatch.setattr(
+        "agentseek_api.services.run_preparation.add_run_stream_event_to_session",
+        fake_add_run_stream_event_to_session,
+    )
+
+    await run_prep_module._execute_and_persist(run_id="r1", thread_id="t1", payload={"x": 1}, graph_id="default")
+
+    assert exec_session.commits == 2
+    assert published_run_events == [
+        ("start", 1, {}),
+        ("end", 1, {"status": "success"}),
+    ]
+    assert operations == [
+        "commit",
+        "publish:start",
+        "publish:end",
+        "persist:end:2",
+        "commit",
+    ]
 
 
 @pytest.mark.asyncio
