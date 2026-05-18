@@ -150,6 +150,66 @@ backend = CustomBackend
     assert user.identity == "file_user"
 
 
+@pytest.mark.asyncio
+async def test_get_auth_backend_loads_custom_backend_from_json_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "identity.py").write_text('IDENTITY = "config_user"\n', encoding="utf-8")
+    auth_file = tmp_path / "auth.py"
+    auth_file.write_text(
+        """
+from identity import IDENTITY
+
+from agentseek_api.models.auth import User
+
+
+class ConfigAuthBackend:
+    async def authenticate(self, _request):
+        return User(identity=IDENTITY, is_authenticated=True)
+
+
+auth = ConfigAuthBackend
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        """
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "auth": {
+    "path": "./auth.py:auth",
+    "openapi": {
+      "securitySchemes": {
+        "apiKeyAuth": {
+          "type": "apiKey",
+          "in": "header",
+          "name": "X-API-Key"
+        }
+      },
+      "security": [{ "apiKeyAuth": [] }]
+    },
+    "disable_studio_auth": false
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AUTH_TYPE", "noop")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    auth_middleware._backend = None
+
+    backend = get_auth_backend()
+    user = await backend.authenticate(Request({"type": "http", "headers": []}))
+
+    assert user.identity == "config_user"
+
+
 def test_get_auth_backend_custom_requires_module_path(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "AUTH_TYPE", "custom")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)

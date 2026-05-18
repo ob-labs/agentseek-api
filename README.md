@@ -153,12 +153,40 @@ Useful config fields:
 - `graphs`: graph id to graph reference mapping
 - `env`: either a dotenv file path or an object of scalar environment values
 - `auth.path`: custom auth backend reference
+- `auth.openapi`: OpenAPI `securitySchemes` and `security` metadata for auth
+- `auth.disable_studio_auth`: accepted for LangGraph config compatibility
 - `base_image`, `python_version`, `image_distro`, `pip_config_file`,
   `dockerfile_lines`: Docker build customization fields
 
 Endpoint-level LangGraph config keys such as `store`, `http`, and
 `api_version` are tolerated by the CLI layer where possible, but they are not
 fully wired to runtime behavior yet.
+
+Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
+
+```json
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "auth": {
+    "path": "./auth.py:auth",
+    "openapi": {
+      "securitySchemes": {
+        "apiKeyAuth": {
+          "type": "apiKey",
+          "in": "header",
+          "name": "X-API-Key"
+        }
+      },
+      "security": [{ "apiKeyAuth": [] }]
+    },
+    "disable_studio_auth": false
+  }
+}
+```
 
 ## 📚 Use As A Library
 

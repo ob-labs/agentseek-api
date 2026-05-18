@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import sys
+from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -17,6 +18,13 @@ from agentseek_api.settings import settings
 
 class AuthBackend(Protocol):
     async def authenticate(self, request: Request) -> User: ...
+
+
+@dataclass(frozen=True)
+class ConfigAuthSettings:
+    path: str | None = None
+    openapi: dict[str, Any] | None = None
+    disable_studio_auth: bool | None = None
 
 
 class NoopAuthBackend:
@@ -114,8 +122,80 @@ def _load_python_file_backend(module_ref: str) -> object:
     return module
 
 
-def _load_custom_backend() -> AuthBackend | None:
-    auth_module_path = settings.AUTH_MODULE_PATH
+def _active_config_path() -> Path | None:
+    if settings.AGENTSEEK_GRAPHS:
+        path = Path(settings.AGENTSEEK_GRAPHS).expanduser().resolve()
+        if path.exists():
+            return path
+    for candidate in ("agentseek.json", "langgraph.json"):
+        path = Path(candidate).resolve()
+        if path.exists():
+            return path
+    return None
+
+
+def _apply_config_dependencies(payload: dict[str, Any], *, config_path: Path) -> None:
+    dependencies = payload.get("dependencies")
+    if not isinstance(dependencies, list):
+        return
+    for dependency in dependencies:
+        if not isinstance(dependency, str):
+            continue
+        if dependency == ".":
+            root = config_path.parent.resolve()
+        else:
+            candidate = Path(dependency).expanduser()
+            root = candidate.resolve() if candidate.is_absolute() else (config_path.parent / candidate).resolve()
+        if root.exists():
+            root_text = str(root)
+            if root_text not in sys.path:
+                sys.path.insert(0, root_text)
+
+
+def _normalize_config_symbol_reference(reference: str, *, config_path: Path) -> str:
+    if ":" not in reference:
+        return reference
+    module_ref, symbol = reference.rsplit(":", maxsplit=1)
+    if module_ref.endswith(".py") or module_ref.startswith(".") or "/" in module_ref or "\\" in module_ref:
+        module_path = Path(module_ref).expanduser()
+        if not module_path.is_absolute():
+            module_path = config_path.parent / module_path
+        return f"{module_path.resolve()}:{symbol}"
+    return reference
+
+
+def get_config_auth_settings() -> ConfigAuthSettings:
+    config_path = _active_config_path()
+    if config_path is None:
+        return ConfigAuthSettings()
+    try:
+        payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return ConfigAuthSettings()
+    if not isinstance(payload, dict):
+        return ConfigAuthSettings()
+    raw_auth = payload.get("auth")
+    if not isinstance(raw_auth, dict):
+        return ConfigAuthSettings()
+    _apply_config_dependencies(payload, config_path=config_path)
+
+    raw_path = raw_auth.get("path")
+    auth_path = _normalize_config_symbol_reference(raw_path, config_path=config_path) if isinstance(raw_path, str) else None
+    raw_openapi = raw_auth.get("openapi")
+    disable_studio_auth = raw_auth.get("disable_studio_auth")
+    return ConfigAuthSettings(
+        path=auth_path,
+        openapi=raw_openapi if isinstance(raw_openapi, dict) else None,
+        disable_studio_auth=disable_studio_auth if isinstance(disable_studio_auth, bool) else None,
+    )
+
+
+def get_config_auth_openapi() -> dict[str, Any] | None:
+    return get_config_auth_settings().openapi
+
+
+def _load_custom_backend(auth_module_path: str | None = None) -> AuthBackend | None:
+    auth_module_path = auth_module_path or settings.AUTH_MODULE_PATH
     if not auth_module_path:
         return None
     if ":" not in auth_module_path:
@@ -150,12 +230,18 @@ def get_auth_backend() -> AuthBackend:
     if _backend is not None:
         return _backend
 
+    config_auth = get_config_auth_settings()
     auth_type = settings.AUTH_TYPE.strip().lower()
     if auth_type == "noop":
+        if config_auth.path:
+            custom_backend = _load_custom_backend(config_auth.path)
+            if custom_backend is not None:
+                _backend = custom_backend
+                return _backend
         _backend = NoopAuthBackend()
         return _backend
     if auth_type == "custom":
-        custom_backend = _load_custom_backend()
+        custom_backend = _load_custom_backend(settings.AUTH_MODULE_PATH or config_auth.path)
         if custom_backend is None:
             raise RuntimeError("AUTH_TYPE=custom requires AUTH_MODULE_PATH to be configured.")
         _backend = custom_backend
