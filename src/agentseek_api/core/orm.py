@@ -63,7 +63,7 @@ class StoreItem(Base):
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    namespace_path: Mapped[str] = mapped_column(String(2048), nullable=False, index=True)
+    namespace_path: Mapped[str] = mapped_column(String(2048), nullable=False)
     namespace_json: Mapped[list] = mapped_column("namespace", JSON, default=list, nullable=False)
     key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     value_json: Mapped[dict] = mapped_column("value", JSON, default=dict, nullable=False)
