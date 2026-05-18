@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import sys
+import time
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
@@ -107,7 +108,24 @@ def _decode_hs256_jwt(token: str, *, secret: str, algorithm: str) -> dict[str, A
     expected_segment = base64.urlsafe_b64encode(expected_signature).rstrip(b"=").decode()
     if not hmac.compare_digest(signature_segment, expected_segment):
         return None
-    return _decode_urlsafe_json(payload_segment)
+    payload = _decode_urlsafe_json(payload_segment)
+    if payload is None or not _jwt_time_claims_are_valid(payload, now=time.time()):
+        return None
+    return payload
+
+
+def _jwt_time_claims_are_valid(payload: dict[str, Any], *, now: float) -> bool:
+    exp = payload.get("exp")
+    if exp is not None:
+        if not isinstance(exp, int | float) or now >= exp:
+            return False
+
+    nbf = payload.get("nbf")
+    if nbf is not None:
+        if not isinstance(nbf, int | float) or now < nbf:
+            return False
+
+    return True
 
 
 def _load_python_file_backend(module_ref: str) -> object:

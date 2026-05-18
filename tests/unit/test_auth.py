@@ -3,6 +3,7 @@ import base64
 import hashlib
 import hmac
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -88,6 +89,30 @@ async def test_jwt_auth_backend_uses_sub_claim_identity() -> None:
 @pytest.mark.asyncio
 async def test_jwt_auth_backend_rejects_invalid_signature() -> None:
     token = _signed_hs256_jwt({"sub": "jwt-user"}, "wrong-secret")
+    backend = JwtAuthBackend(secret="secret", algorithm="HS256")
+    request = Request({"type": "http", "headers": [(b"authorization", f"Bearer {token}".encode())]})
+
+    user = await backend.authenticate(request)
+
+    assert user.identity == "anonymous"
+    assert user.is_authenticated is False
+
+
+@pytest.mark.asyncio
+async def test_jwt_auth_backend_rejects_expired_token() -> None:
+    token = _signed_hs256_jwt({"sub": "jwt-user", "exp": int(time.time()) - 60}, "secret")
+    backend = JwtAuthBackend(secret="secret", algorithm="HS256")
+    request = Request({"type": "http", "headers": [(b"authorization", f"Bearer {token}".encode())]})
+
+    user = await backend.authenticate(request)
+
+    assert user.identity == "anonymous"
+    assert user.is_authenticated is False
+
+
+@pytest.mark.asyncio
+async def test_jwt_auth_backend_rejects_not_yet_valid_token() -> None:
+    token = _signed_hs256_jwt({"sub": "jwt-user", "nbf": int(time.time()) + 60}, "secret")
     backend = JwtAuthBackend(secret="secret", algorithm="HS256")
     request = Request({"type": "http", "headers": [(b"authorization", f"Bearer {token}".encode())]})
 
