@@ -11,6 +11,7 @@ import sys
 from typing import Annotated
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 
@@ -364,7 +365,18 @@ async def put_item(payload: StorePutRequest, user: User = Depends(get_current_us
             row.embedding_json = embedding
             row.expires_at = _expires_at_for_ttl(ttl_minutes, now)
             row.updated_at = now
-        await session.commit()
+        try:
+            await session.commit()
+        except IntegrityError:
+            await session.rollback()
+            row = await session.scalar(select(StoreItem).where(StoreItem.identity_hash == identity_hash))
+            if row is None:
+                raise
+            row.value_json = dict(payload.value)
+            row.embedding_json = embedding
+            row.expires_at = _expires_at_for_ttl(ttl_minutes, now)
+            row.updated_at = now
+            await session.commit()
         await session.refresh(row)
         return _to_read_model(row)
 

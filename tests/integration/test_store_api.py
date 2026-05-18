@@ -1,13 +1,53 @@
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import IntegrityError
 
 from agentseek_api.api import store as store_module
+from agentseek_api.core.orm import StoreItem
 from agentseek_api.models.api import StoreDeleteRequest, StoreListNamespacesRequest, StorePutRequest, StoreSearchRequest
 from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
+
+
+class _FakeStoreSession:
+    def __init__(self, existing_row: StoreItem) -> None:
+        self.existing_row = existing_row
+        self.scalar_calls = 0
+        self.commits = 0
+        self.rollbacks = 0
+
+    async def scalar(self, _query: Any) -> StoreItem | None:
+        self.scalar_calls += 1
+        return None if self.scalar_calls == 1 else self.existing_row
+
+    def add(self, _row: StoreItem) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
+        if self.commits == 1:
+            raise IntegrityError("insert", {}, Exception("duplicate"))
+
+    async def rollback(self) -> None:
+        self.rollbacks += 1
+
+    async def refresh(self, _row: StoreItem) -> None:
+        return None
+
+
+class _FakeStoreSessionContext:
+    def __init__(self, session: _FakeStoreSession) -> None:
+        self.session = session
+
+    async def __aenter__(self) -> _FakeStoreSession:
+        return self.session
+
+    async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
+        return None
 
 
 def test_store_put_get_update_delete_and_user_isolation(client: TestClient) -> None:
@@ -341,6 +381,36 @@ async def test_store_route_functions_cover_database_mutations(client: TestClient
     with pytest.raises(HTTPException) as exc_info:
         await store_module.get_item(namespace=namespace, key="profile", user=user)
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_store_put_retries_as_update_after_unique_constraint_race(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
+    namespace = ["race"]
+    namespace_path = store_module._namespace_path(namespace)
+    existing_row = StoreItem(
+        identity_hash=store_module._identity_hash(user_id="race-user", namespace_path=namespace_path, key="profile"),
+        user_id="race-user",
+        namespace_path=namespace_path,
+        namespace_json=namespace,
+        key="profile",
+        value_json={"old": True},
+        created_at=now,
+        updated_at=now,
+    )
+    session = _FakeStoreSession(existing_row)
+    monkeypatch.setattr(store_module.db_manager, "get_session_factory", lambda: lambda: _FakeStoreSessionContext(session))
+    monkeypatch.setattr(store_module, "_utc_now", lambda: now + timedelta(seconds=1))
+
+    response = await store_module.put_item(
+        StorePutRequest(namespace=namespace, key="profile", value={"new": True}),
+        user=User(identity="race-user", is_authenticated=True),
+    )
+
+    assert response.value == {"new": True}
+    assert existing_row.value_json == {"new": True}
+    assert session.rollbacks == 1
+    assert session.commits == 2
 
 
 @pytest.mark.asyncio
