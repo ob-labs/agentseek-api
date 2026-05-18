@@ -139,7 +139,7 @@ def main() -> int:
             assert '"flags"' in info_body
             assert assistants_body.strip().startswith("[")
         finally:
-            _terminate_process(serve_process, name="agentseek serve")
+            _terminate_process(serve_process, name="agentseek-api serve")
     finally:
         _terminate_process(seekdb_process, name="embedded seekdb")
     return 0

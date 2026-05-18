@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import importlib
 import io
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -247,7 +248,7 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
     exit_code = main(["dev", "--tunnel"], cwd=tmp_path, stderr=stderr)
 
     assert exit_code == 2
-    assert "Unsupported option(s) for 'agentseek dev': --tunnel" in stderr.getvalue()
+    assert "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
 
 
 def test_dev_command_rejects_missing_explicit_config(tmp_path: Path) -> None:
@@ -270,10 +271,14 @@ def test_version_reports_cli_and_package_versions() -> None:
     exit_code = main(["version"], stdout=stdout)
 
     assert exit_code == 0
-    assert stdout.getvalue().strip().splitlines() == [
-        f"agentseek {__version__}",
-        f"agentseek-api {__version__}",
-    ]
+    assert stdout.getvalue().strip().splitlines() == [f"agentseek-api {__version__}"]
+
+
+def test_package_exposes_library_and_cli_entrypoints() -> None:
+    project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+
+    assert project_config["name"] == "agentseek-api"
+    assert project_config["scripts"]["agentseek-api"] == "agentseek_api.cli:main"
 
 
 def test_cli_module_is_importable_with_embeddable_entrypoints() -> None:
@@ -290,12 +295,35 @@ def test_register_subcommands_supports_embedding_under_parent_parser() -> None:
 
     parser = argparse.ArgumentParser(prog="parent")
     subparsers = parser.add_subparsers(dest="tool", required=True)
-    cli_module.register_subcommands(subparsers, command_name="agentseek")
+    cli_module.register_subcommands(subparsers, command_name="agentseek-api")
 
-    parsed = parser.parse_args(["agentseek", "version"])
+    parsed = parser.parse_args(["agentseek-api", "version"])
 
-    assert parsed.tool == "agentseek"
+    assert parsed.tool == "agentseek-api"
     assert parsed.command == "version"
+
+
+def test_parser_does_not_expose_deploy_command() -> None:
+    from agentseek_api.cli import create_parser
+
+    parser = create_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["deploy"])
+
+
+def test_embedded_subcommand_errors_use_registered_command_name(tmp_path: Path) -> None:
+    from agentseek_api import cli as cli_module
+
+    parser = argparse.ArgumentParser(prog="parent")
+    subparsers = parser.add_subparsers(dest="tool", required=True)
+    cli_module.register_subcommands(subparsers, command_name="agentseek-api")
+    parsed = parser.parse_args(["agentseek-api", "dev", "--tunnel"])
+    stderr = io.StringIO()
+
+    exit_code = cli_module.run_namespace(parsed, cwd=tmp_path, stderr=stderr)
+
+    assert exit_code == 2
+    assert "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
 
 
 def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
@@ -1334,21 +1362,4 @@ def test_up_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None:
     )
 
     assert exit_code == 2
-    assert "Unsupported option(s) for 'agentseek up': --watch" in stderr.getvalue()
-
-
-@pytest.mark.parametrize(
-    ("argv", "expected_name"),
-    [
-        (["deploy"], "deploy"),
-    ],
-)
-def test_unimplemented_langgraph_commands_fail_clearly(argv: list[str], expected_name: str) -> None:
-    from agentseek_api.cli import main
-
-    stderr = io.StringIO()
-
-    exit_code = main(argv, stderr=stderr)
-
-    assert exit_code == 2
-    assert stderr.getvalue().strip() == f"'agentseek {expected_name}' is not implemented yet in this milestone slice."
+    assert "Unsupported option(s) for 'agentseek-api up': --watch" in stderr.getvalue()

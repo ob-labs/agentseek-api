@@ -40,7 +40,7 @@ def main() -> int:
         )
         if completed.returncode != 0:
             raise SystemExit(
-                "agentseek dockerfile failed without --config:\n"
+                "agentseek-api dockerfile failed without --config:\n"
                 f"stdout:\n{completed.stdout}\n"
                 f"stderr:\n{completed.stderr}"
             )
