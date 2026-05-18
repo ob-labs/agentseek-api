@@ -1121,6 +1121,37 @@ def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatc
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
 
 
+def test_up_command_passes_new_auth_env_into_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("AUTH_TYPE", "api_key")
+    monkeypatch.setenv("AUTH_API_KEYS", "local-key=local-user")
+    monkeypatch.setenv("AUTH_JWT_SECRET", "jwt-secret")
+    monkeypatch.setenv("AUTH_JWT_ALGORITHM", "HS256")
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert container_env["AUTH_TYPE"] == "api_key"
+    assert container_env["AUTH_API_KEYS"] == "local-key=local-user"
+    assert container_env["AUTH_JWT_SECRET"] == "jwt-secret"
+    assert container_env["AUTH_JWT_ALGORITHM"] == "HS256"
+
+
 def test_up_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
