@@ -197,6 +197,111 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) -> None:
+    user_id = f"store-user-{uuid4()}"
+    other_user_id = f"store-other-{uuid4()}"
+    namespace = ["e2e", "store", uuid4().hex]
+
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=30.0, trust_env=False) as client:
+        info = await client.get("/info")
+        assert info.status_code == 200
+        info_body = info.json()
+        assert info_body["flags"]["store"] is True
+        assert info_body["metadata"]["checkpoint_backend"] == "langchain-oceanbase"
+
+        created = await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace,
+                "key": "profile",
+                "value": {"kind": "profile", "name": "Ada"},
+            },
+            headers=_user_headers(user_id),
+        )
+        assert created.status_code == 200
+        created_body = created.json()
+        assert created_body["namespace"] == namespace
+        assert created_body["key"] == "profile"
+        assert created_body["value"] == {"kind": "profile", "name": "Ada"}
+
+        updated = await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace,
+                "key": "profile",
+                "value": {"kind": "profile", "name": "Ada", "level": 2},
+            },
+            headers=_user_headers(user_id),
+        )
+        assert updated.status_code == 200
+        updated_body = updated.json()
+        assert updated_body["created_at"] == created_body["created_at"]
+        assert updated_body["value"] == {"kind": "profile", "name": "Ada", "level": 2}
+
+        fetched = await client.get(
+            "/store/items",
+            params=[("key", "profile"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert fetched.status_code == 200
+        assert fetched.json()["value"] == {"kind": "profile", "name": "Ada", "level": 2}
+
+        isolated = await client.get(
+            "/store/items",
+            params=[("key", "profile"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(other_user_id),
+        )
+        assert isolated.status_code == 404
+
+        await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace[:-1] + ["scratch"],
+                "key": "note",
+                "value": {"kind": "note", "name": "temporary"},
+            },
+            headers=_user_headers(user_id),
+        )
+
+        searched = await client.post(
+            "/store/items/search",
+            json={
+                "namespace_prefix": namespace[:2],
+                "filter": {"kind": "profile"},
+                "limit": 10,
+                "offset": 0,
+            },
+            headers=_user_headers(user_id),
+        )
+        assert searched.status_code == 200
+        assert [item["key"] for item in searched.json()["items"]] == ["profile"]
+
+        namespaces = await client.post(
+            "/store/namespaces",
+            json={"prefix": namespace[:2], "max_depth": 3, "limit": 10, "offset": 0},
+            headers=_user_headers(user_id),
+        )
+        assert namespaces.status_code == 200
+        assert namespace in namespaces.json()
+
+        deleted = await client.request(
+            "DELETE",
+            "/store/items",
+            json={"namespace": namespace, "key": "profile"},
+            headers=_user_headers(user_id),
+        )
+        assert deleted.status_code == 204
+
+        missing = await client.get(
+            "/store/items",
+            params=[("key", "profile"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert missing.status_code == 404
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_live_thread_endpoints(e2e_base_url: str) -> None:
     async with httpx.AsyncClient(base_url=e2e_base_url, timeout=60.0, trust_env=False) as client:
         assistant = await _create_assistant(client, name="thread-live-default", graph_id="default")

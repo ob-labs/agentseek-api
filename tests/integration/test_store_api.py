@@ -1,7 +1,12 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
+from agentseek_api.api import store as store_module
+from agentseek_api.models.api import StoreDeleteRequest, StoreListNamespacesRequest, StorePutRequest, StoreSearchRequest
+from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
 
 
@@ -235,3 +240,100 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
 
     assert search.status_code == 200
     assert [item["key"] for item in search.json()["items"]] == ["db", "ui"]
+
+
+@pytest.mark.asyncio
+async def test_store_route_functions_cover_database_mutations(client: TestClient) -> None:
+    _ = client
+    user = User(identity="direct-user", is_authenticated=True)
+    namespace = ["direct", "store"]
+
+    created = await store_module.put_item(
+        StorePutRequest(namespace=namespace, key="profile", value={"kind": "profile", "level": 1}),
+        user=user,
+    )
+    assert created.value == {"kind": "profile", "level": 1}
+
+    updated = await store_module.put_item(
+        StorePutRequest(namespace=namespace, key="profile", value={"kind": "profile", "level": 2}),
+        user=user,
+    )
+    assert updated.created_at == created.created_at
+    assert updated.value == {"kind": "profile", "level": 2}
+
+    fetched = await store_module.get_item(namespace=namespace, key="profile", user=user)
+    assert fetched.value == {"kind": "profile", "level": 2}
+
+    searched = await store_module.search_items(
+        StoreSearchRequest(namespace_prefix=["direct"], filter={"kind": "profile"}, limit=10, offset=0),
+        user=user,
+    )
+    assert [item.key for item in searched.items] == ["profile"]
+
+    namespaces = await store_module.list_namespaces(
+        StoreListNamespacesRequest(prefix=["direct"], suffix=["store"], max_depth=2),
+        user=user,
+    )
+    assert namespaces == [namespace]
+
+    response = await store_module.delete_item(StoreDeleteRequest(namespace=namespace, key="profile"), user=user)
+    assert response.status_code == 204
+
+    with pytest.raises(HTTPException) as exc_info:
+        await store_module.get_item(namespace=namespace, key="profile", user=user)
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_store_route_functions_cover_expiry_and_config_edges(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _ = client
+    user = User(identity="expiry-user", is_authenticated=True)
+    config_path = tmp_path / "agentseek.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": [".", 123, "./missing"],
+  "graphs": {"memory_agent": "./agent/graph.py:graph"},
+  "store": {
+    "ttl": {
+      "refresh_on_read": false,
+      "sweep_interval_minutes": 1,
+      "default_ttl": 1
+    },
+    "index": {
+      "embed": "missing.module:embed_texts",
+      "dims": 2,
+      "fields": ["text", 123]
+    }
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    monkeypatch.setattr(store_module, "_last_sweep_at", None)
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
+    monkeypatch.setattr(store_module, "_utc_now", lambda: now)
+
+    created = await store_module.put_item(
+        StorePutRequest(namespace=["expiry"], key="note", value={"text": "short lived"}),
+        user=user,
+    )
+    assert created.key == "note"
+
+    monkeypatch.setattr(store_module, "_utc_now", lambda: now + timedelta(minutes=2))
+    with pytest.raises(HTTPException) as exc_info:
+        await store_module.get_item(namespace=["expiry"], key="note", user=user)
+    assert exc_info.value.status_code == 404
+
+    with pytest.raises(HTTPException) as invalid_namespace:
+        store_module._namespace_path(["valid", ""])
+    assert invalid_namespace.value.status_code == 422
+
+    assert store_module._load_embedding_function("missing.module:embed", config_path=config_path) is None
+    assert store_module._load_embedding_function("not-a-reference", config_path=config_path) is None
+    assert store_module._load_embedding_function(":missing", config_path=config_path) is None
