@@ -158,9 +158,11 @@ Useful config fields:
 - `base_image`, `python_version`, `image_distro`, `pip_config_file`,
   `dockerfile_lines`: Docker build customization fields
 
-Endpoint-level LangGraph config keys such as `store`, `http`, and
-`api_version` are tolerated by the CLI layer where possible, but they are not
-fully wired to runtime behavior yet.
+Endpoint-level LangGraph config keys such as `http` and `api_version` are
+tolerated by the CLI layer where possible. Store config is used by the HTTP
+Store API for TTL and custom embedding-function setup; graph-injected
+`BaseStore` runtime support remains future work because
+`langchain-oceanbase==0.4.0` does not expose a store adapter yet.
 
 Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
 
@@ -283,7 +285,8 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 ## 🗺️ Future Work
 
 1. [ ] Add Redis-backed task queue and worker handoff for durable run execution
-2. [ ] Add Store API parity
-3. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
-4. [ ] Add crons and scheduler support
-5. [ ] Add MCP and A2A endpoint parity
+2. [ ] Add graph-injected `BaseStore` runtime support once a durable store adapter is available
+3. [ ] Add provider-managed semantic embedding strings for Store API indexing
+4. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
+5. [ ] Add crons and scheduler support
+6. [ ] Add MCP and A2A endpoint parity

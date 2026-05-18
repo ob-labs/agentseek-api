@@ -1,6 +1,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+import hashlib
 import importlib
 import importlib.util
 import json
@@ -99,6 +100,13 @@ def _load_embedding_function(reference: str, *, config_path: Path) -> EmbeddingF
     return embed_fn
 
 
+def _looks_like_python_reference(reference: str) -> bool:
+    if ":" not in reference:
+        return False
+    module_ref, _symbol = reference.rsplit(":", maxsplit=1)
+    return module_ref.endswith(".py") or module_ref.startswith(".") or "/" in module_ref or "\\" in module_ref
+
+
 def _apply_config_dependencies(payload: dict[str, object], *, config_path: Path) -> None:
     dependencies = payload.get("dependencies")
     if not isinstance(dependencies, list):
@@ -165,6 +173,11 @@ def _namespace_path(namespace: list[str]) -> str:
     return "\x1f".join(namespace)
 
 
+def _identity_hash(*, user_id: str, namespace_path: str, key: str) -> str:
+    raw_value = json.dumps([user_id, namespace_path, key], ensure_ascii=False, separators=(",", ":"))
+    return hashlib.sha256(raw_value.encode("utf-8")).hexdigest()
+
+
 def _expires_at_for_ttl(ttl_minutes: float | None, now: datetime) -> datetime | None:
     if ttl_minutes is None:
         return None
@@ -199,16 +212,74 @@ async def _sweep_expired_items(config: StoreConfig, now: datetime) -> None:
     _last_sweep_at = now
 
 
+def _extract_path_values(value: object, field_path: str) -> list[object]:
+    if field_path == "$":
+        return [value]
+    items: list[object] = [value]
+    for segment in field_path.split("."):
+        next_items: list[object] = []
+        if segment.endswith("[*]"):
+            key = segment[:-3]
+            for item in items:
+                child = item.get(key) if isinstance(item, dict) else None
+                if isinstance(child, list):
+                    next_items.extend(child)
+            items = next_items
+            continue
+        if "[" in segment and segment.endswith("]"):
+            key, _, raw_index = segment[:-1].partition("[")
+            try:
+                index = int(raw_index)
+            except ValueError:
+                items = []
+                continue
+            for item in items:
+                child = item.get(key) if isinstance(item, dict) else None
+                if isinstance(child, list) and -len(child) <= index < len(child):
+                    next_items.append(child[index])
+            items = next_items
+            continue
+        for item in items:
+            if isinstance(item, dict) and segment in item:
+                next_items.append(item[segment])
+        items = next_items
+    return items
+
+
+def _extract_scalar_text(value: object) -> list[str]:
+    if isinstance(value, (str, int, float, bool)):
+        return [str(value)]
+    if isinstance(value, dict):
+        parts: list[str] = []
+        for item in value.values():
+            parts.extend(_extract_scalar_text(item))
+        return parts
+    if isinstance(value, list):
+        parts = []
+        for item in value:
+            parts.extend(_extract_scalar_text(item))
+        return parts
+    return []
+
+
 def _extract_field_text(value: dict[str, object], fields: list[str] | None) -> str:
-    if fields:
-        parts = [value.get(field) for field in fields]
+    if not fields:
+        parts = _extract_scalar_text(value)
     else:
-        parts = value.values()
-    return "\n".join(str(part) for part in parts if isinstance(part, (str, int, float, bool)))
+        parts = []
+        for field in fields:
+            for item in _extract_path_values(value, field):
+                parts.extend(_extract_scalar_text(item))
+    return "\n".join(parts)
 
 
 def _embed_one(config: StoreConfig, text: str) -> list[float] | None:
     if config.index.embed_fn is None or not text:
+        if config.index.embed and not _looks_like_python_reference(config.index.embed):
+            raise HTTPException(
+                status_code=422,
+                detail="store.index.embed provider strings are not supported yet; use a Python function reference.",
+            )
         return None
     vectors = config.index.embed_fn([text])
     if not vectors:
@@ -251,9 +322,13 @@ def _matches_namespace(namespace: list[str], payload: StoreListNamespacesRequest
         return False
     if payload.suffix is not None and namespace[-len(payload.suffix) :] != payload.suffix:
         return False
-    if payload.max_depth is not None and len(namespace) > payload.max_depth:
-        return False
     return True
+
+
+def _listed_namespace(namespace: list[str], payload: StoreListNamespacesRequest) -> list[str]:
+    if payload.max_depth is not None:
+        return namespace[: max(payload.max_depth, 0)]
+    return namespace
 
 
 @router.put("/items", response_model=StoreItemRead)
@@ -262,19 +337,19 @@ async def put_item(payload: StorePutRequest, user: User = Depends(get_current_us
     now = _utc_now()
     await _sweep_expired_items(config, now)
     namespace_path = _namespace_path(payload.namespace)
+    identity_hash = _identity_hash(user_id=user.identity, namespace_path=namespace_path, key=payload.key)
     ttl_minutes = payload.ttl if payload.ttl is not None else config.ttl.default_ttl
     embedding = _embed_one(config, _extract_field_text(payload.value, config.index.fields))
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(
             select(StoreItem).where(
-                StoreItem.user_id == user.identity,
-                StoreItem.namespace_path == namespace_path,
-                StoreItem.key == payload.key,
+                StoreItem.identity_hash == identity_hash,
             )
         )
         if row is None:
             row = StoreItem(
+                identity_hash=identity_hash,
                 user_id=user.identity,
                 namespace_path=namespace_path,
                 namespace_json=list(payload.namespace),
@@ -305,13 +380,12 @@ async def get_item(
     now = _utc_now()
     await _sweep_expired_items(config, now)
     namespace_path = _namespace_path(namespace)
+    identity_hash = _identity_hash(user_id=user.identity, namespace_path=namespace_path, key=key)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(
             select(StoreItem).where(
-                StoreItem.user_id == user.identity,
-                StoreItem.namespace_path == namespace_path,
-                StoreItem.key == key,
+                StoreItem.identity_hash == identity_hash,
             )
         )
         if row is None or _is_expired(row, now):
@@ -331,13 +405,12 @@ async def get_item(
 async def delete_item(payload: StoreDeleteRequest, user: User = Depends(get_current_user)) -> Response:
     await _sweep_expired_items(_load_store_config(), _utc_now())
     namespace_path = _namespace_path(payload.namespace)
+    identity_hash = _identity_hash(user_id=user.identity, namespace_path=namespace_path, key=payload.key)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(
             select(StoreItem).where(
-                StoreItem.user_id == user.identity,
-                StoreItem.namespace_path == namespace_path,
-                StoreItem.key == payload.key,
+                StoreItem.identity_hash == identity_hash,
             )
         )
         if row is not None:
@@ -391,8 +464,16 @@ async def list_namespaces(
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         rows = (await session.scalars(select(StoreItem).where(StoreItem.user_id == user.identity))).all()
-    namespaces = sorted({tuple(row.namespace_json) for row in rows if not _is_expired(row, now)})
-    filtered = [list(namespace) for namespace in namespaces if _matches_namespace(list(namespace), payload)]
+    namespaces = sorted(
+        {
+            tuple(_listed_namespace(namespace, payload))
+            for row in rows
+            if not _is_expired(row, now)
+            for namespace in [list(row.namespace_json)]
+            if _matches_namespace(namespace, payload)
+        }
+    )
+    filtered = [list(namespace) for namespace in namespaces]
     start = max(payload.offset, 0)
     end = start + max(payload.limit, 0)
     return filtered[start:end]

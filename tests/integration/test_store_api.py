@@ -127,10 +127,6 @@ def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
       "refresh_on_read": true,
       "sweep_interval_minutes": 1,
       "default_ttl": 10
-    },
-    "index": {
-      "embed": "openai:text-embedding-3-small",
-      "dims": 1536
     }
   }
 }
@@ -242,6 +238,57 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     assert [item["key"] for item in search.json()["items"]] == ["db", "ui"]
 
 
+def test_store_provider_embedding_config_fails_deterministically(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    config_path = tmp_path / "agentseek.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": ["."],
+  "graphs": {"memory_agent": "./agent/graph.py:graph"},
+  "store": {
+    "index": {
+      "embed": "openai:text-embedding-3-small",
+      "dims": 1536
+    }
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+
+    response = client.put(
+        "/store/items",
+        json={"namespace": ["memories"], "key": "provider", "value": {"text": "needs embedding"}},
+        headers={"x-user-id": "u1"},
+    )
+
+    assert response.status_code == 422
+    assert "provider strings are not supported" in response.json()["detail"]
+
+
+def test_store_namespace_max_depth_truncates_results(client: TestClient) -> None:
+    response = client.put(
+        "/store/items",
+        json={"namespace": ["a", "b", "c", "d"], "key": "deep", "value": {"kind": "note"}},
+        headers={"x-user-id": "u1"},
+    )
+    assert response.status_code == 200
+
+    namespaces = client.post(
+        "/store/namespaces",
+        json={"prefix": ["a"], "max_depth": 3, "limit": 10, "offset": 0},
+        headers={"x-user-id": "u1"},
+    )
+
+    assert namespaces.status_code == 200
+    assert namespaces.json() == [["a", "b", "c"]]
+
+
 @pytest.mark.asyncio
 async def test_store_route_functions_cover_database_mutations(client: TestClient) -> None:
     _ = client
@@ -270,11 +317,23 @@ async def test_store_route_functions_cover_database_mutations(client: TestClient
     )
     assert [item.key for item in searched.items] == ["profile"]
 
+    deep_namespace = ["direct", "store", "child"]
+    await store_module.put_item(
+        StorePutRequest(namespace=deep_namespace, key="nested", value={"kind": "profile", "level": 3}),
+        user=user,
+    )
+
     namespaces = await store_module.list_namespaces(
         StoreListNamespacesRequest(prefix=["direct"], suffix=["store"], max_depth=2),
         user=user,
     )
     assert namespaces == [namespace]
+
+    truncated = await store_module.list_namespaces(
+        StoreListNamespacesRequest(prefix=["direct"], max_depth=2),
+        user=user,
+    )
+    assert truncated == [namespace]
 
     response = await store_module.delete_item(StoreDeleteRequest(namespace=namespace, key="profile"), user=user)
     assert response.status_code == 204
@@ -303,11 +362,6 @@ async def test_store_route_functions_cover_expiry_and_config_edges(
       "refresh_on_read": false,
       "sweep_interval_minutes": 1,
       "default_ttl": 1
-    },
-    "index": {
-      "embed": "missing.module:embed_texts",
-      "dims": 2,
-      "fields": ["text", 123]
     }
   }
 }
@@ -337,3 +391,11 @@ async def test_store_route_functions_cover_expiry_and_config_edges(
     assert store_module._load_embedding_function("missing.module:embed", config_path=config_path) is None
     assert store_module._load_embedding_function("not-a-reference", config_path=config_path) is None
     assert store_module._load_embedding_function(":missing", config_path=config_path) is None
+    assert store_module._extract_field_text(
+        {
+            "metadata": {"title": "Nested"},
+            "chapters": [{"content": "first"}, {"content": "second"}],
+            "authors": [{"name": "Ada"}],
+        },
+        ["metadata.title", "chapters[*].content", "authors[0].name"],
+    ) == "Nested\nfirst\nsecond\nAda"

@@ -60,8 +60,10 @@ class Run(Base):
 
 class StoreItem(Base):
     __tablename__ = "store_items"
+    __table_args__ = (UniqueConstraint("identity_hash", name="uq_store_items_identity_hash"),)
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    identity_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     namespace_path: Mapped[str] = mapped_column(String(2048), nullable=False)
     namespace_json: Mapped[list] = mapped_column("namespace", JSON, default=list, nullable=False)
