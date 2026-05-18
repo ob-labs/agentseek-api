@@ -58,6 +58,19 @@ class Run(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
 
 
+class StoreItem(Base):
+    __tablename__ = "store_items"
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    namespace_path: Mapped[str] = mapped_column(String(2048), nullable=False, index=True)
+    namespace_json: Mapped[list] = mapped_column("namespace", JSON, default=list, nullable=False)
+    key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    value_json: Mapped[dict] = mapped_column("value", JSON, default=dict, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
+
+
 async def get_session(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncSession]:
     async with session_factory() as session:
         yield session
