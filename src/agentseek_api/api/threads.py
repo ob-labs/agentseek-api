@@ -6,7 +6,7 @@ from typing import Any
 
 from sqlalchemy import delete, select
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
@@ -17,6 +17,13 @@ from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolCommandRequest, ProtocolEventStreamRequest
 from agentseek_api.services.run_preparation import prepare_and_submit_run, resume_run
 from agentseek_api.services.run_state import run_broker
+from agentseek_api.services.stream_persistence import (
+    delete_run_stream_events,
+    delete_thread_stream_events,
+    load_run_stream_events,
+    load_thread_stream_events,
+    parse_last_event_id,
+)
 from agentseek_api.services.thread_checkpoint_store import (
     checkpoint_to_payload,
     copy_checkpoints,
@@ -254,6 +261,7 @@ async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_cu
     if payload.strategy == "delete":
         for thread_id in thread_ids:
             thread_protocol_broker.delete_thread(thread_id)
+            await delete_thread_stream_events(thread_id)
     return {"pruned_count": len(thread_ids)}
 
 
@@ -306,7 +314,9 @@ async def delete_thread(thread_id: str, user: User = Depends(get_current_user)) 
     await _best_effort_checkpointer_call("adelete_thread", thread_id)
     if run_ids:
         await _best_effort_checkpointer_call("adelete_for_runs", list(run_ids))
+        await delete_run_stream_events(list(run_ids))
     thread_protocol_broker.delete_thread(thread_id)
+    await delete_thread_stream_events(thread_id)
     return Response(status_code=204)
 
 
@@ -472,7 +482,15 @@ async def checkpoint_thread_state(
 
 
 @router.get("/{thread_id}/stream")
-async def stream_thread(thread_id: str, user: User = Depends(get_current_user)) -> StreamingResponse:
+async def stream_thread(
+    thread_id: str,
+    user: User = Depends(get_current_user),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+) -> StreamingResponse:
+    try:
+        after_seq = parse_last_event_id(last_event_id) or 0
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
@@ -485,11 +503,18 @@ async def stream_thread(thread_id: str, user: User = Depends(get_current_user)) 
         ).all()
 
     async def _event_iter() -> AsyncIterator[str]:
+        seen: set[tuple[str, int]] = set()
         for run_id in run_ids:
-            for event in run_broker.snapshot(run_id):
+            records_by_seq: dict[int, dict[str, object]] = {
+                seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
+            }
+            records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=after_seq)})
+            for seq in sorted(records_by_seq):
+                event = records_by_seq[seq]
+                seen.add((run_id, seq))
                 event_name = str(event.get("event", "message"))
                 event_payload: dict[str, object] = {"run_id": run_id, **event}
-                yield f"event: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
+                yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")
 
@@ -618,16 +643,36 @@ async def stream_thread_protocol_events(
     thread_id: str,
     payload: ProtocolEventStreamRequest,
     user: User = Depends(get_current_user),
+    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
+    try:
+        header_since = parse_last_event_id(last_event_id) or 0
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    after_seq = max(header_since, payload.since or 0)
     await _get_thread_row(thread_id=thread_id, user=user)
 
     async def _event_iter() -> AsyncIterator[str]:
+        current_seq = after_seq
+        for event in await load_thread_stream_events(
+            thread_id,
+            channels=payload.channels,
+            namespaces=payload.namespaces,
+            depth=payload.depth,
+            after_seq=after_seq,
+        ):
+            seq = int(event.get("seq", 0))
+            current_seq = max(current_seq, seq)
+            method = str(event.get("method", "event"))
+            body = json.dumps(event)
+            yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
+
         async for event in thread_protocol_broker.stream(
             thread_id,
             channels=payload.channels,
             namespaces=payload.namespaces,
             depth=payload.depth,
-            since=payload.since,
+            since=current_seq,
         ):
             seq = int(event.get("seq", 0))
             method = str(event.get("method", "event"))

@@ -9,6 +9,7 @@ from agentseek_api.models.auth import User
 from agentseek_api.services.executor import get_executor
 from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
 from agentseek_api.services.run_state import run_broker
+from agentseek_api.services.stream_persistence import persist_run_stream_event, persist_thread_stream_event
 from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
 
 
@@ -39,6 +40,35 @@ async def _persist_submission_failure(
         await session.commit()
 
 
+async def _publish_lifecycle(
+    thread_id: str,
+    *,
+    event: str,
+    graph_name: str | None = None,
+    error: str | None = None,
+) -> None:
+    kwargs: dict[str, Any] = {"event": event}
+    if graph_name is not None:
+        kwargs["graph_name"] = graph_name
+    if error is not None:
+        kwargs["error"] = error
+    published = publish_lifecycle_event(thread_id, **kwargs)
+    await persist_thread_stream_event(thread_id, published)
+
+
+async def _publish_run_event(run_id: str, event: str, **payload: Any) -> None:
+    published = run_broker.publish(run_id, event, **payload)
+    if published is None:
+        return
+    seq, event_payload = published
+    await persist_run_stream_event(run_id, seq=seq, payload=event_payload)
+
+
+async def _persist_thread_snapshot(thread_id: str) -> None:
+    for event in thread_protocol_broker.snapshot_records(thread_id):
+        await persist_thread_stream_event(thread_id, event)
+
+
 async def _execute_and_persist(
     *,
     run_id: str,
@@ -53,7 +83,7 @@ async def _execute_and_persist(
         async with session_factory() as execution_session:
             db_run = await execution_session.scalar(select(Run).where(Run.run_id == run_id))
             if db_run is None:
-                publish_lifecycle_event(
+                await _publish_lifecycle(
                     thread_id,
                     event="failed",
                     graph_name=graph_id,
@@ -61,7 +91,7 @@ async def _execute_and_persist(
                 )
                 return
             if _is_cancelled_run(db_run):
-                publish_lifecycle_event(
+                await _publish_lifecycle(
                     thread_id,
                     event="failed",
                     graph_name=graph_id,
@@ -76,7 +106,7 @@ async def _execute_and_persist(
                 thread.status = "busy"
                 thread.state_updated_at = db_run.updated_at
             await execution_session.commit()
-            run_broker.publish(run_id, "start")
+            await _publish_run_event(run_id, "start")
 
             try:
                 result = await execute_run(
@@ -86,6 +116,7 @@ async def _execute_and_persist(
                     graph_id=graph_id,
                     resume=resume if is_resume else UNSET,
                 )
+                await _persist_thread_snapshot(thread_id)
                 await execution_session.refresh(db_run)
                 if not _is_cancelled_run(db_run):
                     _apply_execution_result(db_run, result)
@@ -105,13 +136,13 @@ async def _execute_and_persist(
                 lifecycle_state = "interrupted"
             elif db_run.status == "error":
                 lifecycle_state = "failed"
-            publish_lifecycle_event(
+            await _publish_lifecycle(
                 thread_id,
                 event=lifecycle_state,
                 graph_name=graph_id,
                 error=db_run.last_error,
             )
-            run_broker.publish(run_id, "end", status=db_run.status)
+            await _publish_run_event(run_id, "end", status=db_run.status)
     finally:
         thread_protocol_broker.run_finished(thread_id)
 
@@ -164,7 +195,7 @@ async def prepare_and_submit_run(
         await session.refresh(run)
 
     thread_protocol_broker.run_started(thread_id)
-    publish_lifecycle_event(thread_id, event="started", graph_name=graph_id)
+    await _publish_lifecycle(thread_id, event="started", graph_name=graph_id)
     try:
         await get_executor().submit(
             lambda: _execute_and_persist(
@@ -182,7 +213,7 @@ async def prepare_and_submit_run(
             run_status="error",
             thread_status="error",
         )
-        publish_lifecycle_event(
+        await _publish_lifecycle(
             thread_id,
             event="failed",
             graph_name=graph_id,
@@ -217,7 +248,7 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
         await session.commit()
 
     thread_protocol_broker.run_started(thread_id)
-    publish_lifecycle_event(thread_id, event="started", graph_name=graph_id)
+    await _publish_lifecycle(thread_id, event="started", graph_name=graph_id)
     try:
         await get_executor().submit(
             lambda: _execute_and_persist(
@@ -237,7 +268,7 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
             run_status="interrupted",
             thread_status="interrupted",
         )
-        publish_lifecycle_event(
+        await _publish_lifecycle(
             thread_id,
             event="failed",
             graph_name=graph_id,

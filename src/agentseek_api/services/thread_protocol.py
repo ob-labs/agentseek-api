@@ -107,6 +107,13 @@ class ThreadProtocolEventBroker:
     def delete_thread(self, thread_id: str) -> None:
         self._drop_thread(thread_id)
 
+    def snapshot_records(self, thread_id: str, *, after_seq: int = 0) -> list[dict[str, Any]]:
+        return [
+            dict(event)
+            for event in self._events.get(thread_id, [])
+            if int(event.get("seq", 0)) > after_seq
+        ]
+
     async def stream(
         self,
         thread_id: str,
