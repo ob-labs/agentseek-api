@@ -285,7 +285,9 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 ## 🗺️ Future Work
 
 1. [ ] Add Redis-backed task queue and worker handoff for durable run execution
-2. [ ] Add graph-injected `BaseStore` runtime support once a durable store adapter is available
+2. [ ] Add graph-injected `BaseStore` runtime support once `langchain-oceanbase`
+   exposes a durable store adapter; the current HTTP Store API persists through
+   AgentSeek metadata tables
 3. [ ] Add provider-managed semantic embedding strings for Store API indexing
 4. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
 5. [ ] Add crons and scheduler support

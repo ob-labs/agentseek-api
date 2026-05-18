@@ -1,12 +1,63 @@
 import json
+import os
 from uuid import uuid4
 
 import httpx
 import pytest
+from sqlalchemy import select
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from agentseek_api.core.database import _ensure_async_driver, _resolve_metadata_backend
+from agentseek_api.core.orm import StoreItem
 
 
 def _user_headers(user_id: str) -> dict[str, str]:
     return {"x-user-id": user_id}
+
+
+def _seekdb_url() -> str:
+    return URL.create(
+        drivername="mysql+aiomysql",
+        username=os.getenv("OCEANBASE_USER", "root@test"),
+        password=os.getenv("OCEANBASE_PASSWORD", ""),
+        host=os.getenv("OCEANBASE_HOST", "127.0.0.1"),
+        port=int(os.getenv("OCEANBASE_PORT", "2881")),
+        database=os.getenv("OCEANBASE_DB_NAME", "seekdb"),
+    ).render_as_string(hide_password=False)
+
+
+def _metadata_db_url() -> str:
+    raw_url = os.getenv("METADATA_DB_URL") or os.getenv("SEEKDB_URL") or _seekdb_url()
+    parsed_url = make_url(raw_url)
+    backend = _resolve_metadata_backend(
+        configured_backend=os.getenv("METADATA_DB_BACKEND", "auto"),
+        url_drivername=parsed_url.drivername,
+    )
+    return _ensure_async_driver(url=parsed_url, backend=backend).render_as_string(hide_password=False)
+
+
+async def _fetch_store_item_from_backend(*, user_id: str, key: str) -> dict[str, object] | None:
+    engine = create_async_engine(_metadata_db_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            row = await session.scalar(
+                select(StoreItem)
+                .where(
+                    StoreItem.user_id == user_id,
+                    StoreItem.key == key,
+                )
+                .order_by(StoreItem.created_at.desc())
+            )
+            if row is None:
+                return None
+            return {
+                "namespace": list(row.namespace_json),
+                "value": dict(row.value_json),
+            }
+    finally:
+        await engine.dispose()
 
 
 async def _create_assistant(
@@ -238,6 +289,13 @@ async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) 
         assert updated_body["created_at"] == created_body["created_at"]
         assert updated_body["value"] == {"kind": "profile", "name": "Ada", "level": 2}
 
+        backend_row = await _fetch_store_item_from_backend(user_id=user_id, key="profile")
+        assert backend_row == {
+            "namespace": namespace,
+            "value": {"kind": "profile", "name": "Ada", "level": 2},
+        }
+        assert await _fetch_store_item_from_backend(user_id=other_user_id, key="profile") is None
+
         fetched = await client.get(
             "/store/items",
             params=[("key", "profile"), *(("namespace", part) for part in namespace)],
@@ -298,6 +356,7 @@ async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) 
             headers=_user_headers(user_id),
         )
         assert missing.status_code == 404
+        assert await _fetch_store_item_from_backend(user_id=user_id, key="profile") is None
 
 
 @pytest.mark.e2e
