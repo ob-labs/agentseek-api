@@ -58,6 +58,23 @@ class Run(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
 
 
+class StoreItem(Base):
+    __tablename__ = "store_items"
+    __table_args__ = (UniqueConstraint("identity_hash", name="uq_store_items_identity_hash"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    identity_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    namespace_path: Mapped[str] = mapped_column(String(2048), nullable=False)
+    namespace_json: Mapped[list] = mapped_column("namespace", JSON, default=list, nullable=False)
+    key: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    value_json: Mapped[dict] = mapped_column("value", JSON, default=dict, nullable=False)
+    embedding_json: Mapped[list | None] = mapped_column("embedding", JSON, nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
+
+
 class RunStreamEvent(Base):
     __tablename__ = "run_stream_events"
     __table_args__ = (UniqueConstraint("run_id", "seq", name="uq_run_stream_events_run_seq"),)

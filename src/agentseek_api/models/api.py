@@ -118,3 +118,52 @@ class RunRead(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
     kwargs: dict[str, Any] = Field(default_factory=dict)
     multitask_strategy: str = "enqueue"
+
+
+class StorePutRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: list[str]
+    key: str
+    value: dict[str, Any]
+    ttl: float | None = None
+
+
+class StoreDeleteRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    namespace: list[str]
+    key: str
+
+
+class StoreSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    namespace_prefix: list[str] | None = None
+    filter: dict[str, Any] | None = None
+    query: str | None = None
+    refresh_ttl: bool | None = None
+    limit: int = 10
+    offset: int = 0
+
+
+class StoreListNamespacesRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    prefix: list[str] | None = None
+    suffix: list[str] | None = None
+    max_depth: int | None = None
+    limit: int = 100
+    offset: int = 0
+
+
+class StoreItemRead(BaseModel):
+    namespace: list[str]
+    key: str
+    value: dict[str, Any]
+    created_at: datetime
+    updated_at: datetime
+
+
+class StoreSearchResponse(BaseModel):
+    items: list[StoreItemRead]

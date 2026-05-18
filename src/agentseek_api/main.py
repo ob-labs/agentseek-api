@@ -9,6 +9,7 @@ from agentseek_api import __version__
 from agentseek_api.api.assistants import router as assistants_router
 from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
+from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
@@ -37,7 +38,7 @@ def _feature_flags() -> dict[str, bool]:
         "threads": True,
         "runs": True,
         "crons": False,
-        "store": False,
+        "store": True,
         "a2a": False,
         "mcp": False,
         "protocol_v2": True,
@@ -139,6 +140,7 @@ def create_app() -> FastAPI:
     app.include_router(threads_router)
     app.include_router(runs_router)
     app.include_router(stateless_runs_router)
+    app.include_router(store_router)
     return app
 
 

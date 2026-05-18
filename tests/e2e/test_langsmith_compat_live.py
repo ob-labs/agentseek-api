@@ -1,12 +1,63 @@
 import json
+import os
 from uuid import uuid4
 
 import httpx
 import pytest
+from sqlalchemy import select
+from sqlalchemy.engine import URL, make_url
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from agentseek_api.core.database import _ensure_async_driver, _resolve_metadata_backend
+from agentseek_api.core.orm import StoreItem
 
 
 def _user_headers(user_id: str) -> dict[str, str]:
     return {"x-user-id": user_id}
+
+
+def _seekdb_url() -> str:
+    return URL.create(
+        drivername="mysql+aiomysql",
+        username=os.getenv("OCEANBASE_USER", "root@test"),
+        password=os.getenv("OCEANBASE_PASSWORD", ""),
+        host=os.getenv("OCEANBASE_HOST", "127.0.0.1"),
+        port=int(os.getenv("OCEANBASE_PORT", "2881")),
+        database=os.getenv("OCEANBASE_DB_NAME", "seekdb"),
+    ).render_as_string(hide_password=False)
+
+
+def _metadata_db_url() -> str:
+    raw_url = os.getenv("METADATA_DB_URL") or os.getenv("SEEKDB_URL") or _seekdb_url()
+    parsed_url = make_url(raw_url)
+    backend = _resolve_metadata_backend(
+        configured_backend=os.getenv("METADATA_DB_BACKEND", "auto"),
+        url_drivername=parsed_url.drivername,
+    )
+    return _ensure_async_driver(url=parsed_url, backend=backend).render_as_string(hide_password=False)
+
+
+async def _fetch_store_item_from_backend(*, user_id: str, key: str) -> dict[str, object] | None:
+    engine = create_async_engine(_metadata_db_url(), pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    try:
+        async with session_factory() as session:
+            row = await session.scalar(
+                select(StoreItem)
+                .where(
+                    StoreItem.user_id == user_id,
+                    StoreItem.key == key,
+                )
+                .order_by(StoreItem.created_at.desc())
+            )
+            if row is None:
+                return None
+            return {
+                "namespace": list(row.namespace_json),
+                "value": dict(row.value_json),
+            }
+    finally:
+        await engine.dispose()
 
 
 async def _create_assistant(
@@ -193,6 +244,119 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
 
         deleted_get = await client.get(f"/assistants/{react_assistant['assistant_id']}")
         assert deleted_get.status_code == 404
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) -> None:
+    user_id = f"store-user-{uuid4()}"
+    other_user_id = f"store-other-{uuid4()}"
+    namespace = ["e2e", "store", uuid4().hex]
+
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=30.0, trust_env=False) as client:
+        info = await client.get("/info")
+        assert info.status_code == 200
+        info_body = info.json()
+        assert info_body["flags"]["store"] is True
+        assert info_body["metadata"]["checkpoint_backend"] == "langchain-oceanbase"
+
+        created = await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace,
+                "key": "profile",
+                "value": {"kind": "profile", "name": "Ada"},
+            },
+            headers=_user_headers(user_id),
+        )
+        assert created.status_code == 200
+        created_body = created.json()
+        assert created_body["namespace"] == namespace
+        assert created_body["key"] == "profile"
+        assert created_body["value"] == {"kind": "profile", "name": "Ada"}
+
+        updated = await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace,
+                "key": "profile",
+                "value": {"kind": "profile", "name": "Ada", "level": 2},
+            },
+            headers=_user_headers(user_id),
+        )
+        assert updated.status_code == 200
+        updated_body = updated.json()
+        assert updated_body["created_at"] == created_body["created_at"]
+        assert updated_body["value"] == {"kind": "profile", "name": "Ada", "level": 2}
+
+        backend_row = await _fetch_store_item_from_backend(user_id=user_id, key="profile")
+        assert backend_row == {
+            "namespace": namespace,
+            "value": {"kind": "profile", "name": "Ada", "level": 2},
+        }
+        assert await _fetch_store_item_from_backend(user_id=other_user_id, key="profile") is None
+
+        fetched = await client.get(
+            "/store/items",
+            params=[("key", "profile"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert fetched.status_code == 200
+        assert fetched.json()["value"] == {"kind": "profile", "name": "Ada", "level": 2}
+
+        isolated = await client.get(
+            "/store/items",
+            params=[("key", "profile"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(other_user_id),
+        )
+        assert isolated.status_code == 404
+
+        await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace[:-1] + ["scratch"],
+                "key": "note",
+                "value": {"kind": "note", "name": "temporary"},
+            },
+            headers=_user_headers(user_id),
+        )
+
+        searched = await client.post(
+            "/store/items/search",
+            json={
+                "namespace_prefix": namespace[:2],
+                "filter": {"kind": "profile"},
+                "limit": 10,
+                "offset": 0,
+            },
+            headers=_user_headers(user_id),
+        )
+        assert searched.status_code == 200
+        assert [item["key"] for item in searched.json()["items"]] == ["profile"]
+
+        namespaces = await client.post(
+            "/store/namespaces",
+            json={"prefix": namespace[:2], "max_depth": 3, "limit": 10, "offset": 0},
+            headers=_user_headers(user_id),
+        )
+        assert namespaces.status_code == 200
+        assert namespace in namespaces.json()
+
+        deleted = await client.request(
+            "DELETE",
+            "/store/items",
+            json={"namespace": namespace, "key": "profile"},
+            headers=_user_headers(user_id),
+        )
+        assert deleted.status_code == 204
+
+        missing = await client.get(
+            "/store/items",
+            params=[("key", "profile"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert missing.status_code == 404
+        assert await _fetch_store_item_from_backend(user_id=user_id, key="profile") is None
 
 
 @pytest.mark.e2e
