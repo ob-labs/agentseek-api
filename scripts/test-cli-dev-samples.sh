@@ -72,7 +72,7 @@ while time.time() < deadline:
 raise SystemExit(f"MySQL did not become ready: {last_error}")
 PY
 
-uv run agentseek dev \
+uv run agentseek-api dev \
   --config examples/sample_graphs_manifest.json \
   --host 127.0.0.1 \
   --port "$EXAMPLE_API_PORT" \
@@ -97,7 +97,7 @@ while time.time() < deadline:
         last_error = exc
         time.sleep(1)
 
-raise SystemExit(f"agentseek dev did not become ready: {last_error}")
+raise SystemExit(f"agentseek-api dev did not become ready: {last_error}")
 PY
 
 uv run python tests/e2e/e2e_live_http_multi_graph.py

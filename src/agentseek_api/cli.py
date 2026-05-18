@@ -16,6 +16,8 @@ from typing import TextIO
 from agentseek_api import __version__
 from agentseek_api.settings import DEFAULT_API_PORT
 
+DEFAULT_CLI_NAME = "agentseek-api"
+
 __all__ = [
     "CliError",
     "build_container_env",
@@ -71,6 +73,17 @@ def _flag_name(option_name: str) -> str:
     return f"--{option_name.replace('_', '-')}"
 
 
+def _cli_name(args: argparse.Namespace) -> str:
+    return getattr(args, "cli_name", DEFAULT_CLI_NAME)
+
+
+def _infer_cli_name() -> str:
+    candidate = Path(sys.argv[0]).name
+    if candidate == DEFAULT_CLI_NAME:
+        return candidate
+    return DEFAULT_CLI_NAME
+
+
 def _reject_unsupported_options(args: argparse.Namespace, *, command_name: str, option_names: Sequence[str]) -> None:
     unsupported = []
     for option_name in option_names:
@@ -82,7 +95,7 @@ def _reject_unsupported_options(args: argparse.Namespace, *, command_name: str, 
         if value is not None:
             unsupported.append(_flag_name(option_name))
     if unsupported:
-        raise CliError(f"Unsupported option(s) for 'agentseek {command_name}': {', '.join(unsupported)}")
+        raise CliError(f"Unsupported option(s) for '{_cli_name(args)} {command_name}': {', '.join(unsupported)}")
 
 
 def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None:
@@ -630,13 +643,8 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
 
 
 def _print_version(*, stdout: TextIO) -> int:
-    stdout.write(f"agentseek {__version__}\n")
     stdout.write(f"agentseek-api {__version__}\n")
     return 0
-
-
-def _unimplemented(command_name: str) -> int:
-    raise CliError(f"'agentseek {command_name}' is not implemented yet in this milestone slice.")
 
 
 def _add_command_parsers(
@@ -668,35 +676,6 @@ def _add_command_parsers(
     build_parser.add_argument("--pull", dest="pull", action="store_true", default=True)
     build_parser.add_argument("--no-pull", dest="pull", action="store_false")
 
-    deploy_parser = subparsers.add_parser("deploy", parents=[runtime_parent])
-    deploy_parser.add_argument("--api-key")
-    deploy_parser.add_argument("--name")
-    deploy_parser.add_argument("--deployment-id")
-    deploy_parser.add_argument("--deployment-type", default="dev")
-    deploy_parser.add_argument("--no-wait", action="store_true")
-    deploy_parser.add_argument("--verbose", action="store_true")
-    deploy_subparsers = deploy_parser.add_subparsers(dest="deploy_command")
-    deploy_subparsers.add_parser("list")
-    revisions_parser = deploy_subparsers.add_parser("revisions")
-    revisions_subparsers = revisions_parser.add_subparsers(dest="revisions_command")
-    revisions_list_parser = revisions_subparsers.add_parser("list")
-    revisions_list_parser.add_argument("deployment_id")
-    revisions_list_parser.add_argument("--limit", default=10, type=int)
-    delete_parser = deploy_subparsers.add_parser("delete")
-    delete_parser.add_argument("deployment_id")
-    delete_parser.add_argument("--force", action="store_true")
-    logs_parser = deploy_subparsers.add_parser("logs")
-    logs_parser.add_argument("-f", "--follow", action="store_true")
-    logs_parser.add_argument("--end-time")
-    logs_parser.add_argument("--start-time")
-    logs_parser.add_argument("-q", "--query")
-    logs_parser.add_argument("--limit", default=100, type=int)
-    logs_parser.add_argument("--level")
-    logs_parser.add_argument("--revision-id")
-    logs_parser.add_argument("--type", default="deploy")
-    logs_parser.add_argument("--deployment-id")
-    logs_parser.add_argument("--name")
-
     up_parser = subparsers.add_parser("up", parents=[runtime_parent])
     up_parser.add_argument("--wait", action="store_true")
     up_parser.add_argument("--base-image")
@@ -721,20 +700,22 @@ def _add_command_parsers(
 def register_subcommands(
     subparsers: argparse._SubParsersAction[argparse.ArgumentParser],
     *,
-    command_name: str = "agentseek",
+    command_name: str = DEFAULT_CLI_NAME,
 ) -> argparse.ArgumentParser:
     runtime_parent = argparse.ArgumentParser(add_help=False)
     runtime_parent.add_argument("-c", "--config")
     runtime_parent.add_argument("--env-file")
 
     command_parser = subparsers.add_parser(command_name)
+    command_parser.set_defaults(cli_name=command_name)
     command_subparsers = command_parser.add_subparsers(dest="command", required=True)
     _add_command_parsers(command_subparsers, runtime_parent=runtime_parent)
     return command_parser
 
 
-def create_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="agentseek")
+def create_parser(*, prog: str = DEFAULT_CLI_NAME) -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog=prog)
+    parser.set_defaults(cli_name=prog)
     runtime_parent = argparse.ArgumentParser(add_help=False)
     runtime_parent.add_argument("-c", "--config")
     runtime_parent.add_argument("--env-file")
@@ -795,7 +776,7 @@ def run_namespace(
                 ),
             )
             return _execute_up_command(args, runner=run, cwd=workdir)
-        return _unimplemented(command)
+        raise CliError(f"Unsupported command '{command}'.")
     except CliError as exc:
         err.write(f"{exc}\n")
         return 2
@@ -804,12 +785,15 @@ def run_namespace(
 def main(
     argv: Sequence[str] | None = None,
     *,
+    prog: str | None = None,
     runner: Callable[..., int] | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     cwd: str | Path | None = None,
 ) -> int:
-    parser = create_parser()
+    if prog is None:
+        prog = _infer_cli_name() if argv is None else DEFAULT_CLI_NAME
+    parser = create_parser(prog=prog)
     args = parser.parse_args(list(argv) if argv is not None else None)
     return run_namespace(args, runner=runner, stdout=stdout, stderr=stderr, cwd=cwd)
 

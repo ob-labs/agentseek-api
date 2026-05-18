@@ -69,7 +69,7 @@ jobs:
         run: uv sync --dev
 
       - name: Installed CLI reports version
-        run: uv run agentseek version
+        run: uv run agentseek-api version
 
       - name: CLI auto-discovers agentseek.json for dockerfile
         run: uv run python scripts/test_cli_config_autodiscovery.py
@@ -77,7 +77,7 @@ jobs:
       - name: Dockerfile command renders a runnable config
         run: >-
           uv run python -c
-          "from pathlib import Path; import subprocess; out = Path('.tmp/agentseek.Dockerfile'); out.parent.mkdir(exist_ok=True); subprocess.run(['uv', 'run', 'agentseek', 'dockerfile', '--config', 'examples/external_graph/manifest.json', str(out)], check=True); text = out.read_text(encoding='utf-8'); assert 'ENV PYTHONPATH=/deps/agent' in text; assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' in text"
+          "from pathlib import Path; import subprocess; out = Path('.tmp/agentseek.Dockerfile'); out.parent.mkdir(exist_ok=True); subprocess.run(['uv', 'run', 'agentseek-api', 'dockerfile', '--config', 'examples/external_graph/manifest.json', str(out)], check=True); text = out.read_text(encoding='utf-8'); assert 'ENV PYTHONPATH=/deps/agent' in text; assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' in text"
 
       - name: CLI serve smoke boots a live API
         if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
@@ -159,7 +159,7 @@ jobs:
       - name: Sync dependencies
         run: uv sync --dev
 
-      - name: Run sample graphs through agentseek dev
+      - name: Run sample graphs through agentseek-api dev
         env:
           MYSQL_HOST: 127.0.0.1
           MYSQL_PORT: "3306"

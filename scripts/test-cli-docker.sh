@@ -40,10 +40,10 @@ EOF
 
 CONFIG_PATH="examples/docker_ci_auth/manifest.json"
 
-uv run agentseek dockerfile --config "$CONFIG_PATH" "$TMP_DIR/agentseek.Dockerfile"
+uv run agentseek-api dockerfile --config "$CONFIG_PATH" "$TMP_DIR/agentseek.Dockerfile"
 test -s "$TMP_DIR/agentseek.Dockerfile"
 
-uv run agentseek build --config "$CONFIG_PATH" -t "$IMAGE_TAG"
+uv run agentseek-api build --config "$CONFIG_PATH" -t "$IMAGE_TAG"
 
 docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
 docker run -d --rm \
@@ -88,7 +88,7 @@ if ! docker exec "$PG_CONTAINER" pg_isready -U postgres -d agentseek >/dev/null 
   exit 1
 fi
 
-if ! uv run agentseek up \
+if ! uv run agentseek-api up \
   --config "$CONFIG_PATH" \
   --image "$IMAGE_TAG" \
   --port 8123 \
@@ -118,7 +118,7 @@ fi
 
 DUPLICATE_STDERR="$TMP_DIR/up-duplicate.stderr"
 set +e
-uv run agentseek up \
+uv run agentseek-api up \
   --config "$CONFIG_PATH" \
   --image "$IMAGE_TAG" \
   --port 8123 \
@@ -129,25 +129,25 @@ set -e
 
 if [[ "$DUPLICATE_EXIT" -eq 0 ]]; then
   print_logs
-  echo "Duplicate agentseek up unexpectedly succeeded without --recreate." >&2
+  echo "Duplicate agentseek-api up unexpectedly succeeded without --recreate." >&2
   exit 1
 fi
 
 if ! grep -q "already exists" "$DUPLICATE_STDERR" || ! grep -q -- "--recreate" "$DUPLICATE_STDERR"; then
   print_logs
   cat "$DUPLICATE_STDERR" >&2 || true
-  echo "Duplicate agentseek up did not emit the expected recreate guidance." >&2
+  echo "Duplicate agentseek-api up did not emit the expected recreate guidance." >&2
   exit 1
 fi
 
 if grep -Eqi "Conflict|already in use by container|Error response from daemon" "$DUPLICATE_STDERR"; then
   print_logs
   cat "$DUPLICATE_STDERR" >&2 || true
-  echo "Duplicate agentseek up leaked raw Docker conflict output." >&2
+  echo "Duplicate agentseek-api up leaked raw Docker conflict output." >&2
   exit 1
 fi
 
-if ! uv run agentseek up \
+if ! uv run agentseek-api up \
   --config "$CONFIG_PATH" \
   --port 8124 \
   --base-image python:3.13-slim-bookworm \
