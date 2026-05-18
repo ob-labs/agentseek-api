@@ -235,8 +235,7 @@ parent api build --config ./langgraph.json -t my-api:dev
   - `AUTH_TYPE=api_key` with `AUTH_API_KEYS=key=user_id[,key2=user2]`
   - `AUTH_TYPE=jwt` with `AUTH_JWT_SECRET`, optional
     `AUTH_JWT_ALGORITHM=HS256`, and `sub` as the user identity
-- Assistant management endpoints remain public; user-scoped thread and run
-  endpoints enforce configured auth.
+- Assistant management, thread, and run endpoints enforce configured auth.
 
 ## 🧭 Examples
 

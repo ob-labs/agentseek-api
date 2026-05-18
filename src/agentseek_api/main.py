@@ -14,8 +14,6 @@ from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
 from agentseek_api.settings import settings
 
-PUBLIC_OPENAPI_PATH_PREFIXES = ("/assistants",)
-
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
@@ -75,25 +73,10 @@ def _apply_auth_openapi(app: FastAPI) -> None:
         security = auth_openapi.get("security")
         if isinstance(security, list):
             schema["security"] = security
-            _mark_public_openapi_paths(schema)
         app.openapi_schema = schema
         return app.openapi_schema
 
     app.openapi = custom_openapi  # type: ignore[method-assign]
-
-
-def _mark_public_openapi_paths(schema: dict[str, object]) -> None:
-    raw_paths = schema.get("paths")
-    if not isinstance(raw_paths, dict):
-        return
-    for path, path_item in raw_paths.items():
-        if not isinstance(path, str) or not path.startswith(PUBLIC_OPENAPI_PATH_PREFIXES):
-            continue
-        if not isinstance(path_item, dict):
-            continue
-        for operation in path_item.values():
-            if isinstance(operation, dict):
-                operation["security"] = []
 
 
 def create_app() -> FastAPI:

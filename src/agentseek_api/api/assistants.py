@@ -1,13 +1,14 @@
 from sqlalchemy import select
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
+from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant
 from agentseek_api.models.api import AssistantCreate, AssistantPatch, AssistantRead, AssistantSearchRequest
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
-router = APIRouter(prefix="/assistants", tags=["Assistants"])
+router = APIRouter(prefix="/assistants", tags=["Assistants"], dependencies=[Depends(get_current_user)])
 
 
 def _to_read_model(row: Assistant) -> AssistantRead:

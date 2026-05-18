@@ -43,12 +43,22 @@ def auth_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     auth_middleware._backend = None
 
 
-def test_api_key_auth_protects_user_scoped_routes_and_leaves_assistants_public(auth_client: TestClient) -> None:
-    assistant = auth_client.post("/assistants", json={"name": "public-assistant", "graph_id": "default"})
+def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: TestClient) -> None:
+    missing_assistant = auth_client.post("/assistants", json={"name": "protected-assistant", "graph_id": "default"})
+    assert missing_assistant.status_code == 401
+
+    assistant = auth_client.post(
+        "/assistants",
+        json={"name": "protected-assistant", "graph_id": "default"},
+        headers={"X-API-Key": "secret"},
+    )
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
 
-    assistant_list = auth_client.get("/assistants")
+    missing_assistant_list = auth_client.get("/assistants")
+    assert missing_assistant_list.status_code == 401
+
+    assistant_list = auth_client.get("/assistants", headers={"X-API-Key": "secret"})
     assert assistant_list.status_code == 200
     assert any(item["assistant_id"] == assistant_id for item in assistant_list.json())
 
