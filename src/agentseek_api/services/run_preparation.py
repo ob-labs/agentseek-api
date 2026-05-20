@@ -85,6 +85,7 @@ async def _execute_and_persist(
     *,
     run_id: str,
     thread_id: str,
+    user_id: str,
     payload: dict[str, Any],
     graph_id: str,
     resume: Any | None = None,
@@ -125,6 +126,7 @@ async def _execute_and_persist(
                     thread_id=thread_id,
                     run_id=run_id,
                     payload=payload,
+                    user_id=user_id,
                     graph_id=graph_id,
                     resume=resume if is_resume else UNSET,
                 )
@@ -216,6 +218,7 @@ async def prepare_and_submit_run(
             lambda: _execute_and_persist(
                 run_id=run.run_id,
                 thread_id=run.thread_id,
+                user_id=run.user_id,
                 payload=run.input_json,
                 graph_id=graph_id,
             )
@@ -269,6 +272,7 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
             lambda: _execute_and_persist(
                 run_id=run_id,
                 thread_id=thread_id,
+                user_id=run.user_id,
                 payload=payload,
                 graph_id=graph_id,
                 resume=resume,

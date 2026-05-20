@@ -160,9 +160,9 @@ Useful config fields:
 
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP
-Store API for TTL and custom embedding-function setup; graph-injected
-`BaseStore` runtime support remains future work because
-`langchain-oceanbase==0.4.0` does not expose a store adapter yet.
+Store API and the injected LangGraph `BaseStore` runtime for TTL and semantic
+search. This repo uses the published `langchain-oceanbase==0.5.0` package from
+PyPI.
 
 Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
 
@@ -285,10 +285,6 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 ## 🗺️ Future Work
 
 1. [ ] Add Redis-backed task queue and worker handoff for durable run execution
-2. [ ] Add graph-injected `BaseStore` runtime support once `langchain-oceanbase`
-   exposes a durable store adapter; the current HTTP Store API persists through
-   AgentSeek metadata tables
-3. [ ] Add provider-managed semantic embedding strings for Store API indexing
-4. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
-5. [ ] Add crons and scheduler support
-6. [ ] Add MCP and A2A endpoint parity
+2. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
+3. [ ] Add crons and scheduler support
+4. [ ] Add MCP and A2A endpoint parity

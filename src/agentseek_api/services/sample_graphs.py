@@ -9,8 +9,8 @@ Each entry is keyed by ``graph_id`` and exposes three pieces:
 * ``extract_output`` — turns the final graph result into a JSON-serialisable
   dict that is stored as the run output and the OceanBase/SeekDB checkpoint.
 
-Adding a new sample: drop a ``build_graph(checkpointer=None)`` function under
-``examples/graphs/<name>/graph.py`` and append an entry to
+Adding a new sample: drop a ``build_graph(checkpointer=None, store=None)``
+function under ``examples/graphs/<name>/graph.py`` and append an entry to
 ``build_sample_registry``.
 """
 
@@ -89,6 +89,23 @@ def _prepare_subgraph_hitl_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return {"foo": str(message)}
 
 
+def _prepare_store_memory_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    memory_key = payload.get("memory_key")
+    if not isinstance(memory_key, str) or not memory_key:
+        memory_key = "memory"
+    memory_value = payload.get("memory_value", payload.get("value"))
+    if memory_value is None:
+        memory_value = payload.get("message") or payload.get("content") or payload
+    return {"memory_key": memory_key, "memory_value": memory_value}
+
+
+def _extract_store_memory_output(result: Any, _payload: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(result, dict):
+        return {"result": result}
+    output = result.get("output")
+    return output if isinstance(output, dict) else {"result": result}
+
+
 def build_sample_registry() -> dict[str, dict[str, Any]]:
     """Return ``graph_id -> {graph, prepare_input, extract_output}`` mappings.
 
@@ -97,6 +114,17 @@ def build_sample_registry() -> dict[str, dict[str, Any]]:
     """
 
     registry: dict[str, dict[str, Any]] = {}
+
+    try:
+        from graphs.store_memory.graph import build_graph as store_memory_graph_factory  # type: ignore[import-not-found]
+
+        registry["store_memory"] = {
+            "graph_factory": store_memory_graph_factory,
+            "prepare_input": _prepare_store_memory_payload,
+            "extract_output": _extract_store_memory_output,
+        }
+    except Exception as exc:  # noqa: BLE001
+        print(f"[sample_graphs] skipped store_memory: {exc}", flush=True)
 
     try:
         from graphs.stress_test.graph import build_graph as stress_test_graph_factory  # type: ignore[import-not-found]

@@ -234,11 +234,13 @@ from langgraph.graph import END, START, StateGraph
 def make_graph(config):
     configurable = config.get(CONF, {})
     checkpointer = configurable.get(CONFIG_KEY_CHECKPOINTER)
+    store = configurable.get("store") or config.get("store")
     builder = StateGraph(dict)
     builder.add_node(
         "node",
         lambda state: {
             "used_checkpointer": checkpointer is not None,
+            "used_store": store is not None,
             "configurable_present": bool(configurable),
         },
     )
@@ -256,9 +258,10 @@ def make_graph(config):
     )
 
     service = LangGraphService(manifest_path=manifest_path)
-    result = service.get_entry("config_factory").build_graph(InMemorySaver()).invoke(
+    result = service.get_entry("config_factory").build_graph(InMemorySaver(), object()).invoke(
         {},
         config={"configurable": {"thread_id": "t1", "checkpoint_ns": "r1"}},
     )
     assert result["used_checkpointer"] is True
+    assert result["used_store"] is True
     assert result["configurable_present"] is True

@@ -32,6 +32,13 @@ def _langgraph_py_version() -> str:
         return "unknown"
 
 
+def _langchain_oceanbase_version() -> str:
+    try:
+        return package_version("langchain-oceanbase")
+    except PackageNotFoundError:
+        return "unknown"
+
+
 def _feature_flags() -> dict[str, bool]:
     return {
         "assistants": True,
@@ -50,7 +57,7 @@ def _server_metadata() -> dict[str, str]:
         "app_name": settings.APP_NAME,
         "auth_type": settings.AUTH_TYPE,
         "checkpoint_backend": "langchain-oceanbase",
-        "checkpoint_backend_version": "0.4.0",
+        "checkpoint_backend_version": _langchain_oceanbase_version(),
     }
 
 

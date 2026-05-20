@@ -1,53 +1,29 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import Any
 
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
-from sqlalchemy.exc import IntegrityError
 
 from agentseek_api.api import store as store_module
-from agentseek_api.core.orm import StoreItem
+from agentseek_api.core.database import db_manager
 from agentseek_api.models.api import StoreDeleteRequest, StoreListNamespacesRequest, StorePutRequest, StoreSearchRequest
 from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
 
 
-class _FakeStoreSession:
-    def __init__(self, existing_row: StoreItem) -> None:
-        self.existing_row = existing_row
-        self.scalar_calls = 0
-        self.commits = 0
-        self.rollbacks = 0
-
-    async def scalar(self, _query: Any) -> StoreItem | None:
-        self.scalar_calls += 1
-        return None if self.scalar_calls == 1 else self.existing_row
-
-    def add(self, _row: StoreItem) -> None:
-        return None
-
-    async def commit(self) -> None:
-        self.commits += 1
-        if self.commits == 1:
-            raise IntegrityError("insert", {}, Exception("duplicate"))
-
-    async def rollback(self) -> None:
-        self.rollbacks += 1
-
-    async def refresh(self, _row: StoreItem) -> None:
-        return None
+def _reinitialize_runtime_store() -> None:
+    asyncio.run(db_manager.close())
+    asyncio.run(db_manager.initialize())
 
 
-class _FakeStoreSessionContext:
-    def __init__(self, session: _FakeStoreSession) -> None:
-        self.session = session
+async def _areinitialize_runtime_store() -> None:
+    await db_manager.close()
+    await db_manager.initialize()
 
-    async def __aenter__(self) -> _FakeStoreSession:
-        return self.session
 
-    async def __aexit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
-        return None
+def _set_store_time(monkeypatch: pytest.MonkeyPatch, when: datetime) -> None:
+    monkeypatch.setattr(db_manager.get_store(), "_now", lambda: when)
 
 
 def test_store_put_get_update_delete_and_user_isolation(client: TestClient) -> None:
@@ -148,11 +124,10 @@ def test_store_search_namespaces_and_info_flag(client: TestClient) -> None:
 
 def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
     client: TestClient,
-    monkeypatch,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    from agentseek_api.api import store as store_module
-
+    _ = client
     config_path = tmp_path / "agentseek.json"
     config_path.write_text(
         """
@@ -174,8 +149,10 @@ def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    _reinitialize_runtime_store()
+
     now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
-    monkeypatch.setattr(store_module, "_utc_now", lambda: now)
+    _set_store_time(monkeypatch, now)
 
     put = client.put(
         "/store/items",
@@ -185,7 +162,7 @@ def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
     assert put.status_code == 200
 
     later = now + timedelta(minutes=5)
-    monkeypatch.setattr(store_module, "_utc_now", lambda: later)
+    _set_store_time(monkeypatch, later)
     read = client.get(
         "/store/items",
         params=[("namespace", "memories"), ("key", "ttl")],
@@ -194,7 +171,7 @@ def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
     assert read.status_code == 200
 
     refreshed = later + timedelta(minutes=9)
-    monkeypatch.setattr(store_module, "_utc_now", lambda: refreshed)
+    _set_store_time(monkeypatch, refreshed)
     still_present = client.post(
         "/store/items/search",
         json={"namespace_prefix": ["memories"], "limit": 10, "offset": 0},
@@ -203,7 +180,7 @@ def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
     assert [item["key"] for item in still_present.json()["items"]] == ["ttl"]
 
     expired = refreshed + timedelta(minutes=11)
-    monkeypatch.setattr(store_module, "_utc_now", lambda: expired)
+    _set_store_time(monkeypatch, expired)
     missing = client.get(
         "/store/items",
         params=[("namespace", "memories"), ("key", "ttl")],
@@ -212,7 +189,12 @@ def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
     assert missing.status_code == 404
 
 
-def test_store_semantic_search_uses_custom_embedding_function(client: TestClient, monkeypatch, tmp_path) -> None:
+def test_store_semantic_search_uses_custom_embedding_function(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    _ = client
     helper_file = tmp_path / "embedding_helpers.py"
     helper_file.write_text(
         """
@@ -256,6 +238,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
         encoding="utf-8",
     )
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    _reinitialize_runtime_store()
 
     for key, value in {
         "db": {"text": "OceanBase checkpoint database memory", "summary": "persistent database"},
@@ -278,39 +261,6 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     assert [item["key"] for item in search.json()["items"]] == ["db", "ui"]
 
 
-def test_store_provider_embedding_config_fails_deterministically(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    config_path = tmp_path / "agentseek.json"
-    config_path.write_text(
-        """
-{
-  "dependencies": ["."],
-  "graphs": {"memory_agent": "./agent/graph.py:graph"},
-  "store": {
-    "index": {
-      "embed": "openai:text-embedding-3-small",
-      "dims": 1536
-    }
-  }
-}
-""".strip(),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
-
-    response = client.put(
-        "/store/items",
-        json={"namespace": ["memories"], "key": "provider", "value": {"text": "needs embedding"}},
-        headers={"x-user-id": "u1"},
-    )
-
-    assert response.status_code == 422
-    assert "provider strings are not supported" in response.json()["detail"]
-
-
 def test_store_namespace_max_depth_truncates_results(client: TestClient) -> None:
     response = client.put(
         "/store/items",
@@ -330,10 +280,35 @@ def test_store_namespace_max_depth_truncates_results(client: TestClient) -> None
 
 
 @pytest.mark.asyncio
-async def test_store_route_functions_cover_database_mutations(client: TestClient) -> None:
+async def test_store_route_functions_use_runtime_store_backend(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
     _ = client
+    config_path = tmp_path / "agentseek.json"
+    config_path.write_text(
+        """
+{
+  "dependencies": ["."],
+  "graphs": {"memory_agent": "./agent/graph.py:graph"},
+  "store": {
+    "ttl": {
+      "refresh_on_read": false,
+      "default_ttl": 1
+    }
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    await _areinitialize_runtime_store()
+
     user = User(identity="direct-user", is_authenticated=True)
     namespace = ["direct", "store"]
+    now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
+    _set_store_time(monkeypatch, now)
 
     created = await store_module.put_item(
         StorePutRequest(namespace=namespace, key="profile", value={"kind": "profile", "level": 1}),
@@ -382,90 +357,17 @@ async def test_store_route_functions_cover_database_mutations(client: TestClient
         await store_module.get_item(namespace=namespace, key="profile", user=user)
     assert exc_info.value.status_code == 404
 
+    _set_store_time(monkeypatch, now + timedelta(minutes=2))
+    with pytest.raises(HTTPException) as expired:
+        await store_module.get_item(namespace=deep_namespace, key="nested", user=user)
+    assert expired.value.status_code == 404
 
-@pytest.mark.asyncio
-async def test_store_put_retries_as_update_after_unique_constraint_race(monkeypatch: pytest.MonkeyPatch) -> None:
-    now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
-    namespace = ["race"]
-    namespace_path = store_module._namespace_path(namespace)
-    existing_row = StoreItem(
-        identity_hash=store_module._identity_hash(user_id="race-user", namespace_path=namespace_path, key="profile"),
-        user_id="race-user",
-        namespace_path=namespace_path,
-        namespace_json=namespace,
-        key="profile",
-        value_json={"old": True},
-        created_at=now,
-        updated_at=now,
-    )
-    session = _FakeStoreSession(existing_row)
-    monkeypatch.setattr(store_module.db_manager, "get_session_factory", lambda: lambda: _FakeStoreSessionContext(session))
-    monkeypatch.setattr(store_module, "_utc_now", lambda: now + timedelta(seconds=1))
 
-    response = await store_module.put_item(
-        StorePutRequest(namespace=namespace, key="profile", value={"new": True}),
-        user=User(identity="race-user", is_authenticated=True),
+def test_store_invalid_namespace_returns_422(client: TestClient) -> None:
+    response = client.put(
+        "/store/items",
+        json={"namespace": ["valid", ""], "key": "profile", "value": {"kind": "profile"}},
+        headers={"x-user-id": "u1"},
     )
 
-    assert response.value == {"new": True}
-    assert existing_row.value_json == {"new": True}
-    assert session.rollbacks == 1
-    assert session.commits == 2
-
-
-@pytest.mark.asyncio
-async def test_store_route_functions_cover_expiry_and_config_edges(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path,
-) -> None:
-    _ = client
-    user = User(identity="expiry-user", is_authenticated=True)
-    config_path = tmp_path / "agentseek.json"
-    config_path.write_text(
-        """
-{
-  "dependencies": [".", 123, "./missing"],
-  "graphs": {"memory_agent": "./agent/graph.py:graph"},
-  "store": {
-    "ttl": {
-      "refresh_on_read": false,
-      "sweep_interval_minutes": 1,
-      "default_ttl": 1
-    }
-  }
-}
-""".strip(),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
-    monkeypatch.setattr(store_module, "_last_sweep_at", None)
-    now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
-    monkeypatch.setattr(store_module, "_utc_now", lambda: now)
-
-    created = await store_module.put_item(
-        StorePutRequest(namespace=["expiry"], key="note", value={"text": "short lived"}),
-        user=user,
-    )
-    assert created.key == "note"
-
-    monkeypatch.setattr(store_module, "_utc_now", lambda: now + timedelta(minutes=2))
-    with pytest.raises(HTTPException) as exc_info:
-        await store_module.get_item(namespace=["expiry"], key="note", user=user)
-    assert exc_info.value.status_code == 404
-
-    with pytest.raises(HTTPException) as invalid_namespace:
-        store_module._namespace_path(["valid", ""])
-    assert invalid_namespace.value.status_code == 422
-
-    assert store_module._load_embedding_function("missing.module:embed", config_path=config_path) is None
-    assert store_module._load_embedding_function("not-a-reference", config_path=config_path) is None
-    assert store_module._load_embedding_function(":missing", config_path=config_path) is None
-    assert store_module._extract_field_text(
-        {
-            "metadata": {"title": "Nested"},
-            "chapters": [{"content": "first"}, {"content": "second"}],
-            "authors": [{"name": "Ada"}],
-        },
-        ["metadata.title", "chapters[*].content", "authors[0].name"],
-    ) == "Nested\nfirst\nsecond\nAda"
+    assert response.status_code == 422

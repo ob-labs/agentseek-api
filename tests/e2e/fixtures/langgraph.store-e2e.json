@@ -1,0 +1,11 @@
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "dependencies": ["."],
+  "graphs": {},
+  "store": {
+    "ttl": {
+      "refresh_on_read": false,
+      "default_ttl": 0.05
+    }
+  }
+}

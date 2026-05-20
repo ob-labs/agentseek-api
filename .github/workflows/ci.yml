@@ -79,6 +79,10 @@ jobs:
           uv run python -c
           "from pathlib import Path; import subprocess; out = Path('.tmp/agentseek.Dockerfile'); out.parent.mkdir(exist_ok=True); subprocess.run(['uv', 'run', 'agentseek-api', 'dockerfile', '--config', 'examples/external_graph/manifest.json', str(out)], check=True); text = out.read_text(encoding='utf-8'); assert 'ENV PYTHONPATH=/deps/agent' in text; assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' in text"
 
+      - name: Install embedded SeekDB extra for serve smoke
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
+        run: uv pip install "langchain-oceanbase[pyseekdb]==0.5.0"
+
       - name: CLI serve smoke boots a live API
         if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
         run: uv run python scripts/test_cli_serve_smoke.py

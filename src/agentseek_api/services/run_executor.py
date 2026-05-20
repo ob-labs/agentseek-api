@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+import inspect
 from typing import Any
 
 from langchain_core.messages import BaseMessage
@@ -6,6 +7,7 @@ from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 from langgraph.types import Command
 
 from agentseek_api.core.database import db_manager
+from agentseek_api.core.runtime_store import UserScopedStore
 from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import persist_run_stream_event
@@ -105,6 +107,17 @@ def _protocol_role_for_message(message: BaseMessage) -> str | None:
         if message_type.startswith("SystemMessage"):
             return "system"
     return None
+
+
+def _build_entry_graph(entry: Any, *, checkpointer: Any, store: Any) -> Any:
+    build_graph = entry.build_graph
+    signature = inspect.signature(build_graph)
+    parameters = list(signature.parameters.values())
+    has_var_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+    has_store = any(parameter.name == "store" for parameter in parameters)
+    if has_var_kwargs or has_store:
+        return build_graph(checkpointer, store=store)
+    return build_graph(checkpointer)
 
 
 class _ProtocolMessageStreamState:
@@ -684,18 +697,25 @@ async def execute_run(
     thread_id: str,
     run_id: str,
     payload: dict[str, Any],
+    user_id: str,
     graph_id: str | None = None,
     resume: Any = UNSET,
 ) -> RunExecutionResult:
     ensure_sync_checkpoint_mode(requested_async=False)
     entry = get_langgraph_service().get_entry(graph_id)
-    graph = entry.build_graph(db_manager.get_langgraph_checkpointer())
+    runtime_store = UserScopedStore(db_manager.get_store(), user_id=user_id)
+    graph = _build_entry_graph(
+        entry,
+        checkpointer=db_manager.get_langgraph_checkpointer(),
+        store=runtime_store,
+    )
 
     config = {
         CONF: {
             "thread_id": thread_id,
             "checkpoint_ns": run_id,
             CONFIG_KEY_CHECKPOINTER: db_manager.get_langgraph_checkpointer(),
+            "store": runtime_store,
         }
     }
     if resume is UNSET:

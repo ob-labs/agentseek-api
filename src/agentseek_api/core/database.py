@@ -4,11 +4,14 @@ from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_oceanbase.checkpointer import OceanBaseCheckpointSaver as LangGraphOceanBaseCheckpointSaver
+from langchain_oceanbase.store import OceanBaseStore
 from sqlalchemy.engine import URL, make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 
 from agentseek_api.core.oceanbase_checkpointer import OceanBaseCheckpointSaver
 from agentseek_api.core.orm import Base
+from agentseek_api.core.runtime_store import SqliteStore
+from agentseek_api.core.store_config import load_store_config
 from agentseek_api.settings import settings
 
 DEFAULT_SEEKDB_URL = "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
@@ -85,10 +88,11 @@ class DatabaseManager:
         self.session_factory: async_sessionmaker[AsyncSession] | None = None
         self._checkpointer: OceanBaseCheckpointSaver | None = None
         self._langgraph_checkpointer: Any | None = None
-        self._store: NullStore | None = None
+        self._store: Any | None = None
         self._setup_lock: asyncio.Lock = asyncio.Lock()
         self._checkpointer_setup_done: bool = False
         self._langgraph_checkpointer_setup_done: bool = False
+        self._store_setup_done: bool = False
 
     async def initialize(self) -> None:
         if self.engine is not None:
@@ -99,6 +103,9 @@ class DatabaseManager:
             configured_backend=settings.METADATA_DB_BACKEND,
             url_drivername=parsed_url.drivername,
         )
+        store_config = load_store_config(agentseek_graphs=settings.AGENTSEEK_GRAPHS)
+        runtime_index = store_config.index.to_runtime_config()
+        runtime_ttl = store_config.ttl.to_runtime_config()
         self.engine = create_async_engine(metadata_db_url, pool_pre_ping=True)
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as conn:
@@ -114,6 +121,11 @@ class DatabaseManager:
         )
         if metadata_backend == "sqlite":
             self._langgraph_checkpointer = InMemorySaver()
+            self._store = SqliteStore(
+                url=metadata_db_url,
+                index=runtime_index,
+                ttl_config=runtime_ttl,
+            )
         else:
             self._langgraph_checkpointer = LangGraphOceanBaseCheckpointSaver(
                 connection_args={
@@ -124,9 +136,20 @@ class DatabaseManager:
                     "db_name": settings.OCEANBASE_DB_NAME,
                 }
             )
+            self._store = OceanBaseStore(
+                connection_args={
+                    "host": settings.OCEANBASE_HOST,
+                    "port": settings.OCEANBASE_PORT,
+                    "user": settings.OCEANBASE_USER,
+                    "password": settings.OCEANBASE_PASSWORD,
+                    "db_name": settings.OCEANBASE_DB_NAME,
+                },
+                index=runtime_index,
+                ttl_config=runtime_ttl,
+            )
         await self._setup_checkpointer_once()
         await self._setup_langgraph_checkpointer_once()
-        self._store = NullStore()
+        await self._setup_store_once()
 
     async def _setup_checkpointer_once(self) -> None:
         if self._checkpointer_setup_done:
@@ -152,9 +175,26 @@ class DatabaseManager:
                 await asyncio.to_thread(setup)
             self._langgraph_checkpointer_setup_done = True
 
+    async def _setup_store_once(self) -> None:
+        if self._store_setup_done:
+            return
+        async with self._setup_lock:
+            if self._store_setup_done:
+                return
+            if self._store is None:
+                raise RuntimeError("Store not initialized")
+            setup = getattr(self._store, "setup", None)
+            if callable(setup):
+                await asyncio.to_thread(setup)
+            self._store_setup_done = True
+
     async def close(self) -> None:
         if self.engine is not None:
             await self.engine.dispose()
+        store_engine = getattr(getattr(self._store, "obvector", None), "engine", None)
+        dispose_store_engine = getattr(store_engine, "dispose", None)
+        if callable(dispose_store_engine):
+            await asyncio.to_thread(dispose_store_engine)
         self.engine = None
         self.session_factory = None
         self._checkpointer = None
@@ -162,6 +202,7 @@ class DatabaseManager:
         self._store = None
         self._checkpointer_setup_done = False
         self._langgraph_checkpointer_setup_done = False
+        self._store_setup_done = False
 
     def get_engine(self) -> AsyncEngine:
         if self.engine is None:
@@ -183,7 +224,7 @@ class DatabaseManager:
             raise RuntimeError("Database not initialized")
         return self._langgraph_checkpointer
 
-    def get_store(self) -> NullStore:
+    def get_store(self) -> Any:
         if self._store is None:
             raise RuntimeError("Database not initialized")
         return self._store

@@ -69,6 +69,10 @@ def e2e_base_url() -> Generator[str, None, None]:
 
     env = os.environ.copy()
     env.setdefault("SEEKDB_URL", _seekdb_url())
+    env.setdefault(
+        "AGENTSEEK_GRAPHS",
+        str((Path(__file__).resolve().parent / "fixtures" / "langgraph.store-e2e.json").resolve()),
+    )
     env.setdefault("AUTH_TYPE", "custom")
     env.setdefault("AUTH_MODULE_PATH", "examples/auth/custom_backend.py:backend")
 

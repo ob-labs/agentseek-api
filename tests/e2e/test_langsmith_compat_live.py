@@ -1,15 +1,14 @@
+import asyncio
 import json
 import os
 from uuid import uuid4
 
 import httpx
 import pytest
-from sqlalchemy import select
-from sqlalchemy.engine import URL, make_url
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from langchain_oceanbase.store import OceanBaseStore
+from sqlalchemy.engine import URL
 
-from agentseek_api.core.database import _ensure_async_driver, _resolve_metadata_backend
-from agentseek_api.core.orm import StoreItem
+from agentseek_api.core.runtime_store import make_user_store_namespace
 
 
 def _user_headers(user_id: str) -> dict[str, str]:
@@ -25,39 +24,31 @@ def _seekdb_url() -> str:
         port=int(os.getenv("OCEANBASE_PORT", "2881")),
         database=os.getenv("OCEANBASE_DB_NAME", "seekdb"),
     ).render_as_string(hide_password=False)
-
-
-def _metadata_db_url() -> str:
-    raw_url = os.getenv("METADATA_DB_URL") or os.getenv("SEEKDB_URL") or _seekdb_url()
-    parsed_url = make_url(raw_url)
-    backend = _resolve_metadata_backend(
-        configured_backend=os.getenv("METADATA_DB_BACKEND", "auto"),
-        url_drivername=parsed_url.drivername,
+async def _fetch_store_item_from_backend(
+    *,
+    user_id: str,
+    namespace: list[str],
+    key: str,
+) -> dict[str, object] | None:
+    store = OceanBaseStore(
+        connection_args={
+            "host": os.getenv("OCEANBASE_HOST", "127.0.0.1"),
+            "port": os.getenv("OCEANBASE_PORT", "2881"),
+            "user": os.getenv("OCEANBASE_USER", "root@test"),
+            "password": os.getenv("OCEANBASE_PASSWORD", ""),
+            "db_name": os.getenv("OCEANBASE_DB_NAME", "seekdb"),
+        }
     )
-    return _ensure_async_driver(url=parsed_url, backend=backend).render_as_string(hide_password=False)
-
-
-async def _fetch_store_item_from_backend(*, user_id: str, key: str) -> dict[str, object] | None:
-    engine = create_async_engine(_metadata_db_url(), pool_pre_ping=True)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
     try:
-        async with session_factory() as session:
-            row = await session.scalar(
-                select(StoreItem)
-                .where(
-                    StoreItem.user_id == user_id,
-                    StoreItem.key == key,
-                )
-                .order_by(StoreItem.created_at.desc())
-            )
-            if row is None:
-                return None
-            return {
-                "namespace": list(row.namespace_json),
-                "value": dict(row.value_json),
-            }
+        item = await store.aget(make_user_store_namespace(user_id=user_id, namespace=tuple(namespace)), key)
+        if item is None:
+            return None
+        return {
+            "namespace": list(item.namespace[2:]),
+            "value": dict(item.value),
+        }
     finally:
-        await engine.dispose()
+        store.obvector.engine.dispose()
 
 
 async def _create_assistant(
@@ -149,7 +140,7 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         assert info_body["flags"]["assistants"] is True
         assert info_body["flags"]["protocol_v2"] is True
         assert info_body["metadata"]["checkpoint_backend"] == "langchain-oceanbase"
-        assert info_body["metadata"]["checkpoint_backend_version"] == "0.4.0"
+        assert info_body["metadata"]["checkpoint_backend_version"] == "0.5.0"
 
         metrics = await client.get("/metrics")
         assert metrics.status_code == 200
@@ -289,12 +280,12 @@ async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) 
         assert updated_body["created_at"] == created_body["created_at"]
         assert updated_body["value"] == {"kind": "profile", "name": "Ada", "level": 2}
 
-        backend_row = await _fetch_store_item_from_backend(user_id=user_id, key="profile")
+        backend_row = await _fetch_store_item_from_backend(user_id=user_id, namespace=namespace, key="profile")
         assert backend_row == {
             "namespace": namespace,
             "value": {"kind": "profile", "name": "Ada", "level": 2},
         }
-        assert await _fetch_store_item_from_backend(user_id=other_user_id, key="profile") is None
+        assert await _fetch_store_item_from_backend(user_id=other_user_id, namespace=namespace, key="profile") is None
 
         fetched = await client.get(
             "/store/items",
@@ -356,7 +347,96 @@ async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) 
             headers=_user_headers(user_id),
         )
         assert missing.status_code == 404
-        assert await _fetch_store_item_from_backend(user_id=user_id, key="profile") is None
+        assert await _fetch_store_item_from_backend(user_id=user_id, namespace=namespace, key="profile") is None
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_live_store_ttl_from_manifest_expires_items_on_mysql_family_backend(e2e_base_url: str) -> None:
+    user_id = f"store-ttl-user-{uuid4()}"
+    namespace = ["e2e", "ttl", uuid4().hex]
+
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=30.0, trust_env=False) as client:
+        created = await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace,
+                "key": "ephemeral",
+                "value": {"kind": "note", "name": "expires-from-config"},
+            },
+            headers=_user_headers(user_id),
+        )
+        assert created.status_code == 200
+
+        immediate = await client.get(
+            "/store/items",
+            params=[("key", "ephemeral"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert immediate.status_code == 200
+
+        await asyncio.sleep(4.0)
+
+        expired = await client.get(
+            "/store/items",
+            params=[("key", "ephemeral"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert expired.status_code == 404
+
+        searched = await client.post(
+            "/store/items/search",
+            json={"namespace_prefix": namespace[:2], "limit": 10, "offset": 0},
+            headers=_user_headers(user_id),
+        )
+        assert searched.status_code == 200
+        assert searched.json() == {"items": []}
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_live_store_graph_uses_injected_mysql_family_backend(e2e_base_url: str) -> None:
+    user_id = f"graph-store-user-{uuid4()}"
+    other_user_id = f"graph-store-other-{uuid4()}"
+    namespace = ["graph", "memory"]
+    key = f"memory-{uuid4().hex}"
+    value = {"text": "Ada from graph", "kind": "profile"}
+
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=60.0, trust_env=False) as client:
+        assistant = await _create_assistant(client, name="live-store-memory", graph_id="store_memory")
+        thread = await _create_thread(
+            client,
+            user_id=user_id,
+            metadata={"suite": "live-store-graph"},
+        )
+        run = await _create_thread_run(
+            client,
+            thread_id=str(thread["thread_id"]),
+            assistant_id=str(assistant["assistant_id"]),
+            payload={"memory_key": key, "memory_value": value},
+            user_id=user_id,
+        )
+
+        waited = await _wait_for_run(
+            client,
+            thread_id=str(thread["thread_id"]),
+            run_id=str(run["run_id"]),
+            user_id=user_id,
+        )
+
+        assert waited["status"] == "success"
+        assert waited["output"] == {
+            "namespace": namespace,
+            "key": key,
+            "value": value,
+        }
+
+        backend_row = await _fetch_store_item_from_backend(user_id=user_id, namespace=namespace, key=key)
+        assert backend_row == {
+            "namespace": namespace,
+            "value": value,
+        }
+        assert await _fetch_store_item_from_backend(user_id=other_user_id, namespace=namespace, key=key) is None
 
 
 @pytest.mark.e2e
