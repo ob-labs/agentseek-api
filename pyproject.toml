@@ -19,7 +19,7 @@ dependencies = [
     "langchain-core>=1.0.0",
     "langchain-openai>=1.0.0",
     "langchain-anthropic>=1.0.0",
-    "langchain-oceanbase @ git+https://github.com/oceanbase/langchain-oceanbase.git@release/0.5.0",
+    "langchain-oceanbase==0.5.0",
     "cryptography>=45.0.0",
     "pymysql>=1.1.0",
     "langchain>=0.3.9",
@@ -40,9 +40,6 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
-
-[tool.hatch.metadata]
-allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentseek_api"]
