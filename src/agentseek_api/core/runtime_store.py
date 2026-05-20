@@ -115,6 +115,21 @@ class UserScopedStore:
             return MatchCondition(match_type="prefix", path=self._scope_namespace(condition.path))
         return condition
 
+    def _scope_namespace_conditions(
+        self,
+        conditions: tuple[MatchCondition, ...] | None,
+    ) -> tuple[MatchCondition, ...]:
+        scoped_conditions: list[MatchCondition] = []
+        saw_prefix = False
+        for condition in conditions or ():
+            scoped_condition = self._scope_match_condition(condition)
+            if scoped_condition.match_type == "prefix":
+                saw_prefix = True
+            scoped_conditions.append(scoped_condition)
+        if not saw_prefix:
+            scoped_conditions.insert(0, MatchCondition(match_type="prefix", path=self._user_prefix))
+        return tuple(scoped_conditions)
+
     def _scope_op(self, op: Any) -> Any:
         if isinstance(op, PutOp):
             return PutOp(
@@ -140,12 +155,9 @@ class UserScopedStore:
                 refresh_ttl=op.refresh_ttl,
             )
         if isinstance(op, ListNamespacesOp):
-            conditions = None
-            if op.match_conditions is not None:
-                conditions = tuple(self._scope_match_condition(condition) for condition in op.match_conditions)
             max_depth = None if op.max_depth is None else len(self._user_prefix) + op.max_depth
             return ListNamespacesOp(
-                match_conditions=conditions,
+                match_conditions=self._scope_namespace_conditions(op.match_conditions),
                 max_depth=max_depth,
                 limit=op.limit,
                 offset=op.offset,

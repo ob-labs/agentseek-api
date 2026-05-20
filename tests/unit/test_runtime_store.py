@@ -232,6 +232,29 @@ def test_user_scoped_store_batch_scopes_ops_and_strips_results() -> None:
     assert results[3] == [("graph", "memory")]
 
 
+def test_user_scoped_store_batch_injects_user_prefix_for_suffix_only_namespace_queries() -> None:
+    backend = FakeBackendStore()
+    backend.put(("__agentseek_users__", "u1", "graph", "store"), "k1", {"kind": "graph"}, ttl=None)
+    backend.put(("__agentseek_users__", "u2", "graph", "store"), "k2", {"kind": "graph"}, ttl=None)
+    store = UserScopedStore(backend, user_id="u1")
+
+    results = store.batch(
+        [
+            ListNamespacesOp(
+                match_conditions=(MatchCondition(match_type="suffix", path=("store",)),),
+                max_depth=2,
+            )
+        ]
+    )
+
+    assert isinstance(backend.last_batch_ops, list)
+    assert backend.last_batch_ops[0].match_conditions == (
+        MatchCondition(match_type="prefix", path=("__agentseek_users__", "u1")),
+        MatchCondition(match_type="suffix", path=("store",)),
+    )
+    assert results == [[("graph", "store")]]
+
+
 @pytest.mark.asyncio
 async def test_user_scoped_store_abatch_scopes_ops_and_strips_results() -> None:
     backend = FakeBackendStore()

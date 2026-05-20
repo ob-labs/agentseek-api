@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 from uuid import uuid4
@@ -347,6 +348,49 @@ async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) 
         )
         assert missing.status_code == 404
         assert await _fetch_store_item_from_backend(user_id=user_id, namespace=namespace, key="profile") is None
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_live_store_ttl_from_manifest_expires_items_on_mysql_family_backend(e2e_base_url: str) -> None:
+    user_id = f"store-ttl-user-{uuid4()}"
+    namespace = ["e2e", "ttl", uuid4().hex]
+
+    async with httpx.AsyncClient(base_url=e2e_base_url, timeout=30.0, trust_env=False) as client:
+        created = await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace,
+                "key": "ephemeral",
+                "value": {"kind": "note", "name": "expires-from-config"},
+            },
+            headers=_user_headers(user_id),
+        )
+        assert created.status_code == 200
+
+        immediate = await client.get(
+            "/store/items",
+            params=[("key", "ephemeral"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert immediate.status_code == 200
+
+        await asyncio.sleep(4.0)
+
+        expired = await client.get(
+            "/store/items",
+            params=[("key", "ephemeral"), *(("namespace", part) for part in namespace)],
+            headers=_user_headers(user_id),
+        )
+        assert expired.status_code == 404
+
+        searched = await client.post(
+            "/store/items/search",
+            json={"namespace_prefix": namespace[:2], "limit": 10, "offset": 0},
+            headers=_user_headers(user_id),
+        )
+        assert searched.status_code == 200
+        assert searched.json() == {"items": []}
 
 
 @pytest.mark.e2e
