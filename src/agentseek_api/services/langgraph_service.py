@@ -40,12 +40,12 @@ def _echo_node(state: RunState) -> RunState:
     return {"input": payload, "output": {"echo": payload}}
 
 
-def _build_echo_graph(checkpointer: Any | None = None) -> Pregel:
+def _build_echo_graph(checkpointer: Any | None = None, store: Any | None = None) -> Pregel:
     builder: StateGraph[RunState] = StateGraph(RunState)
     builder.add_node("echo", _echo_node)
     builder.add_edge(START, "echo")
     builder.add_edge("echo", END)
-    return builder.compile(checkpointer=checkpointer)
+    return builder.compile(checkpointer=checkpointer, store=store)
 
 
 def _echo_prepare(payload: dict[str, Any]) -> dict[str, Any]:
@@ -121,25 +121,31 @@ def _apply_manifest_dependencies(payload: dict[str, Any], manifest_path: Path) -
             )
 
 
-def _coerce_graph(graph_object: Any, *, checkpointer: Any | None) -> Pregel:
+def _coerce_graph(graph_object: Any, *, checkpointer: Any | None, store: Any | None) -> Pregel:
     if isinstance(graph_object, Pregel):
         return graph_object
     compile_graph = getattr(graph_object, "compile", None)
     if callable(compile_graph):
-        return compile_graph(checkpointer=checkpointer)
+        return compile_graph(checkpointer=checkpointer, store=store)
     raise GraphManifestError("Graph definition did not resolve to a compiled graph or compilable StateGraph.")
 
 
-def _build_factory_config(*, checkpointer: Any | None) -> dict[str, Any]:
+def _build_factory_config(*, checkpointer: Any | None, store: Any | None) -> dict[str, Any]:
     return {
         CONF: {
             CONFIG_KEY_CHECKPOINTER: checkpointer,
+            "store": store,
         },
         "checkpointer": checkpointer,
+        "store": store,
     }
 
 
-def _build_graph_from_definition(graph_definition: GraphFactory, checkpointer: Any | None) -> Pregel:
+def _build_graph_from_definition(
+    graph_definition: GraphFactory,
+    checkpointer: Any | None,
+    store: Any | None,
+) -> Pregel:
     if isinstance(graph_definition, Pregel):
         return graph_definition
 
@@ -148,15 +154,21 @@ def _build_graph_from_definition(graph_definition: GraphFactory, checkpointer: A
 
     signature = inspect.signature(graph_definition)
     parameters = list(signature.parameters.values())
+    has_var_kwargs = any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters)
+    has_checkpointer = any(parameter.name == "checkpointer" for parameter in parameters)
+    has_store = any(parameter.name == "store" for parameter in parameters)
     if not parameters:
         built = graph_definition()
-    elif any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters) or any(
-        parameter.name == "checkpointer" for parameter in parameters
-    ):
-        built = graph_definition(checkpointer=checkpointer)
+    elif has_var_kwargs or has_checkpointer or has_store:
+        graph_kwargs: dict[str, Any] = {}
+        if has_var_kwargs or has_checkpointer:
+            graph_kwargs["checkpointer"] = checkpointer
+        if has_var_kwargs or has_store:
+            graph_kwargs["store"] = store
+        built = graph_definition(**graph_kwargs)
     else:
-        built = graph_definition(_build_factory_config(checkpointer=checkpointer))
-    return _coerce_graph(built, checkpointer=checkpointer)
+        built = graph_definition(_build_factory_config(checkpointer=checkpointer, store=store))
+    return _coerce_graph(built, checkpointer=checkpointer, store=store)
 
 
 @dataclass
@@ -165,8 +177,8 @@ class GraphEntry:
     prepare_input: PrepareInput
     extract_output: ExtractOutput
 
-    def build_graph(self, checkpointer: Any | None = None) -> Pregel:
-        return _build_graph_from_definition(self.graph_factory, checkpointer)
+    def build_graph(self, checkpointer: Any | None = None, store: Any | None = None) -> Pregel:
+        return _build_graph_from_definition(self.graph_factory, checkpointer, store)
 
 
 class LangGraphService:
@@ -279,8 +291,14 @@ class LangGraphService:
             return self._registry[graph_id]
         return self._registry["default"]
 
-    def get_graph(self, graph_id: str | None = None, *, checkpointer: Any | None = None) -> Pregel:
-        return self.get_entry(graph_id).build_graph(checkpointer)
+    def get_graph(
+        self,
+        graph_id: str | None = None,
+        *,
+        checkpointer: Any | None = None,
+        store: Any | None = None,
+    ) -> Pregel:
+        return self.get_entry(graph_id).build_graph(checkpointer, store)
 
     def registered_graph_ids(self) -> list[str]:
         return sorted(self._registry.keys())

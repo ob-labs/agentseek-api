@@ -2,6 +2,7 @@ import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 
+from agentseek_api.core.runtime_store import UserScopedStore
 from agentseek_api.services.run_executor import (
     RunExecutionResult,
     _ProtocolMessageStreamState,
@@ -30,9 +31,11 @@ class FakeGraph:
 
 class FakeEntry:
     graph = FakeGraph()
+    last_store = None
 
     @staticmethod
-    def build_graph(_checkpointer=None) -> FakeGraph:
+    def build_graph(_checkpointer=None, store=None) -> FakeGraph:
+        FakeEntry.last_store = store
         return FakeEntry.graph
 
     @staticmethod
@@ -64,6 +67,7 @@ class FakeDBManager:
     def __init__(self) -> None:
         self.checkpointer = FakeCheckpointer()
         self.langgraph_checkpointer = object()
+        self.store = object()
 
     async def run_checkpointer_call(self, func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -74,6 +78,9 @@ class FakeDBManager:
     def get_langgraph_checkpointer(self):
         return self.langgraph_checkpointer
 
+    def get_store(self):
+        return self.store
+
 
 @pytest.mark.asyncio
 async def test_execute_run_saves_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,7 +88,7 @@ async def test_execute_run_saves_checkpoint(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeLangGraphService())
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
 
-    result = await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    result = await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
     assert isinstance(result, RunExecutionResult)
     assert result.output["ok"] is True
     assert result.output["received"] == {"input": {"hello": "world"}}
@@ -97,7 +104,7 @@ async def test_execute_run_records_graph_id(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeLangGraphService())
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"a": 1}, graph_id="stress_test")
+    await execute_run(thread_id="t1", run_id="r1", payload={"a": 1}, graph_id="stress_test", user_id="user-1")
     assert fake_db.checkpointer.calls[0]["payload"]["graph_id"] == "stress_test"
 
 
@@ -105,15 +112,21 @@ async def test_execute_run_records_graph_id(monkeypatch: pytest.MonkeyPatch) -> 
 async def test_execute_run_passes_runtime_checkpointer_in_config(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDBManager()
     FakeEntry.graph = FakeGraph()
+    FakeEntry.last_store = None
     monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeLangGraphService())
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"a": 1})
+    await execute_run(thread_id="t1", run_id="r1", payload={"a": 1}, user_id="scoped-user")
 
     config = FakeEntry.graph.configs[0]
     assert config[CONF]["thread_id"] == "t1"
     assert config[CONF]["checkpoint_ns"] == "r1"
     assert config[CONF][CONFIG_KEY_CHECKPOINTER] is fake_db.langgraph_checkpointer
+    assert isinstance(config[CONF]["store"], UserScopedStore)
+    assert config[CONF]["store"]._store is fake_db.store
+    assert config[CONF]["store"]._user_prefix == ("__agentseek_users__", "scoped-user")
+    assert isinstance(FakeEntry.last_store, UserScopedStore)
+    assert FakeEntry.last_store._store is fake_db.store
 
 
 class FakeInterruptGraph(FakeGraph):
@@ -177,7 +190,7 @@ async def test_execute_run_preserves_interrupts_from_root_stream(monkeypatch: py
     )
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
 
-    result = await execute_run(thread_id="t1", run_id="r1", payload={"foo": "hello"})
+    result = await execute_run(thread_id="t1", run_id="r1", payload={"foo": "hello"}, user_id="user-1")
 
     assert result.interrupted is True
     assert result.interrupts == [{"value": "Provide value:", "id": "interrupt-1"}]
@@ -602,7 +615,7 @@ async def test_execute_run_publishes_incremental_protocol_messages_and_values(mo
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
     thread_events = protocol_broker._events["t1"]
     message_events = [event for event in thread_events if event["method"] == "messages"]
@@ -635,7 +648,7 @@ async def test_execute_run_publishes_incremental_protocol_messages_for_llm_text_
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
     message_events = [event for event in protocol_broker._events["t1"] if event["method"] == "messages"]
     assert [event["params"]["data"]["event"] for event in message_events] == [
@@ -663,7 +676,7 @@ async def test_execute_run_uses_langgraph_namespaces_for_protocol_events(monkeyp
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
     thread_events = protocol_broker._events["t1"]
     message_events = [event for event in thread_events if event["method"] == "messages"]
@@ -688,7 +701,7 @@ async def test_execute_run_publishes_structured_protocol_message_blocks(monkeypa
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
     message_events = [event for event in protocol_broker._events["t1"] if event["method"] == "messages"]
     block_starts = [event["params"]["data"] for event in message_events if event["params"]["data"]["event"] == "content-block-start"]
@@ -722,7 +735,7 @@ async def test_execute_run_streams_tool_call_chunks_without_duplicate_complete_b
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
     message_events = [event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"]
     block_starts = [event for event in message_events if event["event"] == "content-block-start"]
@@ -747,7 +760,7 @@ async def test_execute_run_merges_final_structured_blocks_after_live_text(monkey
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
     message_events = [event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"]
     block_starts = [event for event in message_events if event["event"] == "content-block-start"]
@@ -791,7 +804,7 @@ async def test_execute_run_keeps_multiple_messages_in_single_chunk_distinct(monk
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"})
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
     message_starts = [
         event["params"]["data"]

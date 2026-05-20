@@ -133,10 +133,12 @@ async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pyt
         thread_id: str,
         run_id: str,
         payload: dict,
+        user_id: str,
         graph_id: str | None = None,
         resume: Any = None,
     ) -> dict:
         captured["graph_id"] = graph_id
+        captured["user_id"] = user_id
         _ = (thread_id, run_id, payload, resume)
         raise RuntimeError("boom")
 
@@ -160,6 +162,7 @@ async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pyt
     assert events[-1][1] == "end"
     assert events[-1][2]["status"] == "error"
     assert captured["graph_id"] == "stress_test"
+    assert captured["user_id"] == "u1"
 
 
 @pytest.mark.asyncio
@@ -217,7 +220,13 @@ async def test_execute_and_persist_publishes_terminal_run_event_before_terminal_
         fake_add_run_stream_event_to_session,
     )
 
-    await run_prep_module._execute_and_persist(run_id="r1", thread_id="t1", payload={"x": 1}, graph_id="default")
+    await run_prep_module._execute_and_persist(
+        run_id="r1",
+        thread_id="t1",
+        user_id="u1",
+        payload={"x": 1},
+        graph_id="default",
+    )
 
     assert exec_session.commits == 2
     assert published_run_events == [
@@ -327,6 +336,7 @@ async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(monke
     await run_prep_module._execute_and_persist(
         run_id="r1",
         thread_id="t1",
+        user_id="u1",
         payload={"x": 1},
         graph_id="default",
     )

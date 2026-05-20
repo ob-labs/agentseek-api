@@ -36,10 +36,11 @@ async def fake_execute_run(
     thread_id: str,
     run_id: str,
     payload: dict[str, Any],
+    user_id: str,
     graph_id: str | None = None,
     resume: Any = None,
 ) -> RunExecutionResult:
-    _ = resume
+    _ = (resume, user_id)
     return RunExecutionResult(
         output={"echo": payload, "thread_id": thread_id, "run_id": run_id, "graph_id": graph_id},
         interrupted=False,
