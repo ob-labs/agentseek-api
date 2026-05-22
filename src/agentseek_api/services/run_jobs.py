@@ -4,12 +4,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import (
+    add_thread_stream_event_to_session,
     add_run_stream_event_to_session,
     persist_run_stream_event,
     persist_thread_stream_event,
@@ -70,14 +72,23 @@ async def _publish_lifecycle(
     event: str,
     graph_name: str | None = None,
     error: str | None = None,
+    session: AsyncSession | None = None,
 ) -> None:
     kwargs: dict[str, Any] = {"event": event}
     if graph_name is not None:
         kwargs["graph_name"] = graph_name
     if error is not None:
         kwargs["error"] = error
-    published = publish_lifecycle_event(thread_id, **kwargs)
-    await persist_thread_stream_event(thread_id, published)
+    published = publish_lifecycle_event(thread_id, persist=False, **kwargs)
+    if session is None:
+        await persist_thread_stream_event(thread_id, published)
+        return
+    await add_thread_stream_event_to_session(
+        session,
+        thread_id,
+        seq=int(published["seq"]),
+        payload=published,
+    )
 
 
 async def _publish_run_event(
@@ -177,6 +188,7 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                 event=lifecycle_state,
                 graph_name=job.graph_id,
                 error=db_run.last_error,
+                session=execution_session,
             )
             await execution_session.commit()
     finally:

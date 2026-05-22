@@ -77,6 +77,28 @@ async def add_run_stream_event_to_session(
     )
 
 
+async def add_thread_stream_event_to_session(
+    session: AsyncSession,
+    thread_id: str,
+    *,
+    seq: int,
+    payload: dict[str, Any],
+) -> None:
+    existing = await session.scalar(
+        select(ThreadStreamEvent.id).where(ThreadStreamEvent.thread_id == thread_id, ThreadStreamEvent.seq == seq)
+    )
+    if existing is not None:
+        return
+    session.add(
+        ThreadStreamEvent(
+            thread_id=thread_id,
+            seq=seq,
+            method=str(payload.get("method", "event")),
+            payload_json=dict(payload),
+        )
+    )
+
+
 async def load_run_stream_events(run_id: str, *, after_seq: int = 0) -> list[tuple[int, dict[str, Any]]]:
     if not _metadata_db_ready():
         return []

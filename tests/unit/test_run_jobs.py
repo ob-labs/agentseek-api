@@ -111,16 +111,39 @@ async def test_execute_run_job_persists_terminal_lifecycle_before_final_commit(
     ) -> None:
         operations.append(f"persist:run:{payload['event']}:{seq}")
 
-    async def fake_persist_thread_stream_event(_thread_id: str, event: dict[str, Any] | None) -> None:
-        if event is not None:
-            operations.append(f"persist:thread:{event['params']['data']['event']}")
+    def fake_publish_lifecycle_event(
+        _thread_id: str,
+        *,
+        event: str,
+        graph_name: str | None = None,
+        error: str | None = None,
+        namespace: list[str] | None = None,
+        persist: bool = True,
+    ) -> dict[str, Any]:
+        _ = (graph_name, error, namespace)
+        operations.append(f"publish:lifecycle:{event}:{persist}")
+        return {
+            "seq": 3,
+            "method": "lifecycle",
+            "params": {"namespace": [], "timestamp": 1, "data": {"event": event}},
+        }
+
+    async def fake_add_thread_stream_event_to_session(
+        _session: FakeSession,
+        _thread_id: str,
+        *,
+        seq: int,
+        payload: dict[str, Any],
+    ) -> None:
+        operations.append(f"persist:thread:{payload['params']['data']['event']}:{seq}")
 
     monkeypatch.setattr(run_jobs_module.db_manager, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(run_jobs_module, "execute_run", successful_execute_run)
     monkeypatch.setattr(run_jobs_module, "_publish_run_event", fake_publish_run_event)
     monkeypatch.setattr(run_jobs_module, "_persist_thread_snapshot", fake_persist_thread_snapshot)
     monkeypatch.setattr(run_jobs_module, "add_run_stream_event_to_session", fake_add_run_stream_event_to_session)
-    monkeypatch.setattr(run_jobs_module, "persist_thread_stream_event", fake_persist_thread_stream_event)
+    monkeypatch.setattr(run_jobs_module, "publish_lifecycle_event", fake_publish_lifecycle_event)
+    monkeypatch.setattr(run_jobs_module, "add_thread_stream_event_to_session", fake_add_thread_stream_event_to_session)
 
     await run_jobs_module.execute_run_job(_job())
 
@@ -129,6 +152,7 @@ async def test_execute_run_job_persists_terminal_lifecycle_before_final_commit(
         "publish:start",
         "publish:end",
         "persist:run:end:2",
-        "persist:thread:completed",
+        "publish:lifecycle:completed:False",
+        "persist:thread:completed:3",
         "commit",
     ]

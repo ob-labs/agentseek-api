@@ -104,9 +104,10 @@ class ThreadProtocolEventBroker:
         self._signals[thread_id].set()
         return event
 
-    def publish(self, thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def publish(self, thread_id: str, payload: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
         event = self._record_event(thread_id, payload)
-        self._persist_event(thread_id, event)
+        if persist:
+            self._persist_event(thread_id, event)
         return event
 
     async def apublish(self, thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -200,6 +201,7 @@ def publish_lifecycle_event(
     graph_name: str | None = None,
     error: str | None = None,
     namespace: list[str] | None = None,
+    persist: bool = True,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {"event": event}
     if graph_name is not None:
@@ -216,6 +218,7 @@ def publish_lifecycle_event(
                 "data": data,
             },
         },
+        persist=persist,
     )
 
 
