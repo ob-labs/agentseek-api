@@ -47,11 +47,10 @@ class FakeStore:
 
 
 def test_health_uses_postgresql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_urls: list[str] = []
+    captured_calls: list[tuple[str, bool]] = []
 
     def fake_create_async_engine(url: str, *, pool_pre_ping: bool) -> FakeEngine:
-        _ = pool_pre_ping
-        captured_urls.append(url)
+        captured_calls.append((url, pool_pre_ping))
         return FakeEngine()
 
     monkeypatch.setattr("agentseek_api.core.database.create_async_engine", fake_create_async_engine)
@@ -73,15 +72,14 @@ def test_health_uses_postgresql_async_driver(monkeypatch: pytest.MonkeyPatch) ->
         response = client.get("/health")
         assert response.status_code == 200
 
-    assert captured_urls == ["postgresql+asyncpg://postgres:postgres@localhost:5432/agentseek"]
+    assert captured_calls == [("postgresql+asyncpg://postgres:postgres@localhost:5432/agentseek", True)]
 
 
 def test_health_uses_mysql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_urls: list[str] = []
+    captured_calls: list[tuple[str, bool]] = []
 
     def fake_create_async_engine(url: str, *, pool_pre_ping: bool) -> FakeEngine:
-        _ = pool_pre_ping
-        captured_urls.append(url)
+        captured_calls.append((url, pool_pre_ping))
         return FakeEngine()
 
     monkeypatch.setattr("agentseek_api.core.database.create_async_engine", fake_create_async_engine)
@@ -103,4 +101,4 @@ def test_health_uses_mysql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None
         response = client.get("/health")
         assert response.status_code == 200
 
-    assert captured_urls == ["mysql+aiomysql://root%40test:@localhost:2881/seekdb"]
+    assert captured_calls == [("mysql+aiomysql://root%40test:@localhost:2881/seekdb", False)]

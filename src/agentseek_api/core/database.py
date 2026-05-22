@@ -106,7 +106,7 @@ class DatabaseManager:
         store_config = load_store_config(agentseek_graphs=settings.AGENTSEEK_GRAPHS)
         runtime_index = store_config.index.to_runtime_config()
         runtime_ttl = store_config.ttl.to_runtime_config()
-        self.engine = create_async_engine(metadata_db_url, pool_pre_ping=True)
+        self.engine = create_async_engine(metadata_db_url, pool_pre_ping=metadata_backend != "mysql")
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
