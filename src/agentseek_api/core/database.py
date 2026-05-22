@@ -22,6 +22,11 @@ class NullStore:
         return None
 
 
+def _is_already_exists_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "already exists" in message
+
+
 def _resolve_metadata_backend(*, configured_backend: str, url_drivername: str) -> str:
     normalized_backend = configured_backend.strip().lower()
     if normalized_backend in {"postgres", "postgresql"}:
@@ -185,7 +190,11 @@ class DatabaseManager:
                 raise RuntimeError("Store not initialized")
             setup = getattr(self._store, "setup", None)
             if callable(setup):
-                await asyncio.to_thread(setup)
+                try:
+                    await asyncio.to_thread(setup)
+                except Exception as exc:  # noqa: BLE001
+                    if not _is_already_exists_error(exc):
+                        raise
             self._store_setup_done = True
 
     async def close(self) -> None:

@@ -107,6 +107,73 @@ async def test_initialize_builds_oceanbase_store_for_mysql_backends(
     await manager.close()
 
 
+@pytest.mark.asyncio
+async def test_initialize_tolerates_store_setup_already_exists_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeCheckpointer:
+        def __init__(self, connection_args: dict[str, str]) -> None:
+            self.connection_args = connection_args
+
+        def setup(self) -> None:
+            return None
+
+    class FakeStore:
+        setup_calls = 0
+
+        def __init__(self, connection_args: dict[str, str], **_kwargs) -> None:
+            self.connection_args = connection_args
+
+        def setup(self) -> None:
+            FakeStore.setup_calls += 1
+            raise RuntimeError("Table 'store_items' already exists")
+
+    class FakeConnection:
+        async def run_sync(self, _fn) -> None:
+            return None
+
+    class FakeBeginContext:
+        async def __aenter__(self) -> FakeConnection:
+            return FakeConnection()
+
+        async def __aexit__(self, _exc_type, _exc, _tb) -> None:
+            return None
+
+    class FakeEngine:
+        def begin(self) -> FakeBeginContext:
+            return FakeBeginContext()
+
+        async def dispose(self) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "agentseek_api.core.database.create_async_engine",
+        lambda *_args, **_kwargs: FakeEngine(),
+    )
+    monkeypatch.setattr(
+        "agentseek_api.core.database.async_sessionmaker",
+        lambda *_args, **_kwargs: object(),
+    )
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr("agentseek_api.core.database.LangGraphOceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseStore", FakeStore)
+    monkeypatch.setattr(settings, "METADATA_DB_URL", "mysql://root%40test:@localhost:2881/seekdb")
+    monkeypatch.setattr(settings, "METADATA_DB_BACKEND", "auto")
+    monkeypatch.setattr(settings, "OCEANBASE_HOST", "127.0.0.1")
+    monkeypatch.setattr(settings, "OCEANBASE_PORT", "2881")
+    monkeypatch.setattr(settings, "OCEANBASE_USER", "root@test")
+    monkeypatch.setattr(settings, "OCEANBASE_PASSWORD", "")
+    monkeypatch.setattr(settings, "OCEANBASE_DB_NAME", "seekdb")
+
+    manager = DatabaseManager()
+    await manager.initialize()
+
+    assert FakeStore.setup_calls == 1
+    assert isinstance(manager.get_store(), FakeStore)
+
+    await manager.close()
+
+
 @pytest.mark.parametrize(
     ("metadata_db_url", "backend", "expected_url"),
     [
