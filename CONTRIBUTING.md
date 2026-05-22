@@ -41,3 +41,7 @@ Keep local commands aligned with CI when possible:
 - `make test-samples`
 - `make test-e2e`
 - `make test-seekdb`
+
+For embedded SeekDB locally, install the optional extra first:
+
+- `uv sync --dev --extra embedded`

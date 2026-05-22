@@ -25,6 +25,11 @@ dependencies = [
     "langchain>=0.3.9",
 ]
 
+[project.optional-dependencies]
+embedded = [
+    "langchain-oceanbase[pyseekdb]==0.5.0",
+]
+
 [project.scripts]
 agentseek-api = "agentseek_api.cli:main"
 

@@ -7,6 +7,7 @@ target database exists, then blocks until the process is killed.
 
 from __future__ import annotations
 
+import importlib
 import os
 import signal
 import socket
@@ -15,8 +16,10 @@ import tempfile
 import threading
 import time
 
-import pylibseekdb
 import pymysql
+
+
+pylibseekdb = None
 
 
 def _wait_for_port(host: str, port: int, timeout_seconds: float) -> None:
@@ -30,6 +33,20 @@ def _wait_for_port(host: str, port: int, timeout_seconds: float) -> None:
     raise SystemExit(f"embedded SeekDB did not open port {port} within {timeout_seconds:.0f}s")
 
 
+def _load_pylibseekdb():
+    global pylibseekdb
+    if pylibseekdb is not None:
+        return pylibseekdb
+    try:
+        pylibseekdb = importlib.import_module("pylibseekdb")
+    except ModuleNotFoundError as exc:
+        raise SystemExit(
+            "Embedded SeekDB support is optional. Install it with "
+            "'uv sync --dev --extra embedded' before running embedded mode."
+        ) from exc
+    return pylibseekdb
+
+
 def main() -> int:
     host = os.environ.get("OCEANBASE_HOST", "127.0.0.1")
     port = int(os.environ.get("OCEANBASE_PORT", "2881"))
@@ -37,9 +54,10 @@ def main() -> int:
     password = os.environ.get("OCEANBASE_PASSWORD", "")
     db_name = os.environ.get("OCEANBASE_DB_NAME", "seekdb")
     data_dir = os.environ.get("SEEKDB_EMBED_DIR") or tempfile.mkdtemp(prefix="seekdb_embed_")
+    seekdb_module = _load_pylibseekdb()
 
     threading.Thread(
-        target=pylibseekdb.open_with_service,
+        target=seekdb_module.open_with_service,
         args=(data_dir, port),
         daemon=True,
     ).start()

@@ -278,6 +278,12 @@ make test-e2e
 make test-seekdb
 ```
 
+For local embedded SeekDB smoke coverage, install the optional extra first:
+
+```bash
+uv sync --dev --extra embedded
+```
+
 Real provider-backed streaming proof stays in the manual workflow
 `.github/workflows/live-provider-streaming.yml`. That workflow is the canonical
 check for real SSE `message_chunk` events from provider-backed graphs.
