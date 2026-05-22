@@ -8,7 +8,7 @@ from agentseek_api.core.orm import Assistant
 from agentseek_api.models.api import AssistantCreate, AssistantPatch, AssistantRead, AssistantSearchRequest
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
-router = APIRouter(prefix="/assistants", tags=["Assistants"], dependencies=[Depends(get_current_user)])
+router = APIRouter(dependencies=[Depends(get_current_user)])
 
 
 def _to_read_model(row: Assistant) -> AssistantRead:

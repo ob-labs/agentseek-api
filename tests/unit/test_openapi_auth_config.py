@@ -44,3 +44,5 @@ def test_create_app_merges_auth_openapi_from_json_config(monkeypatch, tmp_path: 
     assert schema["security"] == [{"apiKeyAuth": []}]
     assert "security" not in schema["paths"]["/assistants"]["post"]
     assert "security" not in schema["paths"]["/assistants"]["get"]
+    assert "security" not in schema["paths"]["/agents"]["post"]
+    assert "security" not in schema["paths"]["/agents"]["get"]
