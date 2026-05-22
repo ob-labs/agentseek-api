@@ -21,7 +21,7 @@ class RedisRunQueue:
         self.processing_key = processing_key or settings.REDIS_RUN_PROCESSING_KEY
 
     async def enqueue(self, job: RunExecutionJob) -> None:
-        await self.client.rpush(self.queue_key, self._serialize(job))
+        await self.client.lpush(self.queue_key, self._serialize(job))
 
     async def reserve(self, *, timeout_seconds: int) -> tuple[RunExecutionJob, str] | None:
         raw = await self.client.brpoplpush(self.queue_key, self.processing_key, timeout=timeout_seconds)
