@@ -224,7 +224,7 @@ if [[ "$SEEKDB_MODE" == "auto" ]]; then
     SEEKDB_MODE="docker"
   else
     echo "No backend launcher available."
-    echo "Install pylibseekdb for embedded mode, or install Docker for docker mode."
+    echo "Install embedded mode with 'uv sync --dev --extra embedded', or install Docker for docker mode."
     exit 1
   fi
 fi
