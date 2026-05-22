@@ -23,12 +23,26 @@ def test_embed_launcher_errors_with_actionable_message_when_extra_missing(
 ) -> None:
     def fake_import_module(name: str) -> object:
         if name == "pylibseekdb":
-            raise ModuleNotFoundError(name)
+            raise ModuleNotFoundError(f"No module named '{name}'", name=name)
         return __import__(name)
 
     monkeypatch.setattr(seekdb_embed_launcher.importlib, "import_module", fake_import_module)
 
     with pytest.raises(SystemExit, match="uv sync --dev --extra embedded"):
+        seekdb_embed_launcher._load_pylibseekdb()
+
+
+def test_embed_launcher_reraises_nested_module_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_import_module(name: str) -> object:
+        if name == "pylibseekdb":
+            raise ModuleNotFoundError("No module named 'onnxruntime'", name="onnxruntime")
+        return __import__(name)
+
+    monkeypatch.setattr(seekdb_embed_launcher.importlib, "import_module", fake_import_module)
+
+    with pytest.raises(ModuleNotFoundError, match="onnxruntime"):
         seekdb_embed_launcher._load_pylibseekdb()
 
 

@@ -40,6 +40,8 @@ def _load_pylibseekdb():
     try:
         pylibseekdb = importlib.import_module("pylibseekdb")
     except ModuleNotFoundError as exc:
+        if exc.name != "pylibseekdb":
+            raise
         raise SystemExit(
             "Embedded SeekDB support is optional. Install it with "
             "'uv sync --dev --extra embedded' before running embedded mode."
