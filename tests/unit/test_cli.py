@@ -133,6 +133,21 @@ def test_serve_command_uses_agentseek_graphs_env_for_manifest_named_config(
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
+def test_worker_command_uses_runtime_env_and_worker_module(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    capture = _RunCapture()
+
+    exit_code = main(["worker", "--config", str(config_path)], runner=capture, cwd=tmp_path)
+
+    assert exit_code == 0
+    assert capture.command is not None
+    assert capture.command[1:] == ["-m", "agentseek_api.worker"]
+    assert capture.env is not None
+    assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
+
+
 def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 

@@ -1,4 +1,4 @@
-.PHONY: test test-cov test-cli test-cli-docker test-cli-dev-samples test-samples test-e2e test-checkpoints test-seekdb
+.PHONY: test test-cov test-cli test-cli-docker test-cli-dev-samples test-samples test-e2e test-checkpoints test-seekdb test-redis-docker
 
 test:
 	uv run pytest tests/unit tests/integration -q
@@ -26,3 +26,6 @@ test-checkpoints:
 	bash ./scripts/test-checkpoints.sh
 
 test-seekdb: test-checkpoints
+
+test-redis-docker:
+	bash ./scripts/test-redis-runtime.sh

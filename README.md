@@ -81,6 +81,7 @@ When running from this repository, use `uv run agentseek-api ...`.
 | --- | --- |
 | `dev` | Start the API with reload for local development. |
 | `serve` | Start the API without reload for containers or smoke tests. |
+| `worker` | Start the Redis-backed run worker. |
 | `dockerfile` | Generate a runtime Dockerfile for the active config. |
 | `build` | Build a Docker image for the active config. |
 | `up` | Start a local Docker runtime for the active config. |
@@ -97,6 +98,7 @@ When running from this repository, use `uv run agentseek-api ...`.
 ```bash
 uv run agentseek-api dev
 uv run agentseek-api serve --config ./langgraph.json --port 8080
+uv run agentseek-api worker --config ./langgraph.json
 uv run agentseek-api dockerfile --config ./langgraph.json ./Dockerfile.agentseek
 uv run agentseek-api build --config ./langgraph.json -t agentseek-api:dev
 uv run agentseek-api up --config ./langgraph.json --port 8123 --wait
@@ -111,6 +113,9 @@ uv run agentseek-api version
   - Use `--no-reload` to disable reload
 - `serve`
   - Same host and port options as `dev`
+- `worker`
+  - Requires `EXECUTOR_BACKEND=redis`
+  - Uses `REDIS_URL` plus the queue keys below
 - `build`
   - Use `-t, --tag` to set the image tag
   - Supports `--platform`, `--pull`, and `--no-pull`
@@ -133,6 +138,7 @@ rejected when their runtime behavior is not implemented yet.
   `POST /threads/{thread_id}/runs/{run_id}/resume`
 - 🗄️ SeekDB / OceanBase-first checkpoint persistence via
   `langchain-oceanbase`
+- 📦 Optional Redis-backed run handoff with a dedicated worker process
 - 🔐 `noop` and custom auth backends
 - 🐳 Dockerfile generation, image build, and local Docker runtime helpers
 - 🧪 Real backend validation and manual provider-backed streaming checks
@@ -228,6 +234,13 @@ parent api build --config ./langgraph.json -t my-api:dev
 - Metadata persistence uses `METADATA_DB_URL` when it is set
 - Otherwise the metadata database URL is resolved from `SEEKDB_URL` or the
   `OCEANBASE_*` connection settings
+- Run execution defaults to `EXECUTOR_BACKEND=inline`
+- Set `EXECUTOR_BACKEND=redis` and start `agentseek-api worker` to hand off
+  runs through Redis
+- Redis queue settings:
+  - `REDIS_URL=redis://127.0.0.1:6379/0`
+  - `REDIS_RUN_QUEUE_KEY=agentseek:runs:pending`
+  - `REDIS_RUN_PROCESSING_KEY=agentseek:runs:processing`
 - `METADATA_DB_BACKEND=auto` normalizes drivers:
   - PostgreSQL: `postgresql+asyncpg://...`
   - OceanBase / MySQL: `mysql+aiomysql://...`
@@ -291,7 +304,7 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 
 ## 🗺️ Future Work
 
-1. [ ] Add Redis-backed task queue and worker handoff for durable run execution
+1. [x] Add Redis-backed task queue and worker handoff for durable run execution
 2. [ ] Deepen Agent Protocol schema parity beyond the current alias coverage
 3. [ ] Add crons and scheduler support
 4. [ ] Add MCP and A2A endpoint parity

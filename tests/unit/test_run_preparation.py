@@ -1,4 +1,4 @@
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -6,6 +6,7 @@ import pytest
 
 from agentseek_api.models.auth import User
 from agentseek_api.services import run_preparation as run_prep_module
+from agentseek_api.services.run_jobs import RunExecutionJob
 from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
 
@@ -68,20 +69,28 @@ class FakeSessionFactory:
 
 
 class InlineExecutor:
-    async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
-        await func()
+    async def submit(self, job: RunExecutionJob) -> None:
+        await run_prep_module._execute_and_persist(
+            run_id=job.run_id,
+            thread_id=job.thread_id,
+            user_id=job.user_id,
+            payload=job.payload,
+            graph_id=job.graph_id,
+            resume=job.resume,
+            is_resume=job.is_resume,
+        )
 
 
 class DeferredExecutor:
     def __init__(self) -> None:
-        self.submitted: list[Callable[[], Awaitable[None]]] = []
+        self.submitted: list[RunExecutionJob] = []
 
-    async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
-        self.submitted.append(func)
+    async def submit(self, job: RunExecutionJob) -> None:
+        self.submitted.append(job)
 
 
 class RaisingExecutor:
-    async def submit(self, _func: Callable[[], Awaitable[None]]) -> None:
+    async def submit(self, _job: RunExecutionJob) -> None:
         raise RuntimeError("submit failed")
 
 
@@ -279,6 +288,12 @@ async def test_prepare_run_marks_thread_busy_before_background_execution(monkeyp
     assert fake_thread.status == "busy"
     assert fake_thread.state_updated_at is not None
     assert len(executor.submitted) == 1
+    submitted = executor.submitted[0]
+    assert submitted.thread_id == "t1"
+    assert submitted.user_id == "u1"
+    assert submitted.payload == {"x": 1}
+    assert submitted.graph_id == "default"
+    assert submitted.is_resume is False
 
 
 @pytest.mark.asyncio
@@ -386,6 +401,13 @@ async def test_resume_run_marks_row_pending_before_background_execution(monkeypa
     assert fake_thread.state_updated_at is not None
     assert load_session.commits == 1
     assert len(executor.submitted) == 1
+    submitted = executor.submitted[0]
+    assert submitted.run_id == "r1"
+    assert submitted.thread_id == "t1"
+    assert submitted.payload == {"foo": "hello "}
+    assert submitted.graph_id == "subgraph_hitl_agent"
+    assert submitted.resume == "world"
+    assert submitted.is_resume is True
 
 
 @pytest.mark.asyncio

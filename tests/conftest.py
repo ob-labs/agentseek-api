@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.main import create_app
 from agentseek_api.models.auth import User
+from agentseek_api.services.run_jobs import RunExecutionJob
 from agentseek_api.settings import settings
 
 
@@ -23,8 +24,21 @@ class FakeCheckpointer:
         _ = (thread_id, run_id, payload)
 
 class InlineExecutor:
-    async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
-        await func()
+    async def submit(self, job: Callable[[], Awaitable[None]] | RunExecutionJob) -> None:
+        if callable(job):
+            await job()
+            return
+        from agentseek_api.services.run_preparation import _execute_and_persist
+
+        await _execute_and_persist(
+            run_id=job.run_id,
+            thread_id=job.thread_id,
+            user_id=job.user_id,
+            payload=job.payload,
+            graph_id=job.graph_id,
+            resume=job.resume,
+            is_resume=job.is_resume,
+        )
 
 
 async def header_user_override(request: Request) -> User:
