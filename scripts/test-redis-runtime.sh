@@ -245,6 +245,10 @@ docker run -d \
   -e OCEANBASE_DB_NAME="${OCEANBASE_DB_NAME}" \
   "$IMAGE_TAG" >/dev/null
 
+BASE_URL="http://127.0.0.1:${API_PORT}"
+export BASE_URL
+wait_for_api "$BASE_URL"
+
 docker rm -f "$WORKER_CONTAINER" >/dev/null 2>&1 || true
 docker run -d \
   --name "$WORKER_CONTAINER" \
@@ -259,10 +263,6 @@ docker run -d \
   -e OCEANBASE_DB_NAME="${OCEANBASE_DB_NAME}" \
   "$IMAGE_TAG" \
   python -m agentseek_api.cli worker >/dev/null
-
-BASE_URL="http://127.0.0.1:${API_PORT}"
-export BASE_URL
-wait_for_api "$BASE_URL"
 
 if ! uv run python scripts/verify_docker_api.py --base-url "$BASE_URL" --mode full; then
   print_logs
