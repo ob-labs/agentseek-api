@@ -6,7 +6,7 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
 
 from agentseek_api import __version__
-from agentseek_api.api.assistants import router as assistants_router
+from agentseek_api.api.assistants import router as assistants_api_router
 from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
 from agentseek_api.api.store import router as store_router
@@ -41,6 +41,7 @@ def _langchain_oceanbase_version() -> str:
 
 def _feature_flags() -> dict[str, bool]:
     return {
+        "agents": True,
         "assistants": True,
         "threads": True,
         "runs": True,
@@ -143,7 +144,8 @@ def create_app() -> FastAPI:
         )
         return PlainTextResponse(body + "\n")
 
-    app.include_router(assistants_router)
+    app.include_router(assistants_api_router, prefix="/assistants", tags=["Assistants"])
+    app.include_router(assistants_api_router, prefix="/agents", tags=["Agents"])
     app.include_router(threads_router)
     app.include_router(runs_router)
     app.include_router(stateless_runs_router)

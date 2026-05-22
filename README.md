@@ -8,8 +8,8 @@ Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
 > [Agent Protocol](https://github.com/langchain-ai/agent-protocol) as the main
 > external compatibility reference. The current runtime already covers the core
 > thread, run, streaming, and protocol-v2 event flows. Some protocol surfaces
-> are still pending, and agent resources are currently exposed as
-> `assistants` rather than direct `/agents` aliases.
+> are still pending, and agent resources are exposed through both
+> `/assistants` and direct `/agents` aliases.
 
 ## 🚀 Quickstart
 
@@ -128,6 +128,7 @@ rejected when their runtime behavior is not implemented yet.
   or `AGENTSEEK_GRAPHS`
 - 🌊 SSE streaming with `message_chunk` events
 - 🧵 Thread, run, wait, cancel, history, state, and protocol-v2 stream flows
+- 🤖 Agent resources exposed through both `/assistants` and `/agents`
 - 🧑‍💻 Human-in-the-loop resume through
   `POST /threads/{thread_id}/runs/{run_id}/resume`
 - 🗄️ SeekDB / OceanBase-first checkpoint persistence via
@@ -291,6 +292,6 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 ## 🗺️ Future Work
 
 1. [ ] Add Redis-backed task queue and worker handoff for durable run execution
-2. [ ] Add direct `/agents` aliases and deeper Agent Protocol schema parity
+2. [ ] Deepen Agent Protocol schema parity beyond the current alias coverage
 3. [ ] Add crons and scheduler support
 4. [ ] Add MCP and A2A endpoint parity
