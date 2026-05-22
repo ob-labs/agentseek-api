@@ -17,6 +17,7 @@ from agentseek_api.services.stream_persistence import (
 from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
 
 RUN_EXECUTION_JOB_KIND = "run.execute"
+TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
 
 
 @dataclass(slots=True)
@@ -127,6 +128,8 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                     error=db_run.last_error,
                 )
                 return
+            if db_run.status in TERMINAL_RUN_STATUSES:
+                return
 
             db_run.status = "running"
             db_run.last_error = None
@@ -164,7 +167,6 @@ async def execute_run_job(job: RunExecutionJob) -> None:
             if terminal_run_event is not None:
                 seq, event_payload = terminal_run_event
                 await add_run_stream_event_to_session(execution_session, job.run_id, seq=seq, payload=event_payload)
-            await execution_session.commit()
             lifecycle_state = "completed"
             if db_run.status == "interrupted":
                 lifecycle_state = "interrupted"
@@ -176,5 +178,6 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                 graph_name=job.graph_id,
                 error=db_run.last_error,
             )
+            await execution_session.commit()
     finally:
         thread_protocol_broker.run_finished(job.thread_id)

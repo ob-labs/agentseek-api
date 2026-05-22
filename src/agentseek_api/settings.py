@@ -16,6 +16,8 @@ class Settings(BaseSettings):
     REDIS_RUN_QUEUE_KEY: str = "agentseek:runs:pending"
     REDIS_RUN_PROCESSING_KEY: str = "agentseek:runs:processing"
     REDIS_WORKER_POLL_TIMEOUT_SECONDS: int = 1
+    REDIS_WORKER_LOCK_KEY: str = "agentseek:worker:active"
+    REDIS_WORKER_LOCK_TTL_SECONDS: int = 30
     AGENTSEEK_GRAPHS: str | None = None
     AUTH_TYPE: str = "noop"
     AUTH_MODULE_PATH: str | None = None

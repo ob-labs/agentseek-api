@@ -116,6 +116,7 @@ uv run agentseek-api version
 - `worker`
   - Requires `EXECUTOR_BACKEND=redis`
   - Uses `REDIS_URL` plus the queue keys below
+  - Redis durable execution currently allows a single active worker lease at a time
 - `build`
   - Use `-t, --tag` to set the image tag
   - Supports `--platform`, `--pull`, and `--no-pull`
@@ -241,6 +242,8 @@ parent api build --config ./langgraph.json -t my-api:dev
   - `REDIS_URL=redis://127.0.0.1:6379/0`
   - `REDIS_RUN_QUEUE_KEY=agentseek:runs:pending`
   - `REDIS_RUN_PROCESSING_KEY=agentseek:runs:processing`
+  - `REDIS_WORKER_LOCK_KEY=agentseek:worker:active`
+  - `REDIS_WORKER_LOCK_TTL_SECONDS=30`
 - `METADATA_DB_BACKEND=auto` normalizes drivers:
   - PostgreSQL: `postgresql+asyncpg://...`
   - OceanBase / MySQL: `mysql+aiomysql://...`
