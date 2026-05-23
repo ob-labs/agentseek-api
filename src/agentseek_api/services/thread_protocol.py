@@ -89,10 +89,11 @@ class ThreadProtocolEventBroker:
             self._prune_idle_threads()
         self._signals[thread_id].set()
 
-    def _record_event(self, thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def _record_event(self, thread_id: str, payload: dict[str, Any], *, seq: int | None = None) -> dict[str, Any]:
         self._mark_active(thread_id)
-        seq = self._next_seq[thread_id]
-        self._next_seq[thread_id] += 1
+        if seq is None:
+            seq = self._next_seq[thread_id]
+        self._next_seq[thread_id] = max(self._next_seq[thread_id], seq + 1)
         event = {
             "type": "event",
             "event_id": f"{thread_id}:{seq}",
@@ -104,14 +105,21 @@ class ThreadProtocolEventBroker:
         self._signals[thread_id].set()
         return event
 
-    def publish(self, thread_id: str, payload: dict[str, Any], *, persist: bool = True) -> dict[str, Any]:
-        event = self._record_event(thread_id, payload)
+    def publish(
+        self,
+        thread_id: str,
+        payload: dict[str, Any],
+        *,
+        persist: bool = True,
+        seq: int | None = None,
+    ) -> dict[str, Any]:
+        event = self._record_event(thread_id, payload, seq=seq)
         if persist:
             self._persist_event(thread_id, event)
         return event
 
-    async def apublish(self, thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        event = self._record_event(thread_id, payload)
+    async def apublish(self, thread_id: str, payload: dict[str, Any], *, seq: int | None = None) -> dict[str, Any]:
+        event = self._record_event(thread_id, payload, seq=seq)
         await self._persist_event_async(thread_id, event)
         return event
 
@@ -194,6 +202,16 @@ class ThreadProtocolEventBroker:
 thread_protocol_broker = ThreadProtocolEventBroker()
 
 
+async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    try:
+        from agentseek_api.services.stream_persistence import next_thread_stream_seq
+    except Exception:
+        return await thread_protocol_broker.apublish(thread_id, payload)
+
+    seq = await next_thread_stream_seq(thread_id)
+    return await thread_protocol_broker.apublish(thread_id, payload, seq=seq)
+
+
 def publish_lifecycle_event(
     thread_id: str,
     *,
@@ -202,6 +220,7 @@ def publish_lifecycle_event(
     error: str | None = None,
     namespace: list[str] | None = None,
     persist: bool = True,
+    seq: int | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {"event": event}
     if graph_name is not None:
@@ -219,6 +238,7 @@ def publish_lifecycle_event(
             },
         },
         persist=persist,
+        seq=seq,
     )
 
 
@@ -281,7 +301,7 @@ async def apublish_tool_event(
     }
     if node is not None:
         params["node"] = node
-    return await thread_protocol_broker.apublish(thread_id, {"method": "tools", "params": params})
+    return await _apublish_thread_event(thread_id, {"method": "tools", "params": params})
 
 
 def publish_values_event(
@@ -309,7 +329,7 @@ async def apublish_values_event(
     values: Any,
     namespace: list[str] | None = None,
 ) -> dict[str, Any]:
-    return await thread_protocol_broker.apublish(
+    return await _apublish_thread_event(
         thread_id,
         {
             "method": "values",
@@ -347,7 +367,7 @@ async def apublish_updates_event(
     values: Any,
     namespace: list[str] | None = None,
 ) -> dict[str, Any]:
-    return await thread_protocol_broker.apublish(
+    return await _apublish_thread_event(
         thread_id,
         {
             "method": "updates",
@@ -390,7 +410,7 @@ async def apublish_input_requested(
     payload: Any,
     namespace: list[str] | None = None,
 ) -> dict[str, Any]:
-    return await thread_protocol_broker.apublish(
+    return await _apublish_thread_event(
         thread_id,
         {
             "method": "input.requested",
@@ -437,7 +457,7 @@ async def apublish_message_start(
     role: str,
     namespace: list[str] | None = None,
 ) -> None:
-    await thread_protocol_broker.apublish(
+    await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
@@ -485,7 +505,7 @@ async def apublish_content_block_start(
     content: dict[str, Any],
     namespace: list[str] | None = None,
 ) -> None:
-    await thread_protocol_broker.apublish(
+    await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
@@ -533,7 +553,7 @@ async def apublish_content_block_delta(
     delta: dict[str, Any],
     namespace: list[str] | None = None,
 ) -> None:
-    await thread_protocol_broker.apublish(
+    await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
@@ -589,7 +609,7 @@ async def apublish_content_block_finish(
     }
     if content is not None:
         data["content"] = content
-    await thread_protocol_broker.apublish(
+    await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
@@ -627,7 +647,7 @@ async def apublish_message_complete(
     *,
     namespace: list[str] | None = None,
 ) -> None:
-    await thread_protocol_broker.apublish(
+    await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",

@@ -7,6 +7,8 @@ from agentseek_api.services.run_jobs import RunExecutionJob
 class FakeRedis:
     def __init__(self) -> None:
         self.lists: dict[str, list[str]] = {}
+        self.values: dict[str, str] = {}
+        self.expirations: dict[str, int] = {}
 
     async def lpush(self, key: str, value: str) -> int:
         items = self.lists.setdefault(key, [])
@@ -47,6 +49,31 @@ class FakeRedis:
         self.lists[key] = remaining
         return removed
 
+    async def set(self, key: str, value: str, *, ex: int, nx: bool) -> bool:
+        if nx and key in self.values:
+            return False
+        self.values[key] = value
+        self.expirations[key] = ex
+        return True
+
+    async def eval(self, script: str, numkeys: int, *args: str) -> int:
+        assert numkeys == 1
+        key = args[0]
+        owner = args[1]
+        if "EXPIRE" in script:
+            ttl_seconds = int(args[2])
+            if self.values.get(key) != owner:
+                return 0
+            self.expirations[key] = ttl_seconds
+            return 1
+        if "DEL" in script:
+            if self.values.get(key) != owner:
+                return 0
+            self.values.pop(key, None)
+            self.expirations.pop(key, None)
+            return 1
+        raise AssertionError(f"Unexpected Lua script: {script}")
+
 
 def _job(run_id: str) -> RunExecutionJob:
     return RunExecutionJob(
@@ -74,3 +101,29 @@ async def test_redis_queue_reserves_jobs_in_fifo_order() -> None:
     assert reserved_second is not None
     assert reserved_first[0].run_id == "run-1"
     assert reserved_second[0].run_id == "run-2"
+
+
+@pytest.mark.asyncio
+async def test_redis_queue_renews_worker_lock_only_for_current_owner() -> None:
+    client = FakeRedis()
+    queue = RedisRunQueue(client=client, worker_lock_key="worker")
+
+    assert await queue.acquire_worker_lock("worker-a", ttl_seconds=30) is True
+    client.values["worker"] = "worker-b"
+
+    assert await queue.renew_worker_lock("worker-a", ttl_seconds=60) is False
+    assert client.values["worker"] == "worker-b"
+    assert client.expirations["worker"] == 30
+
+
+@pytest.mark.asyncio
+async def test_redis_queue_releases_worker_lock_only_for_current_owner() -> None:
+    client = FakeRedis()
+    queue = RedisRunQueue(client=client, worker_lock_key="worker")
+
+    assert await queue.acquire_worker_lock("worker-a", ttl_seconds=30) is True
+    client.values["worker"] = "worker-b"
+
+    await queue.release_worker_lock("worker-a")
+
+    assert client.values["worker"] == "worker-b"

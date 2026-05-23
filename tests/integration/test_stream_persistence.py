@@ -9,8 +9,20 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, RunStreamEvent, Thread
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolEventStreamRequest
+from agentseek_api.services import run_jobs as run_jobs_module
+from agentseek_api.services import stream_persistence as stream_module
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.thread_protocol import publish_values_event, thread_protocol_broker
+
+
+class FakeRedisCounter:
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+
+    async def incr(self, key: str) -> int:
+        value = self.counts.get(key, 0) + 1
+        self.counts[key] = value
+        return value
 
 
 def _parse_sse(stream_text: str) -> list[dict[str, object]]:
@@ -246,6 +258,53 @@ def test_thread_protocol_stream_polls_persisted_events_in_redis_mode(client: Tes
     assert [event["event"] for event in events] == ["values", "lifecycle"]
     assert events[0]["data"]["params"]["data"] == {"phase": "mid-run"}
     assert events[1]["data"]["params"]["data"] == {"event": "completed"}
+
+
+def test_run_stream_persistence_uses_shared_seq_after_broker_reset(client: TestClient, monkeypatch) -> None:
+    fake_redis = FakeRedisCounter()
+    monkeypatch.setattr(stream_module.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(stream_module, "_redis_client", fake_redis)
+
+    client.portal.call(run_jobs_module._publish_run_event, "run-seq-reset", "start")
+    run_broker._events.clear()
+    run_broker._seqs.clear()
+    run_broker._signals.clear()
+    run_broker._next_seq.clear()
+    run_broker._completed_runs.clear()
+    run_broker._completed_order.clear()
+    client.portal.call(lambda: run_jobs_module._publish_run_event("run-seq-reset", "end", status="success"))
+
+    persisted = client.portal.call(stream_module.load_run_stream_events, "run-seq-reset")
+
+    assert [(seq, payload["event"]) for seq, payload in persisted] == [(1, "start"), (2, "end")]
+
+
+def test_thread_stream_persistence_uses_shared_seq_after_broker_reset(client: TestClient, monkeypatch) -> None:
+    fake_redis = FakeRedisCounter()
+    monkeypatch.setattr(stream_module.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(stream_module, "_redis_client", fake_redis)
+
+    client.portal.call(lambda: run_jobs_module._publish_lifecycle("thread-seq-reset", event="started", graph_name="default"))
+    thread_protocol_broker.delete_thread("thread-seq-reset")
+    client.portal.call(
+        lambda: run_jobs_module._publish_lifecycle(
+            "thread-seq-reset",
+            event="completed",
+            graph_name="default",
+        )
+    )
+
+    persisted = client.portal.call(
+        lambda: stream_module.load_thread_stream_events(
+            "thread-seq-reset",
+            channels=["lifecycle"],
+            namespaces=None,
+            depth=None,
+        )
+    )
+
+    assert [event["seq"] for event in persisted] == [1, 2]
+    assert [event["params"]["data"]["event"] for event in persisted] == ["started", "completed"]
 
 
 def test_protocol_events_are_persisted_when_published(client: TestClient) -> None:

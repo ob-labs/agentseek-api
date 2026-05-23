@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from typing import Any
 
+from redis.asyncio import Redis, from_url
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import RunStreamEvent, ThreadStreamEvent
+from agentseek_api.settings import settings
 from agentseek_api.services.thread_protocol import _namespace_matches, protocol_channel_for_method
+
+_RUN_STREAM_SEQ_KEY_PREFIX = "agentseek:runs:stream-seq"
+_THREAD_STREAM_SEQ_KEY_PREFIX = "agentseek:threads:stream-seq"
+_redis_client: Redis | None = None
 
 
 def _metadata_db_ready() -> bool:
@@ -16,6 +22,29 @@ def _metadata_db_ready() -> bool:
     except RuntimeError:
         return False
     return True
+
+
+def _uses_redis_executor() -> bool:
+    return settings.EXECUTOR_BACKEND.strip().lower() == "redis"
+
+
+def _get_redis_client() -> Redis:
+    global _redis_client
+    if _redis_client is None:
+        _redis_client = from_url(settings.REDIS_URL, decode_responses=True)
+    return _redis_client
+
+
+async def next_run_stream_seq(run_id: str) -> int | None:
+    if not _uses_redis_executor():
+        return None
+    return int(await _get_redis_client().incr(f"{_RUN_STREAM_SEQ_KEY_PREFIX}:{run_id}"))
+
+
+async def next_thread_stream_seq(thread_id: str) -> int | None:
+    if not _uses_redis_executor():
+        return None
+    return int(await _get_redis_client().incr(f"{_THREAD_STREAM_SEQ_KEY_PREFIX}:{thread_id}"))
 
 
 def parse_last_event_id(raw_value: str | None) -> int | None:

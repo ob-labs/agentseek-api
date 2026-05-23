@@ -15,6 +15,8 @@ API_PORT="${API_PORT:-8126}"
 SEEKDB_DOCKER_BACKEND="${SEEKDB_DOCKER_BACKEND:-seekdb}"
 SEEKDB_DOCKER_IMAGE="${SEEKDB_DOCKER_IMAGE:-}"
 OCEANBASE_DOCKER_MODE="${OCEANBASE_DOCKER_MODE:-mini}"
+STATE_DIR="${STATE_DIR:-$ROOT_DIR/.tmp/redis-runtime}"
+RESUME_STATE_FILE="$STATE_DIR/resume-state.json"
 
 cleanup() {
   docker rm -f "$WORKER_CONTAINER" >/dev/null 2>&1 || true
@@ -178,6 +180,23 @@ PY
   fi
 }
 
+start_worker() {
+  docker rm -f "$WORKER_CONTAINER" >/dev/null 2>&1 || true
+  docker run -d \
+    --name "$WORKER_CONTAINER" \
+    --network "$NETWORK_NAME" \
+    -e EXECUTOR_BACKEND=redis \
+    -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
+    -e SEEKDB_URL="${SEEKDB_URL}" \
+    -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
+    -e OCEANBASE_PORT="${OCEANBASE_PORT}" \
+    -e OCEANBASE_USER="${OCEANBASE_USER}" \
+    -e OCEANBASE_PASSWORD="${OCEANBASE_PASSWORD}" \
+    -e OCEANBASE_DB_NAME="${OCEANBASE_DB_NAME}" \
+    "$IMAGE_TAG" \
+    python -m agentseek_api.cli worker >/dev/null
+}
+
 start_backend() {
   docker rm -f "$BACKEND_CONTAINER" >/dev/null 2>&1 || true
 
@@ -216,6 +235,7 @@ set_backend_defaults "$SEEKDB_DOCKER_BACKEND"
 
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 docker network create "$NETWORK_NAME" >/dev/null
+mkdir -p "$STATE_DIR"
 
 uv run agentseek-api build --config "$CONFIG_PATH" -t "$IMAGE_TAG"
 
@@ -249,22 +269,21 @@ BASE_URL="http://127.0.0.1:${API_PORT}"
 export BASE_URL
 wait_for_api "$BASE_URL"
 
-docker rm -f "$WORKER_CONTAINER" >/dev/null 2>&1 || true
-docker run -d \
-  --name "$WORKER_CONTAINER" \
-  --network "$NETWORK_NAME" \
-  -e EXECUTOR_BACKEND=redis \
-  -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
-  -e SEEKDB_URL="${SEEKDB_URL}" \
-  -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
-  -e OCEANBASE_PORT="${OCEANBASE_PORT}" \
-  -e OCEANBASE_USER="${OCEANBASE_USER}" \
-  -e OCEANBASE_PASSWORD="${OCEANBASE_PASSWORD}" \
-  -e OCEANBASE_DB_NAME="${OCEANBASE_DB_NAME}" \
-  "$IMAGE_TAG" \
-  python -m agentseek_api.cli worker >/dev/null
+start_worker
 
 if ! uv run python scripts/verify_docker_api.py --base-url "$BASE_URL" --mode full; then
+  print_logs
+  exit 1
+fi
+
+if ! uv run python scripts/verify_docker_api.py --base-url "$BASE_URL" --mode resume-seed >"$RESUME_STATE_FILE"; then
+  print_logs
+  exit 1
+fi
+
+start_worker
+
+if ! uv run python scripts/verify_docker_api.py --base-url "$BASE_URL" --mode resume-check --state-file "$RESUME_STATE_FILE"; then
   print_logs
   exit 1
 fi

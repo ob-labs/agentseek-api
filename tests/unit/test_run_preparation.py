@@ -328,8 +328,15 @@ async def test_prepare_run_cleans_protocol_state_when_submit_fails(monkeypatch: 
     assert fake_thread.status == "error"
     assert protocol_broker._active_runs["t1"] == 0
     assert published_lifecycle == [
-        {"thread_id": "t1", "event": "started", "graph_name": "default", "persist": False},
-        {"thread_id": "t1", "event": "failed", "graph_name": "default", "error": "submit failed", "persist": False},
+        {"thread_id": "t1", "event": "started", "graph_name": "default", "persist": False, "seq": None},
+        {
+            "thread_id": "t1",
+            "event": "failed",
+            "graph_name": "default",
+            "error": "submit failed",
+            "persist": False,
+            "seq": None,
+        },
     ]
 
 
@@ -358,7 +365,14 @@ async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(monke
 
     assert protocol_broker._active_runs["t1"] == 0
     assert published_lifecycle == [
-        {"thread_id": "t1", "event": "failed", "graph_name": "default", "error": "Run cancelled", "persist": False}
+        {
+            "thread_id": "t1",
+            "event": "failed",
+            "graph_name": "default",
+            "error": "Run cancelled",
+            "persist": False,
+            "seq": None,
+        }
     ]
 
 
@@ -455,12 +469,13 @@ async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypat
     assert fake_thread.status == "interrupted"
     assert protocol_broker._active_runs["t1"] == 0
     assert published_lifecycle == [
-        {"thread_id": "t1", "event": "started", "graph_name": "subgraph_hitl_agent", "persist": False},
+        {"thread_id": "t1", "event": "started", "graph_name": "subgraph_hitl_agent", "persist": False, "seq": None},
         {
             "thread_id": "t1",
             "event": "failed",
             "graph_name": "subgraph_hitl_agent",
             "error": "submit failed",
             "persist": False,
+            "seq": None,
         },
     ]

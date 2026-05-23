@@ -7,6 +7,20 @@ from redis.asyncio import Redis, from_url
 from agentseek_api.services.run_jobs import RunExecutionJob
 from agentseek_api.settings import settings
 
+_RENEW_WORKER_LOCK_SCRIPT = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("EXPIRE", KEYS[1], tonumber(ARGV[2]))
+end
+return 0
+"""
+
+_RELEASE_WORKER_LOCK_SCRIPT = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("DEL", KEYS[1])
+end
+return 0
+"""
+
 
 class RedisRunQueue:
     def __init__(
@@ -48,16 +62,22 @@ class RedisRunQueue:
         return bool(acquired)
 
     async def renew_worker_lock(self, worker_id: str, *, ttl_seconds: int) -> bool:
-        current_owner = await self.client.get(self.worker_lock_key)
-        if current_owner != worker_id:
-            return False
-        renewed = await self.client.expire(self.worker_lock_key, ttl_seconds)
+        renewed = await self.client.eval(
+            _RENEW_WORKER_LOCK_SCRIPT,
+            1,
+            self.worker_lock_key,
+            worker_id,
+            str(ttl_seconds),
+        )
         return bool(renewed)
 
     async def release_worker_lock(self, worker_id: str) -> None:
-        current_owner = await self.client.get(self.worker_lock_key)
-        if current_owner == worker_id:
-            await self.client.delete(self.worker_lock_key)
+        await self.client.eval(
+            _RELEASE_WORKER_LOCK_SCRIPT,
+            1,
+            self.worker_lock_key,
+            worker_id,
+        )
 
     async def close(self) -> None:
         close = getattr(self.client, "aclose", None)

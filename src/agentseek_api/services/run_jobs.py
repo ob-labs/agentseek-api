@@ -13,6 +13,8 @@ from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import (
     add_thread_stream_event_to_session,
     add_run_stream_event_to_session,
+    next_run_stream_seq,
+    next_thread_stream_seq,
     persist_run_stream_event,
     persist_thread_stream_event,
 )
@@ -79,7 +81,8 @@ async def _publish_lifecycle(
         kwargs["graph_name"] = graph_name
     if error is not None:
         kwargs["error"] = error
-    published = publish_lifecycle_event(thread_id, persist=False, **kwargs)
+    seq = await next_thread_stream_seq(thread_id)
+    published = publish_lifecycle_event(thread_id, persist=False, seq=seq, **kwargs)
     if session is None:
         await persist_thread_stream_event(thread_id, published)
         return
@@ -98,7 +101,8 @@ async def _publish_run_event(
     persist: bool = True,
     **payload: Any,
 ) -> tuple[int, dict[str, Any]] | None:
-    published = run_broker.publish(run_id, event, **payload)
+    seq = await next_run_stream_seq(run_id)
+    published = run_broker.publish(run_id, event, seq=seq, **payload)
     if published is None:
         return None
     seq, event_payload = published

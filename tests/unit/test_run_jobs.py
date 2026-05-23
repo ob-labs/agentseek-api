@@ -119,8 +119,9 @@ async def test_execute_run_job_persists_terminal_lifecycle_before_final_commit(
         error: str | None = None,
         namespace: list[str] | None = None,
         persist: bool = True,
+        seq: int | None = None,
     ) -> dict[str, Any]:
-        _ = (graph_name, error, namespace)
+        _ = (graph_name, error, namespace, seq)
         operations.append(f"publish:lifecycle:{event}:{persist}")
         return {
             "seq": 3,
