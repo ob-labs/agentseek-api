@@ -193,6 +193,54 @@ graph = builder.compile()
     assert result["value"] == "basic-config"
 
 
+def test_manifest_preserves_graph_metadata_for_mcp(tmp_path: Path) -> None:
+    graph_file = tmp_path / "graph.py"
+    graph_file.write_text(
+        """
+from langgraph.graph import END, START, StateGraph
+
+builder = StateGraph(dict)
+builder.add_node("node", lambda state: {"answer": state["question"]})
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "langgraph.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "graphs": {
+                    "docs_agent": {
+                        "graph": "./graph.py:graph",
+                        "name": "docs_agent",
+                        "description": "Answer docs questions",
+                        "input_schema": {
+                            "type": "object",
+                            "properties": {"question": {"type": "string"}},
+                            "required": ["question"],
+                        },
+                        "output_schema": {
+                            "type": "object",
+                            "properties": {"answer": {"type": "string"}},
+                            "required": ["answer"],
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    entry = LangGraphService(manifest_path=manifest_path).get_entry("docs_agent")
+
+    assert entry.tool_name == "docs_agent"
+    assert entry.description == "Answer docs questions"
+    assert entry.input_schema["required"] == ["question"]
+    assert entry.output_schema["required"] == ["answer"]
+
+
 def test_manifest_supports_compiled_graph_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package_dir = tmp_path / "external_graph_pkg_compiled"
     package_dir.mkdir()

@@ -11,6 +11,9 @@ def test_echo_node_returns_echo_payload() -> None:
 def test_default_graph_entry_invokes_echo() -> None:
     service = LangGraphService()
     entry = service.get_entry("default")
+    assert entry.tool_name == "default"
+    assert entry.input_schema == {"type": "object"}
+    assert entry.output_schema == {"type": "object"}
     prepared = entry.prepare_input({"message": "hello"})
     result = entry.build_graph().invoke(prepared)
     assert entry.extract_output(result, {"message": "hello"})["echo"] == {"message": "hello"}

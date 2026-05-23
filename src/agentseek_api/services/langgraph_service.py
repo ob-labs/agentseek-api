@@ -2,7 +2,7 @@ import json
 import inspect
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -171,11 +171,19 @@ def _build_graph_from_definition(
     return _coerce_graph(built, checkpointer=checkpointer, store=store)
 
 
+def _normalize_schema(raw_value: Any) -> dict[str, Any]:
+    return raw_value if isinstance(raw_value, dict) else {"type": "object"}
+
+
 @dataclass
 class GraphEntry:
     graph_factory: GraphFactory
     prepare_input: PrepareInput
     extract_output: ExtractOutput
+    tool_name: str
+    description: str = ""
+    input_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object"})
+    output_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object"})
 
     def build_graph(self, checkpointer: Any | None = None, store: Any | None = None) -> Pregel:
         return _build_graph_from_definition(self.graph_factory, checkpointer, store)
@@ -189,6 +197,7 @@ class LangGraphService:
             graph_factory=_build_echo_graph,
             prepare_input=_echo_prepare,
             extract_output=_echo_extract,
+            tool_name="default",
         )
         self._register_sample_graphs()
         self._register_manifest_graphs(manifest_path=manifest_path)
@@ -270,6 +279,10 @@ class LangGraphService:
                 graph_factory=graph_factory,
                 prepare_input=prepare_input,
                 extract_output=extract_output,
+                tool_name=str(config.get("name") or graph_id),
+                description=str(config.get("description") or ""),
+                input_schema=_normalize_schema(config.get("input_schema")),
+                output_schema=_normalize_schema(config.get("output_schema")),
             )
 
     def register(
@@ -279,11 +292,19 @@ class LangGraphService:
         graph_factory: GraphFactory,
         prepare_input: PrepareInput,
         extract_output: ExtractOutput,
+        tool_name: str | None = None,
+        description: str = "",
+        input_schema: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> None:
         self._registry[graph_id] = GraphEntry(
             graph_factory=graph_factory,
             prepare_input=prepare_input,
             extract_output=extract_output,
+            tool_name=tool_name or graph_id,
+            description=description,
+            input_schema=_normalize_schema(input_schema),
+            output_schema=_normalize_schema(output_schema),
         )
 
     def get_entry(self, graph_id: str | None) -> GraphEntry:
