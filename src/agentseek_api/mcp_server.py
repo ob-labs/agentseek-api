@@ -1,15 +1,22 @@
 from __future__ import annotations
 
+from contextvars import ContextVar
 import json
 from dataclasses import dataclass
 from typing import Any
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from mcp.server.lowlevel.server import Server
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 import mcp.types as types
 
 from agentseek_api import __version__
+from agentseek_api.core.auth_middleware import get_auth_backend
+from agentseek_api.models.auth import User
 from agentseek_api.services.langgraph_service import GraphEntry, LangGraphService, get_langgraph_service
+
+_current_mcp_user: ContextVar[User | None] = ContextVar("current_mcp_user", default=None)
 
 
 class _StreamableHTTPASGIApp:
@@ -20,11 +27,34 @@ class _StreamableHTTPASGIApp:
         await self.session_manager.handle_request(scope, receive, send)
 
 
+class _AuthenticatedMCPASGIApp:
+    def __init__(self, inner_app: _StreamableHTTPASGIApp) -> None:
+        self.inner_app = inner_app
+
+    async def __call__(self, scope, receive, send) -> None:  # pragma: no cover
+        if scope["type"] != "http":
+            await self.inner_app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        user = await get_auth_backend().authenticate(request)
+        if not user.is_authenticated:
+            response = JSONResponse({"detail": "Not authenticated"}, status_code=401)
+            await response(scope, receive, send)
+            return
+
+        token = _current_mcp_user.set(user)
+        try:
+            await self.inner_app(scope, receive, send)
+        finally:
+            _current_mcp_user.reset(token)
+
+
 @dataclass
 class MCPMount:
     server: Server
     session_manager: StreamableHTTPSessionManager
-    app: _StreamableHTTPASGIApp
+    app: _AuthenticatedMCPASGIApp
 
 
 def graph_tool_result(result: dict[str, Any]) -> types.CallToolResult:
@@ -92,11 +122,12 @@ def build_mcp_mount(service: LangGraphService | None = None) -> MCPMount:
     server = build_mcp_server(service=service)
     session_manager = StreamableHTTPSessionManager(
         app=server,
-        json_response=False,
+        json_response=True,
         stateless=True,
     )
+    http_app = _StreamableHTTPASGIApp(session_manager)
     return MCPMount(
         server=server,
         session_manager=session_manager,
-        app=_StreamableHTTPASGIApp(session_manager),
+        app=_AuthenticatedMCPASGIApp(http_app),
     )
