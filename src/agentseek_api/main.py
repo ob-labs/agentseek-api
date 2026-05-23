@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import AsyncIterator
 from importlib.metadata import PackageNotFoundError, version as package_version
 
@@ -14,6 +14,7 @@ from agentseek_api.api.threads import router as threads_router
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.mcp_config import is_mcp_enabled
+from agentseek_api.mcp_server import MCPMount, build_mcp_mount
 from agentseek_api.settings import settings
 
 
@@ -21,7 +22,11 @@ from agentseek_api.settings import settings
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await db_manager.initialize()
     try:
-        yield
+        async with AsyncExitStack() as stack:
+            mcp_mount: MCPMount | None = getattr(_app.state, "mcp_mount", None)
+            if mcp_mount is not None:
+                await stack.enter_async_context(mcp_mount.session_manager.run())
+            yield
     finally:
         await db_manager.close()
 
@@ -92,6 +97,9 @@ def _apply_auth_openapi(app: FastAPI) -> None:
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
+    if is_mcp_enabled():
+        app.state.mcp_mount = build_mcp_mount()
+        app.mount("/mcp", app.state.mcp_mount.app)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
