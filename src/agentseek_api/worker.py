@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import signal
 from contextlib import suppress
 from uuid import uuid4
 
@@ -30,6 +31,7 @@ async def run_worker(
     queue: RedisRunQueue | None = None,
     stop_after_jobs: int | None = None,
     poll_timeout_seconds: int | None = None,
+    shutdown_event: asyncio.Event | None = None,
 ) -> int:
     if settings.EXECUTOR_BACKEND.strip().lower() != "redis":
         raise RuntimeError("The worker requires EXECUTOR_BACKEND=redis.")
@@ -40,10 +42,19 @@ async def run_worker(
     worker_id = str(uuid4())
     worker_lock_ttl_seconds = settings.REDIS_WORKER_LOCK_TTL_SECONDS
     lock_lost = asyncio.Event()
+    stop_requested = shutdown_event or asyncio.Event()
     heartbeat_task: asyncio.Task[None] | None = None
     acquired_lock = False
+    registered_signals: list[signal.Signals] = []
+    loop = asyncio.get_running_loop()
 
     try:
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(signum, stop_requested.set)
+            except (NotImplementedError, RuntimeError, ValueError):
+                continue
+            registered_signals.append(signum)
         acquired_lock = await run_queue.acquire_worker_lock(worker_id, ttl_seconds=worker_lock_ttl_seconds)
         if not acquired_lock:
             raise RuntimeError("Another Redis worker is already active.")
@@ -57,7 +68,7 @@ async def run_worker(
         )
         await run_queue.requeue_inflight()
         timeout_seconds = poll_timeout_seconds if poll_timeout_seconds is not None else settings.REDIS_WORKER_POLL_TIMEOUT_SECONDS
-        while stop_after_jobs is None or processed < stop_after_jobs:
+        while not stop_requested.is_set() and (stop_after_jobs is None or processed < stop_after_jobs):
             if lock_lost.is_set():
                 raise RuntimeError("Redis worker lost its active lease.")
             reserved = await run_queue.reserve(timeout_seconds=timeout_seconds)
@@ -70,6 +81,8 @@ async def run_worker(
             await run_queue.ack(token)
             processed += 1
     finally:
+        for signum in registered_signals:
+            loop.remove_signal_handler(signum)
         if heartbeat_task is not None:
             heartbeat_task.cancel()
             with suppress(asyncio.CancelledError):

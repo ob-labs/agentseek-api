@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from agentseek_api.services.run_jobs import RunExecutionJob
@@ -37,6 +39,17 @@ class FakeQueue:
 
     async def close(self) -> None:
         self.closed = True
+
+
+class BlockingQueue(FakeQueue):
+    def __init__(self, release_event) -> None:
+        super().__init__([])
+        self.release_event = release_event
+
+    async def reserve(self, *, timeout_seconds: int) -> tuple[RunExecutionJob, str] | None:
+        _ = timeout_seconds
+        await self.release_event.wait()
+        return None
 
 
 @pytest.mark.asyncio
@@ -105,3 +118,38 @@ async def test_run_worker_rejects_second_live_worker(monkeypatch: pytest.MonkeyP
     assert [event[0] for event in queue.lock_events] == ["acquire"]
     assert queue.requeue_calls == 0
     assert queue.closed is True
+
+
+@pytest.mark.asyncio
+async def test_run_worker_releases_lock_on_graceful_shutdown(monkeypatch: pytest.MonkeyPatch) -> None:
+    shutdown_event = asyncio.Event()
+    queue = BlockingQueue(shutdown_event)
+    lifecycle: list[str] = []
+
+    async def fake_initialize() -> None:
+        lifecycle.append("initialize")
+
+    async def fake_close() -> None:
+        lifecycle.append("close")
+
+    monkeypatch.setattr(worker_module.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(worker_module.db_manager, "initialize", fake_initialize)
+    monkeypatch.setattr(worker_module.db_manager, "close", fake_close)
+
+    task = asyncio.create_task(
+        worker_module.run_worker(
+            queue=queue,
+            poll_timeout_seconds=0,
+            shutdown_event=shutdown_event,
+        )
+    )
+    await asyncio.sleep(0)
+    shutdown_event.set()
+
+    processed = await task
+
+    assert processed == 0
+    assert queue.requeue_calls == 1
+    assert queue.closed is True
+    assert lifecycle == ["initialize", "close"]
+    assert [event[0] for event in queue.lock_events] == ["acquire", "release"]

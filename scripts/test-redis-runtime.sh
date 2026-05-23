@@ -19,7 +19,7 @@ STATE_DIR="${STATE_DIR:-$ROOT_DIR/.tmp/redis-runtime}"
 RESUME_STATE_FILE="$STATE_DIR/resume-state.json"
 
 cleanup() {
-  docker rm -f "$WORKER_CONTAINER" >/dev/null 2>&1 || true
+  stop_worker
   docker rm -f "$API_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$BACKEND_CONTAINER" >/dev/null 2>&1 || true
@@ -180,8 +180,15 @@ PY
   fi
 }
 
-start_worker() {
+stop_worker() {
+  if docker ps --format '{{.Names}}' | grep -Fxq "$WORKER_CONTAINER"; then
+    docker stop -t 10 "$WORKER_CONTAINER" >/dev/null 2>&1 || true
+  fi
   docker rm -f "$WORKER_CONTAINER" >/dev/null 2>&1 || true
+}
+
+start_worker() {
+  stop_worker
   docker run -d \
     --name "$WORKER_CONTAINER" \
     --network "$NETWORK_NAME" \
