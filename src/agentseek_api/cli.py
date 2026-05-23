@@ -298,6 +298,20 @@ def _execute_runtime_command(args: argparse.Namespace, *, runner: Callable[..., 
 def _execute_worker_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    if runner is _default_runner:
+        from agentseek_api import worker as worker_module
+
+        previous_env = os.environ.copy()
+        previous_cwd = Path.cwd()
+        try:
+            os.environ.clear()
+            os.environ.update(env)
+            os.chdir(cwd)
+            return worker_module.main()
+        finally:
+            os.chdir(previous_cwd)
+            os.environ.clear()
+            os.environ.update(previous_env)
     return runner(build_worker_command(), env=env, cwd=str(cwd))
 
 
