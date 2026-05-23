@@ -10,7 +10,14 @@ def is_mcp_enabled() -> bool:
     payload = get_active_config_payload()
     if payload is None:
         return False
+    if "http" not in payload:
+        return True
     http = payload.get("http")
     if not isinstance(http, dict):
+        return False
+    disable_mcp = http.get("disable_mcp")
+    if disable_mcp is None:
         return True
-    return http.get("disable_mcp") is not True
+    if isinstance(disable_mcp, bool):
+        return disable_mcp is not True
+    return False

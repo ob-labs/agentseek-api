@@ -272,6 +272,77 @@ graph = builder.compile()
         LangGraphService(manifest_path=manifest_path)
 
 
+def test_manifest_rejects_invalid_mcp_metadata_types(tmp_path: Path) -> None:
+    graph_file = tmp_path / "graph.py"
+    graph_file.write_text(
+        """
+from langgraph.graph import END, START, StateGraph
+
+builder = StateGraph(dict)
+builder.add_node("node", lambda state: state)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "langgraph.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "graphs": {
+                    "bad": {
+                        "graph": "./graph.py:graph",
+                        "name": 123,
+                        "description": ["wrong"],
+                        "input_schema": [],
+                        "output_schema": "bad",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GraphManifestError, match="field 'name' must be a non-empty string"):
+        LangGraphService(manifest_path=manifest_path)
+
+
+def test_manifest_rejects_invalid_mcp_schema_types(tmp_path: Path) -> None:
+    graph_file = tmp_path / "graph.py"
+    graph_file.write_text(
+        """
+from langgraph.graph import END, START, StateGraph
+
+builder = StateGraph(dict)
+builder.add_node("node", lambda state: state)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "langgraph.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "graphs": {
+                    "bad": {
+                        "graph": "./graph.py:graph",
+                        "name": "bad_tool",
+                        "input_schema": [],
+                        "output_schema": "bad",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GraphManifestError, match="field 'input_schema' must be an object"):
+        LangGraphService(manifest_path=manifest_path)
+
+
 def test_manifest_supports_compiled_graph_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package_dir = tmp_path / "external_graph_pkg_compiled"
     package_dir.mkdir()

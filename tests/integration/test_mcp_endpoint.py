@@ -283,3 +283,46 @@ def test_mcp_route_is_not_mounted_when_disabled(monkeypatch: pytest.MonkeyPatch,
         response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
 
     assert response.status_code == 404
+
+
+def test_mcp_route_is_not_mounted_for_invalid_http_section(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    monkeypatch.setattr(settings, "AUTH_TYPE", "noop")
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    graph_path = tmp_path / "graph.py"
+    graph_path.write_text(
+        """
+from langgraph.graph import END, START, StateGraph
+
+builder = StateGraph(dict)
+builder.add_node("node", lambda state: state)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "agentseek.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": {
+      "graph": "./graph.py:graph"
+    }
+  },
+  "http": []
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
+
+    with TestClient(create_app()) as client:
+        response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+
+    assert response.status_code == 404

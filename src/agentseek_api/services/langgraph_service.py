@@ -171,8 +171,34 @@ def _build_graph_from_definition(
     return _coerce_graph(built, checkpointer=checkpointer, store=store)
 
 
-def _normalize_schema(raw_value: Any) -> dict[str, Any]:
-    return raw_value if isinstance(raw_value, dict) else {"type": "object"}
+def _normalize_schema(raw_value: Any, *, graph_id: str, field_name: str) -> dict[str, Any]:
+    if raw_value is None:
+        return {"type": "object"}
+    if isinstance(raw_value, dict):
+        return raw_value
+    raise GraphManifestError(
+        f"AGENTSEEK_GRAPHS graph '{graph_id}' field '{field_name}' must be an object when provided."
+    )
+
+
+def _normalize_tool_name(raw_value: Any, *, graph_id: str) -> str:
+    if raw_value is None:
+        return graph_id
+    if isinstance(raw_value, str) and raw_value:
+        return raw_value
+    raise GraphManifestError(
+        f"AGENTSEEK_GRAPHS graph '{graph_id}' field 'name' must be a non-empty string when provided."
+    )
+
+
+def _normalize_description(raw_value: Any, *, graph_id: str) -> str:
+    if raw_value is None:
+        return ""
+    if isinstance(raw_value, str):
+        return raw_value
+    raise GraphManifestError(
+        f"AGENTSEEK_GRAPHS graph '{graph_id}' field 'description' must be a string when provided."
+    )
 
 
 @dataclass
@@ -279,10 +305,10 @@ class LangGraphService:
                 graph_factory=graph_factory,
                 prepare_input=prepare_input,
                 extract_output=extract_output,
-                tool_name=str(config.get("name") or graph_id),
-                description=str(config.get("description") or ""),
-                input_schema=_normalize_schema(config.get("input_schema")),
-                output_schema=_normalize_schema(config.get("output_schema")),
+                tool_name=_normalize_tool_name(config.get("name"), graph_id=graph_id),
+                description=_normalize_description(config.get("description"), graph_id=graph_id),
+                input_schema=_normalize_schema(config.get("input_schema"), graph_id=graph_id, field_name="input_schema"),
+                output_schema=_normalize_schema(config.get("output_schema"), graph_id=graph_id, field_name="output_schema"),
             )
 
     def register(
@@ -297,7 +323,8 @@ class LangGraphService:
         input_schema: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
     ) -> None:
-        resolved_tool_name = tool_name or graph_id
+        resolved_tool_name = _normalize_tool_name(tool_name, graph_id=graph_id)
+        resolved_description = _normalize_description(description, graph_id=graph_id)
         for existing_graph_id, existing_entry in self._registry.items():
             if existing_graph_id == graph_id:
                 continue
@@ -310,9 +337,9 @@ class LangGraphService:
             prepare_input=prepare_input,
             extract_output=extract_output,
             tool_name=resolved_tool_name,
-            description=description,
-            input_schema=_normalize_schema(input_schema),
-            output_schema=_normalize_schema(output_schema),
+            description=resolved_description,
+            input_schema=_normalize_schema(input_schema, graph_id=graph_id, field_name="input_schema"),
+            output_schema=_normalize_schema(output_schema, graph_id=graph_id, field_name="output_schema"),
         )
 
     def get_entry(self, graph_id: str | None) -> GraphEntry:
