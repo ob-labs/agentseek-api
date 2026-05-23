@@ -2,7 +2,7 @@ import json
 import inspect
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
@@ -171,11 +171,45 @@ def _build_graph_from_definition(
     return _coerce_graph(built, checkpointer=checkpointer, store=store)
 
 
+def _normalize_schema(raw_value: Any, *, graph_id: str, field_name: str) -> dict[str, Any]:
+    if raw_value is None:
+        return {"type": "object"}
+    if isinstance(raw_value, dict):
+        return raw_value
+    raise GraphManifestError(
+        f"AGENTSEEK_GRAPHS graph '{graph_id}' field '{field_name}' must be an object when provided."
+    )
+
+
+def _normalize_tool_name(raw_value: Any, *, graph_id: str) -> str:
+    if raw_value is None:
+        return graph_id
+    if isinstance(raw_value, str) and raw_value:
+        return raw_value
+    raise GraphManifestError(
+        f"AGENTSEEK_GRAPHS graph '{graph_id}' field 'name' must be a non-empty string when provided."
+    )
+
+
+def _normalize_description(raw_value: Any, *, graph_id: str) -> str:
+    if raw_value is None:
+        return ""
+    if isinstance(raw_value, str):
+        return raw_value
+    raise GraphManifestError(
+        f"AGENTSEEK_GRAPHS graph '{graph_id}' field 'description' must be a string when provided."
+    )
+
+
 @dataclass
 class GraphEntry:
     graph_factory: GraphFactory
     prepare_input: PrepareInput
     extract_output: ExtractOutput
+    tool_name: str
+    description: str = ""
+    input_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object"})
+    output_schema: dict[str, Any] = field(default_factory=lambda: {"type": "object"})
 
     def build_graph(self, checkpointer: Any | None = None, store: Any | None = None) -> Pregel:
         return _build_graph_from_definition(self.graph_factory, checkpointer, store)
@@ -189,6 +223,7 @@ class LangGraphService:
             graph_factory=_build_echo_graph,
             prepare_input=_echo_prepare,
             extract_output=_echo_extract,
+            tool_name="default",
         )
         self._register_sample_graphs()
         self._register_manifest_graphs(manifest_path=manifest_path)
@@ -270,6 +305,10 @@ class LangGraphService:
                 graph_factory=graph_factory,
                 prepare_input=prepare_input,
                 extract_output=extract_output,
+                tool_name=_normalize_tool_name(config.get("name"), graph_id=graph_id),
+                description=_normalize_description(config.get("description"), graph_id=graph_id),
+                input_schema=_normalize_schema(config.get("input_schema"), graph_id=graph_id, field_name="input_schema"),
+                output_schema=_normalize_schema(config.get("output_schema"), graph_id=graph_id, field_name="output_schema"),
             )
 
     def register(
@@ -279,11 +318,28 @@ class LangGraphService:
         graph_factory: GraphFactory,
         prepare_input: PrepareInput,
         extract_output: ExtractOutput,
+        tool_name: str | None = None,
+        description: str = "",
+        input_schema: dict[str, Any] | None = None,
+        output_schema: dict[str, Any] | None = None,
     ) -> None:
+        resolved_tool_name = _normalize_tool_name(tool_name, graph_id=graph_id)
+        resolved_description = _normalize_description(description, graph_id=graph_id)
+        for existing_graph_id, existing_entry in self._registry.items():
+            if existing_graph_id == graph_id:
+                continue
+            if existing_entry.tool_name == resolved_tool_name:
+                raise GraphManifestError(
+                    f"Graph '{graph_id}' declares duplicate MCP tool name '{resolved_tool_name}', already used by '{existing_graph_id}'."
+                )
         self._registry[graph_id] = GraphEntry(
             graph_factory=graph_factory,
             prepare_input=prepare_input,
             extract_output=extract_output,
+            tool_name=resolved_tool_name,
+            description=resolved_description,
+            input_schema=_normalize_schema(input_schema, graph_id=graph_id, field_name="input_schema"),
+            output_schema=_normalize_schema(output_schema, graph_id=graph_id, field_name="output_schema"),
         )
 
     def get_entry(self, graph_id: str | None) -> GraphEntry:

@@ -14,7 +14,16 @@ def _create_thread(client: TestClient) -> str:
 
 
 def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> None:
-    assistant_id = _create_assistant(client, graph_id="react_agent")
+    response = client.post(
+        "/assistants",
+        json={
+            "name": "finance-bot",
+            "graph_id": "react_agent",
+            "description": "Answers finance questions",
+        },
+    )
+    assert response.status_code == 200
+    assistant_id = response.json()["assistant_id"]
 
     graph = client.get(f"/assistants/{assistant_id}/graph")
     assert graph.status_code == 200
@@ -22,8 +31,10 @@ def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> Non
 
     schemas = client.get(f"/assistants/{assistant_id}/schemas")
     assert schemas.status_code == 200
-    assert "input_schema" in schemas.json()
-    assert "output_schema" in schemas.json()
+    assert schemas.json()["name"] == "finance-bot"
+    assert schemas.json()["description"] == "Answers finance questions"
+    assert schemas.json()["input_schema"] == {"type": "object"}
+    assert schemas.json()["output_schema"] == {"type": "object"}
 
     subgraphs = client.get(f"/assistants/{assistant_id}/subgraphs")
     assert subgraphs.status_code == 200

@@ -148,11 +148,14 @@ async def get_assistant_graph(assistant_id: str) -> dict[str, object]:
 @router.get("/{assistant_id}/schemas")
 async def get_assistant_schemas(assistant_id: str) -> dict[str, object]:
     assistant = await get_assistant(assistant_id)
+    entry = get_langgraph_service().get_entry(assistant.graph_id)
     return {
         "assistant_id": assistant.assistant_id,
         "graph_id": assistant.graph_id,
-        "input_schema": {"type": "object"},
-        "output_schema": {"type": "object"},
+        "name": assistant.name,
+        "description": assistant.description,
+        "input_schema": entry.input_schema,
+        "output_schema": entry.output_schema,
     }
 
 

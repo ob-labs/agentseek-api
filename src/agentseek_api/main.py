@@ -1,9 +1,11 @@
-from contextlib import asynccontextmanager
+import inspect
+from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import AsyncIterator
 from importlib.metadata import PackageNotFoundError, version as package_version
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
 
 from agentseek_api import __version__
 from agentseek_api.api.assistants import router as assistants_api_router
@@ -11,8 +13,11 @@ from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
 from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
+from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
+from agentseek_api.core.mcp_config import is_mcp_enabled
+from agentseek_api.mcp_server import MCPMount, build_mcp_mount
 from agentseek_api.settings import settings
 
 
@@ -20,7 +25,11 @@ from agentseek_api.settings import settings
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await db_manager.initialize()
     try:
-        yield
+        async with AsyncExitStack() as stack:
+            mcp_mount: MCPMount | None = getattr(_app.state, "mcp_mount", None)
+            if mcp_mount is not None:
+                await stack.enter_async_context(mcp_mount.session_manager.run())
+            yield
     finally:
         await db_manager.close()
 
@@ -39,7 +48,7 @@ def _langchain_oceanbase_version() -> str:
         return "unknown"
 
 
-def _feature_flags() -> dict[str, bool]:
+def _feature_flags(*, mcp_enabled: bool) -> dict[str, bool]:
     return {
         "agents": True,
         "assistants": True,
@@ -48,7 +57,7 @@ def _feature_flags() -> dict[str, bool]:
         "crons": False,
         "store": True,
         "a2a": False,
-        "mcp": False,
+        "mcp": mcp_enabled,
         "protocol_v2": True,
     }
 
@@ -88,9 +97,35 @@ def _apply_auth_openapi(app: FastAPI) -> None:
     app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
+def _register_mcp_routes(app: FastAPI, mcp_mount: MCPMount) -> None:
+    for path in ("/mcp", "/mcp/"):
+        app.router.routes.append(
+            Route(
+                path,
+                endpoint=mcp_mount.app,
+                methods=["GET", "POST", "DELETE"],
+                include_in_schema=False,
+            )
+        )
+
+
+async def _resolve_mcp_user(app: FastAPI, request) -> object:
+    resolver = app.dependency_overrides.get(get_current_user, get_current_user)
+    resolved = resolver(request)
+    if inspect.isawaitable(resolved):
+        return await resolved
+    return resolved
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
+    app.state.mcp_enabled = is_mcp_enabled()
+    if app.state.mcp_enabled:
+        app.state.mcp_mount = build_mcp_mount(
+            user_resolver=lambda request: _resolve_mcp_user(app, request),
+        )
+        _register_mcp_routes(app, app.state.mcp_mount)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -107,7 +142,7 @@ def create_app() -> FastAPI:
         return {
             "version": __version__,
             "langgraph_py_version": _langgraph_py_version(),
-            "flags": _feature_flags(),
+            "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
             "metadata": _server_metadata(),
         }
 
@@ -125,7 +160,7 @@ def create_app() -> FastAPI:
                         "database": "ok",
                         "checkpointer": "ok",
                     },
-                    "flags": _feature_flags(),
+                    "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
                 }
             )
 

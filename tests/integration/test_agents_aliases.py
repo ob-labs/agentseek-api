@@ -40,7 +40,14 @@ def test_agents_alias_crud_matches_assistants_resource(client: TestClient) -> No
 
 
 def test_agents_alias_exposes_graph_schema_and_version_helpers(client: TestClient) -> None:
-    created = client.post("/assistants", json={"name": "agent-helpers", "graph_id": "default"})
+    created = client.post(
+        "/assistants",
+        json={
+            "name": "agent-helpers",
+            "graph_id": "default",
+            "description": "Custom helper description",
+        },
+    )
     assert created.status_code == 200
     assistant_id = created.json()["assistant_id"]
 
@@ -52,6 +59,8 @@ def test_agents_alias_exposes_graph_schema_and_version_helpers(client: TestClien
     schemas = client.get(f"/agents/{assistant_id}/schemas")
     assert schemas.status_code == 200
     assert schemas.json()["assistant_id"] == assistant_id
+    assert schemas.json()["name"] == "agent-helpers"
+    assert schemas.json()["description"] == "Custom helper description"
     assert schemas.json()["input_schema"] == {"type": "object"}
 
     latest = client.post(f"/agents/{assistant_id}/latest")

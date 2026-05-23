@@ -28,9 +28,9 @@ uv sync
 
 `agentseek-api` looks for config in this order:
 
-1. `agentseek.json`
-2. `langgraph.json`
-3. `AGENTSEEK_GRAPHS`, if it points to an existing file
+1. `AGENTSEEK_GRAPHS`, if it points to an existing file
+2. `agentseek.json`
+3. `langgraph.json`
 
 Minimal `langgraph.json`:
 
@@ -134,6 +134,7 @@ rejected when their runtime behavior is not implemented yet.
 - 🔌 Manifest-driven graph loading through `agentseek.json`, `langgraph.json`,
   or `AGENTSEEK_GRAPHS`
 - 🌊 SSE streaming with `message_chunk` events
+- 🧰 MCP tool exposure for registered graphs over Streamable HTTP
 - 🧵 Thread, run, wait, cancel, history, state, and protocol-v2 stream flows
 - 🤖 Agent resources exposed through both `/assistants` and `/agents`
 - 🧑‍💻 Human-in-the-loop resume through
@@ -166,6 +167,7 @@ Useful config fields:
 - `auth.path`: custom auth backend reference
 - `auth.openapi`: OpenAPI `securitySchemes` and `security` metadata for auth
 - `auth.disable_studio_auth`: accepted for LangGraph config compatibility
+- `http.disable_mcp`: disable the MCP endpoint
 - `base_image`, `python_version`, `image_distro`, `pip_config_file`,
   `dockerfile_lines`: Docker build customization fields
 
@@ -200,6 +202,97 @@ Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
   }
 }
 ```
+
+## 🔌 MCP
+
+AgentSeek API exposes registered graphs as MCP tools through a stateless
+Streamable HTTP endpoint at `/mcp`.
+
+### Behavior
+
+- Transport: Streamable HTTP
+- Session model: stateless
+- Auth: same as the rest of the API
+- Paths: `/mcp` and `/mcp/` are both accepted
+- Discovery source: registered graphs from `agentseek.json`,
+  `langgraph.json`, or `AGENTSEEK_GRAPHS`
+- Enablement: MCP is enabled by default; `http.disable_mcp: true` disables it
+- Safety: if the active config file exists but cannot be parsed, MCP stays disabled until the config is fixed
+
+Graph object entries can carry MCP-facing metadata directly in the manifest:
+
+```json
+{
+  "graphs": {
+    "docs_agent": {
+      "graph": "./docs_agent.py:graph",
+      "name": "docs_agent",
+      "description": "Answers documentation questions",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "question": { "type": "string" }
+        },
+        "required": ["question"]
+      },
+      "output_schema": {
+        "type": "object",
+        "properties": {
+          "answer": { "type": "string" }
+        },
+        "required": ["answer"]
+      }
+    }
+  }
+}
+```
+
+When these fields are omitted, AgentSeek falls back to:
+
+- tool name = graph id
+- description = empty string
+- input schema = `{"type": "object"}`
+- output schema = `{"type": "object"}`
+
+### Disable MCP
+
+Set `http.disable_mcp` in your config file:
+
+```json
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "http": {
+    "disable_mcp": true
+  }
+}
+```
+
+### Python client example
+
+```python
+import httpx
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
+
+async with httpx.AsyncClient(
+    headers={"X-API-Key": "secret"},
+    trust_env=False,
+) as http_client:
+    async with streamable_http_client(
+        url="http://127.0.0.1:2024/mcp",
+        http_client=http_client,
+    ) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            tools = await session.list_tools()
+            print(tools)
+```
+
+This milestone only covers exposing AgentSeek graphs as MCP tools. It does not
+add outbound MCP client support inside AgentSeek graphs.
 
 ## 📚 Use As A Library
 
