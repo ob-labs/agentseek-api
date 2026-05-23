@@ -7,18 +7,29 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant, Run, Thread
 from agentseek_api.models.auth import User
 from agentseek_api.services.executor import get_executor
-from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
-from agentseek_api.services.run_state import run_broker
-from agentseek_api.services.stream_persistence import (
-    add_run_stream_event_to_session,
-    persist_run_stream_event,
-    persist_thread_stream_event,
-)
-from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
+from agentseek_api.services import run_jobs as run_jobs_module
+from agentseek_api.services.run_jobs import RunExecutionJob
+
+execute_run = run_jobs_module.execute_run
+run_broker = run_jobs_module.run_broker
+_publish_run_event = run_jobs_module._publish_run_event
+_persist_thread_snapshot = run_jobs_module._persist_thread_snapshot
+add_run_stream_event_to_session = run_jobs_module.add_run_stream_event_to_session
+publish_lifecycle_event = run_jobs_module.publish_lifecycle_event
+thread_protocol_broker = run_jobs_module.thread_protocol_broker
+RunExecutionResult = run_jobs_module.RunExecutionResult
+UNSET = run_jobs_module.UNSET
 
 
-def _is_cancelled_run(run: Run) -> bool:
-    return run.status == "error" and run.last_error == "Run cancelled"
+async def _publish_lifecycle(
+    thread_id: str,
+    *,
+    event: str,
+    graph_name: str | None = None,
+    error: str | None = None,
+) -> None:
+    run_jobs_module.publish_lifecycle_event = publish_lifecycle_event
+    await run_jobs_module._publish_lifecycle(thread_id, event=event, graph_name=graph_name, error=error)
 
 
 async def _persist_submission_failure(
@@ -44,43 +55,6 @@ async def _persist_submission_failure(
         await session.commit()
 
 
-async def _publish_lifecycle(
-    thread_id: str,
-    *,
-    event: str,
-    graph_name: str | None = None,
-    error: str | None = None,
-) -> None:
-    kwargs: dict[str, Any] = {"event": event}
-    if graph_name is not None:
-        kwargs["graph_name"] = graph_name
-    if error is not None:
-        kwargs["error"] = error
-    published = publish_lifecycle_event(thread_id, **kwargs)
-    await persist_thread_stream_event(thread_id, published)
-
-
-async def _publish_run_event(
-    run_id: str,
-    event: str,
-    *,
-    persist: bool = True,
-    **payload: Any,
-) -> tuple[int, dict[str, Any]] | None:
-    published = run_broker.publish(run_id, event, **payload)
-    if published is None:
-        return None
-    seq, event_payload = published
-    if persist:
-        await persist_run_stream_event(run_id, seq=seq, payload=event_payload)
-    return seq, event_payload
-
-
-async def _persist_thread_snapshot(thread_id: str) -> None:
-    for event in thread_protocol_broker.snapshot_records(thread_id):
-        await persist_thread_stream_event(thread_id, event)
-
-
 async def _execute_and_persist(
     *,
     run_id: str,
@@ -91,83 +65,24 @@ async def _execute_and_persist(
     resume: Any | None = None,
     is_resume: bool = False,
 ) -> None:
-    session_factory = db_manager.get_session_factory()
-    try:
-        async with session_factory() as execution_session:
-            db_run = await execution_session.scalar(select(Run).where(Run.run_id == run_id))
-            if db_run is None:
-                await _publish_lifecycle(
-                    thread_id,
-                    event="failed",
-                    graph_name=graph_id,
-                    error="Run was deleted before execution started",
-                )
-                return
-            if _is_cancelled_run(db_run):
-                await _publish_lifecycle(
-                    thread_id,
-                    event="failed",
-                    graph_name=graph_id,
-                    error=db_run.last_error,
-                )
-                return
-
-            db_run.status = "running"
-            db_run.last_error = None
-            thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
-            if thread is not None:
-                thread.status = "busy"
-                thread.state_updated_at = db_run.updated_at
-            await execution_session.commit()
-            await _publish_run_event(run_id, "start")
-
-            try:
-                result = await execute_run(
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    payload=payload,
-                    user_id=user_id,
-                    graph_id=graph_id,
-                    resume=resume if is_resume else UNSET,
-                )
-                await _persist_thread_snapshot(thread_id)
-                await execution_session.refresh(db_run)
-                if not _is_cancelled_run(db_run):
-                    _apply_execution_result(db_run, result)
-            except Exception as exc:  # noqa: BLE001
-                await execution_session.refresh(db_run)
-                if not _is_cancelled_run(db_run):
-                    db_run.status = "error"
-                    db_run.last_error = str(exc)
-
-            thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == thread_id))
-            if thread is not None:
-                thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
-                thread.state_updated_at = db_run.updated_at
-            terminal_run_event = await _publish_run_event(run_id, "end", status=db_run.status, persist=False)
-            if terminal_run_event is not None:
-                seq, event_payload = terminal_run_event
-                await add_run_stream_event_to_session(execution_session, run_id, seq=seq, payload=event_payload)
-            await execution_session.commit()
-            lifecycle_state = "completed"
-            if db_run.status == "interrupted":
-                lifecycle_state = "interrupted"
-            elif db_run.status == "error":
-                lifecycle_state = "failed"
-            await _publish_lifecycle(
-                thread_id,
-                event=lifecycle_state,
-                graph_name=graph_id,
-                error=db_run.last_error,
-            )
-    finally:
-        thread_protocol_broker.run_finished(thread_id)
-
-
-def _apply_execution_result(db_run: Run, result: RunExecutionResult) -> None:
-    db_run.output_json = result.output
-    db_run.last_error = None
-    db_run.status = "interrupted" if result.interrupted else "success"
+    run_jobs_module.execute_run = execute_run
+    run_jobs_module.run_broker = run_broker
+    run_jobs_module._publish_run_event = _publish_run_event
+    run_jobs_module._persist_thread_snapshot = _persist_thread_snapshot
+    run_jobs_module.add_run_stream_event_to_session = add_run_stream_event_to_session
+    run_jobs_module.publish_lifecycle_event = publish_lifecycle_event
+    run_jobs_module.thread_protocol_broker = thread_protocol_broker
+    await run_jobs_module.execute_run_job(
+        RunExecutionJob(
+            run_id=run_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            payload=payload,
+            graph_id=graph_id,
+            resume=resume,
+            is_resume=is_resume,
+        )
+    )
 
 
 async def _load_run(run_id: str) -> Run | None:
@@ -215,7 +130,7 @@ async def prepare_and_submit_run(
     await _publish_lifecycle(thread_id, event="started", graph_name=graph_id)
     try:
         await get_executor().submit(
-            lambda: _execute_and_persist(
+            RunExecutionJob(
                 run_id=run.run_id,
                 thread_id=run.thread_id,
                 user_id=run.user_id,
@@ -269,7 +184,7 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
     await _publish_lifecycle(thread_id, event="started", graph_name=graph_id)
     try:
         await get_executor().submit(
-            lambda: _execute_and_persist(
+            RunExecutionJob(
                 run_id=run_id,
                 thread_id=thread_id,
                 user_id=run.user_id,

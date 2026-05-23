@@ -20,8 +20,13 @@ from agentseek_api.services.stream_persistence import (
     load_run_stream_events,
     parse_last_event_id,
 )
+from agentseek_api.settings import settings
 
 router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Runs"])
+
+TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
+REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
+REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
 
 
 async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
@@ -51,6 +56,47 @@ def _to_read_model(run: Run) -> RunRead:
         kwargs=run.kwargs_json,
         multitask_strategy=run.multitask_strategy,
     )
+
+
+def _uses_redis_executor() -> bool:
+    return settings.EXECUTOR_BACKEND.strip().lower() == "redis"
+
+
+async def _is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        status = await session.scalar(
+            select(Run.status).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user_id)
+        )
+    return status in TERMINAL_RUN_STATUSES
+
+
+async def _iter_persisted_run_records(
+    *,
+    run_id: str,
+    thread_id: str,
+    user_id: str,
+    after_seq: int,
+) -> AsyncIterator[tuple[int, dict[str, object]]]:
+    current_seq = after_seq
+    terminal_idle_polls = 0
+    while True:
+        records = await load_run_stream_events(run_id, after_seq=current_seq)
+        if records:
+            terminal_idle_polls = 0
+            for seq, event in records:
+                current_seq = max(current_seq, seq)
+                yield seq, event
+            continue
+
+        if await _is_run_terminal(run_id=run_id, thread_id=thread_id, user_id=user_id):
+            terminal_idle_polls += 1
+            if terminal_idle_polls >= REDIS_STREAM_TERMINAL_IDLE_POLLS:
+                return
+        else:
+            terminal_idle_polls = 0
+
+        await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
 
 
 @router.post("", response_model=RunRead)
@@ -105,7 +151,7 @@ async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current
             )
             if row is None:
                 raise HTTPException(status_code=404, detail="Run not found")
-            if row.status in {"success", "error", "interrupted"}:
+            if row.status in TERMINAL_RUN_STATUSES:
                 return _to_read_model(row)
         if asyncio.get_event_loop().time() > deadline:
             raise HTTPException(status_code=408, detail="Run wait timeout")
@@ -115,7 +161,7 @@ async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current
 @router.post("/wait", response_model=RunRead)
 async def create_run_wait(thread_id: str, payload: RunCreate, user: User = Depends(get_current_user)) -> RunRead:
     created = await create_run(thread_id, payload, user)
-    if created.status in {"success", "error", "interrupted"}:
+    if created.status in TERMINAL_RUN_STATUSES:
         return created
     return await wait_run(thread_id, created.run_id, user)
 
@@ -155,7 +201,7 @@ async def cancel_run(
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Run not found")
-        if row.status not in {"success", "error", "interrupted"}:
+        if row.status not in TERMINAL_RUN_STATUSES:
             row.status = "error"
             row.last_error = "Run cancelled"
             thread = await session.scalar(
@@ -223,7 +269,19 @@ async def stream_run(
             payload = json.dumps(event_payload)
             yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
 
-        if row.status in {"success", "error", "interrupted"}:
+        if row.status in TERMINAL_RUN_STATUSES:
+            return
+
+        if _uses_redis_executor():
+            async for seq, event in _iter_persisted_run_records(
+                run_id=run_id,
+                thread_id=thread_id,
+                user_id=user.identity,
+                after_seq=current_seq,
+            ):
+                event_name = str(event.get("event", "message"))
+                event_payload = {"run_id": run_id, **event}
+                yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
             return
 
         async for seq, event in run_broker.stream_records(run_id, after_seq=current_seq):

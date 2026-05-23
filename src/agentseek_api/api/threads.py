@@ -1,3 +1,4 @@
+import asyncio
 from copy import deepcopy
 from datetime import UTC, datetime
 import json
@@ -32,8 +33,13 @@ from agentseek_api.services.thread_checkpoint_store import (
     prune_checkpoints,
 )
 from agentseek_api.services.thread_protocol import thread_protocol_broker
+from agentseek_api.settings import settings
 
 router = APIRouter(prefix="/threads", tags=["Threads"])
+
+TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
+REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
+REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
 
 
 async def _best_effort_checkpointer_call(method_name: str, *args: object, **kwargs: object) -> None:
@@ -65,6 +71,57 @@ def _public_thread_config(config: dict[str, object] | None) -> dict[str, object]
     if not isinstance(config, dict):
         return {}
     return dict(config)
+
+
+def _uses_redis_executor() -> bool:
+    return settings.EXECUTOR_BACKEND.strip().lower() == "redis"
+
+
+async def _thread_has_active_runs(*, thread_id: str, user_id: str) -> bool:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        active_run_id = await session.scalar(
+            select(Run.run_id).where(
+                Run.thread_id == thread_id,
+                Run.user_id == user_id,
+                Run.status.not_in(TERMINAL_RUN_STATUSES),
+            )
+        )
+    return active_run_id is not None
+
+
+async def _iter_persisted_thread_events(
+    *,
+    thread_id: str,
+    payload: ProtocolEventStreamRequest,
+    user_id: str,
+    after_seq: int,
+) -> AsyncIterator[dict[str, Any]]:
+    current_seq = after_seq
+    terminal_idle_polls = 0
+    while True:
+        events = await load_thread_stream_events(
+            thread_id,
+            channels=payload.channels,
+            namespaces=payload.namespaces,
+            depth=payload.depth,
+            after_seq=current_seq,
+        )
+        if events:
+            terminal_idle_polls = 0
+            for event in events:
+                current_seq = max(current_seq, int(event.get("seq", 0)))
+                yield event
+            continue
+
+        if not await _thread_has_active_runs(thread_id=thread_id, user_id=user_id):
+            terminal_idle_polls += 1
+            if terminal_idle_polls >= REDIS_STREAM_TERMINAL_IDLE_POLLS:
+                return
+        else:
+            terminal_idle_polls = 0
+
+        await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
 
 
 def _filtered_thread_rows(rows: list[Thread], payload: ThreadSearchRequest) -> list[Thread]:
@@ -675,6 +732,19 @@ async def stream_thread_protocol_events(
             method = str(event.get("method", "event"))
             body = json.dumps(event)
             yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
+
+        if _uses_redis_executor():
+            async for event in _iter_persisted_thread_events(
+                thread_id=thread_id,
+                payload=payload,
+                user_id=user.identity,
+                after_seq=current_seq,
+            ):
+                seq = int(event.get("seq", 0))
+                method = str(event.get("method", "event"))
+                body = json.dumps(event)
+                yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
+            return
 
         async for event in thread_protocol_broker.stream(
             thread_id,

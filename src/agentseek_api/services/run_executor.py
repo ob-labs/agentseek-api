@@ -10,7 +10,7 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.runtime_store import UserScopedStore
 from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
 from agentseek_api.services.run_state import run_broker
-from agentseek_api.services.stream_persistence import persist_run_stream_event
+from agentseek_api.services.stream_persistence import next_run_stream_seq, persist_run_stream_event
 from agentseek_api.services.thread_protocol import (
     apublish_content_block_delta,
     apublish_content_block_finish,
@@ -730,7 +730,8 @@ async def execute_run(
     async for stream_event in graph.astream_events(invocation, config, version="v2"):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):
-            seq, published_payload = run_broker.publish(run_id, event_name, **event_payload)
+            seq = await next_run_stream_seq(run_id)
+            seq, published_payload = run_broker.publish(run_id, event_name, seq=seq, **event_payload)
             await persist_run_stream_event(run_id, seq=seq, payload=published_payload)
         raw_event_name = stream_event.get("event")
         if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:

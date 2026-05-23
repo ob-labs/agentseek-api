@@ -2,6 +2,8 @@ from collections.abc import Awaitable, Callable
 
 from fastapi.testclient import TestClient
 
+from agentseek_api.services.run_jobs import RunExecutionJob
+
 
 def _create_assistant(client: TestClient, *, graph_id: str = "default") -> str:
     response = client.post("/assistants", json={"name": f"{graph_id}-assistant", "graph_id": graph_id})
@@ -17,10 +19,10 @@ def _create_thread(client: TestClient, *, user_id: str = "default_user") -> str:
 
 class DeferredExecutor:
     def __init__(self) -> None:
-        self.submitted: list[Callable[[], Awaitable[None]]] = []
+        self.submitted: list[Callable[[], Awaitable[None]] | RunExecutionJob] = []
 
-    async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
-        self.submitted.append(func)
+    async def submit(self, job: Callable[[], Awaitable[None]] | RunExecutionJob) -> None:
+        self.submitted.append(job)
 
 
 def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:

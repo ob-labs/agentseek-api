@@ -3,10 +3,26 @@ import json
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
+from agentseek_api.api import runs as runs_api
+from agentseek_api.api import threads as threads_api
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import RunStreamEvent
+from agentseek_api.core.orm import Run, RunStreamEvent, Thread
+from agentseek_api.models.auth import User
+from agentseek_api.models.protocol import ProtocolEventStreamRequest
+from agentseek_api.services import run_jobs as run_jobs_module
+from agentseek_api.services import stream_persistence as stream_module
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.thread_protocol import publish_values_event, thread_protocol_broker
+
+
+class FakeRedisCounter:
+    def __init__(self) -> None:
+        self.counts: dict[str, int] = {}
+
+    async def incr(self, key: str) -> int:
+        value = self.counts.get(key, 0) + 1
+        self.counts[key] = value
+        return value
 
 
 def _parse_sse(stream_text: str) -> list[dict[str, object]]:
@@ -23,6 +39,38 @@ def _parse_sse(stream_text: str) -> list[dict[str, object]]:
         if event:
             events.append(event)
     return events
+
+
+async def _seed_running_run(*, user_id: str = "default_user") -> tuple[str, str]:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        thread = Thread(user_id=user_id, metadata_json={"case": "redis-run-stream"}, config_json={}, status="busy")
+        session.add(thread)
+        await session.flush()
+        run = Run(thread_id=thread.thread_id, assistant_id="assistant", user_id=user_id, status="running")
+        session.add(run)
+        await session.commit()
+        return thread.thread_id, run.run_id
+
+
+async def _seed_thread(*, user_id: str = "default_user") -> str:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        thread = Thread(user_id=user_id, metadata_json={"case": "redis-thread-stream"}, config_json={}, status="busy")
+        session.add(thread)
+        await session.commit()
+        return thread.thread_id
+
+
+async def _collect_stream_body(response: object) -> str:
+    body_iterator = getattr(response, "body_iterator")
+    chunks: list[str] = []
+    async for chunk in body_iterator:
+        if isinstance(chunk, bytes):
+            chunks.append(chunk.decode())
+        else:
+            chunks.append(str(chunk))
+    return "".join(chunks)
 
 
 def test_run_stream_replays_persisted_events_after_broker_state_is_cleared(client: TestClient) -> None:
@@ -56,6 +104,56 @@ def test_run_stream_replays_persisted_events_after_broker_state_is_cleared(clien
     assert replay_events
     assert all(int(str(event["id"])) > int(str(first_event_id)) for event in replay_events)
     assert replay_events[-1]["event"] == "end"
+
+
+def test_run_stream_polls_persisted_events_in_redis_mode(client: TestClient, monkeypatch) -> None:
+    thread_id, run_id = client.portal.call(_seed_running_run)
+    load_calls = {"count": 0}
+
+    async def fake_load_run_stream_events(requested_run_id: str, *, after_seq: int = 0) -> list[tuple[int, dict[str, object]]]:
+        assert requested_run_id == run_id
+        load_calls["count"] += 1
+        if load_calls["count"] == 1:
+            return []
+        if load_calls["count"] == 2 and after_seq == 0:
+            return [
+                (1, {"event": "start"}),
+                (2, {"event": "end", "status": "success"}),
+            ]
+        return []
+
+    async def fake_is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
+        _ = (run_id, thread_id, user_id)
+        return load_calls["count"] >= 2
+
+    def unexpected_stream_records(*args, **kwargs):
+        _ = (args, kwargs)
+
+        async def _iter():
+            raise AssertionError("Redis stream path should not subscribe to the API-process run broker")
+            yield 0, {}
+
+        return _iter()
+
+    monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(runs_api, "load_run_stream_events", fake_load_run_stream_events)
+    monkeypatch.setattr(runs_api, "_is_run_terminal", fake_is_run_terminal)
+    monkeypatch.setattr(runs_api.run_broker, "snapshot_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runs_api.run_broker, "stream_records", unexpected_stream_records)
+
+    response = client.portal.call(
+        runs_api.stream_run,
+        thread_id,
+        run_id,
+        User(identity="default_user", is_authenticated=True),
+        None,
+    )
+
+    body = client.portal.call(_collect_stream_body, response)
+    events = _parse_sse(body)
+    assert [event["event"] for event in events] == ["start", "end"]
+    assert events[-1]["data"]["status"] == "success"
 
 
 def test_protocol_stream_replays_persisted_events_after_broker_state_is_cleared(client: TestClient) -> None:
@@ -92,6 +190,121 @@ def test_protocol_stream_replays_persisted_events_after_broker_state_is_cleared(
     assert replay_events
     assert all(int(str(event["id"])) > int(str(first_event_id)) for event in replay_events)
     assert "values" in {event["event"] for event in replay_events}
+
+
+def test_thread_protocol_stream_polls_persisted_events_in_redis_mode(client: TestClient, monkeypatch) -> None:
+    thread_id = client.portal.call(_seed_thread)
+    load_calls = {"count": 0}
+
+    async def fake_load_thread_stream_events(
+        requested_thread_id: str,
+        *,
+        channels: list[str],
+        namespaces: list[list[str]] | None,
+        depth: int | None,
+        after_seq: int = 0,
+    ) -> list[dict[str, object]]:
+        assert requested_thread_id == thread_id
+        assert channels == ["lifecycle", "values"]
+        assert namespaces is None
+        assert depth is None
+        load_calls["count"] += 1
+        if load_calls["count"] == 1:
+            return []
+        if load_calls["count"] == 2 and after_seq == 0:
+            return [
+                {
+                    "seq": 1,
+                    "method": "values",
+                    "params": {"namespace": [], "timestamp": 1, "data": {"phase": "mid-run"}},
+                },
+                {
+                    "seq": 2,
+                    "method": "lifecycle",
+                    "params": {"namespace": [], "timestamp": 2, "data": {"event": "completed"}},
+                },
+            ]
+        return []
+
+    async def fake_thread_has_active_runs(*, thread_id: str, user_id: str) -> bool:
+        _ = (thread_id, user_id)
+        return load_calls["count"] < 2
+
+    def unexpected_thread_stream(*args, **kwargs):
+        _ = (args, kwargs)
+
+        async def _iter():
+            raise AssertionError("Redis protocol stream path should not subscribe to the API-process protocol broker")
+            yield {}
+
+        return _iter()
+
+    monkeypatch.setattr(threads_api.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(threads_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(threads_api, "load_thread_stream_events", fake_load_thread_stream_events)
+    monkeypatch.setattr(threads_api, "_thread_has_active_runs", fake_thread_has_active_runs)
+    monkeypatch.setattr(threads_api.thread_protocol_broker, "stream", unexpected_thread_stream)
+
+    response = client.portal.call(
+        threads_api.stream_thread_protocol_events,
+        thread_id,
+        ProtocolEventStreamRequest(channels=["lifecycle", "values"]),
+        User(identity="default_user", is_authenticated=True),
+        None,
+    )
+
+    body = client.portal.call(_collect_stream_body, response)
+    events = _parse_sse(body)
+    assert [event["event"] for event in events] == ["values", "lifecycle"]
+    assert events[0]["data"]["params"]["data"] == {"phase": "mid-run"}
+    assert events[1]["data"]["params"]["data"] == {"event": "completed"}
+
+
+def test_run_stream_persistence_uses_shared_seq_after_broker_reset(client: TestClient, monkeypatch) -> None:
+    fake_redis = FakeRedisCounter()
+    monkeypatch.setattr(stream_module.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(stream_module, "_redis_client", fake_redis)
+
+    client.portal.call(run_jobs_module._publish_run_event, "run-seq-reset", "start")
+    run_broker._events.clear()
+    run_broker._seqs.clear()
+    run_broker._signals.clear()
+    run_broker._next_seq.clear()
+    run_broker._completed_runs.clear()
+    run_broker._completed_order.clear()
+    client.portal.call(lambda: run_jobs_module._publish_run_event("run-seq-reset", "end", status="success"))
+
+    persisted = client.portal.call(stream_module.load_run_stream_events, "run-seq-reset")
+
+    assert [(seq, payload["event"]) for seq, payload in persisted] == [(1, "start"), (2, "end")]
+
+
+def test_thread_stream_persistence_uses_shared_seq_after_broker_reset(client: TestClient, monkeypatch) -> None:
+    fake_redis = FakeRedisCounter()
+    monkeypatch.setattr(stream_module.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(stream_module, "_redis_client", fake_redis)
+
+    client.portal.call(lambda: run_jobs_module._publish_lifecycle("thread-seq-reset", event="started", graph_name="default"))
+    thread_protocol_broker.delete_thread("thread-seq-reset")
+    client.portal.call(
+        lambda: run_jobs_module._publish_lifecycle(
+            "thread-seq-reset",
+            event="completed",
+            graph_name="default",
+        )
+    )
+
+    persisted = client.portal.call(
+        lambda: stream_module.load_thread_stream_events(
+            "thread-seq-reset",
+            channels=["lifecycle"],
+            namespaces=None,
+            depth=None,
+        )
+    )
+
+    assert [event["seq"] for event in persisted] == [1, 2]
+    assert [event["params"]["data"]["event"] for event in persisted] == ["started", "completed"]
 
 
 def test_protocol_events_are_persisted_when_published(client: TestClient) -> None:

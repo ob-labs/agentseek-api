@@ -22,6 +22,11 @@ class NullStore:
         return None
 
 
+def _is_already_exists_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "already exists" in message
+
+
 def _resolve_metadata_backend(*, configured_backend: str, url_drivername: str) -> str:
     normalized_backend = configured_backend.strip().lower()
     if normalized_backend in {"postgres", "postgresql"}:
@@ -106,7 +111,7 @@ class DatabaseManager:
         store_config = load_store_config(agentseek_graphs=settings.AGENTSEEK_GRAPHS)
         runtime_index = store_config.index.to_runtime_config()
         runtime_ttl = store_config.ttl.to_runtime_config()
-        self.engine = create_async_engine(metadata_db_url, pool_pre_ping=True)
+        self.engine = create_async_engine(metadata_db_url, pool_pre_ping=metadata_backend != "mysql")
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
@@ -185,7 +190,11 @@ class DatabaseManager:
                 raise RuntimeError("Store not initialized")
             setup = getattr(self._store, "setup", None)
             if callable(setup):
-                await asyncio.to_thread(setup)
+                try:
+                    await asyncio.to_thread(setup)
+                except Exception as exc:  # noqa: BLE001
+                    if not _is_already_exists_error(exc):
+                        raise
             self._store_setup_done = True
 
     async def close(self) -> None:

@@ -17,7 +17,7 @@ from langgraph.store.base import (
     SearchOp,
 )
 from sqlalchemy import MetaData, create_engine
-from sqlalchemy.engine import URL, make_url
+from sqlalchemy.engine import make_url
 from sqlalchemy.pool import StaticPool
 
 _USER_NAMESPACE_ROOT = "__agentseek_users__"

@@ -14,10 +14,11 @@ class RunEventBroker:
         self._completed_order: deque[str] = deque()
         self._max_completed_runs = max_completed_runs
 
-    def publish(self, run_id: str, event: str, **payload: Any) -> tuple[int, dict[str, Any]]:
+    def publish(self, run_id: str, event: str, *, seq: int | None = None, **payload: Any) -> tuple[int, dict[str, Any]]:
         event_payload = {"event": event, **payload}
-        seq = self._next_seq[run_id]
-        self._next_seq[run_id] += 1
+        if seq is None:
+            seq = self._next_seq[run_id]
+        self._next_seq[run_id] = max(self._next_seq[run_id], seq + 1)
         self._events[run_id].append(event_payload)
         self._seqs[run_id].append(seq)
         if event == "start":

@@ -238,6 +238,67 @@ jobs:
           SEEKDB_URL: ${{ matrix.backend.url }}
         run: make test-checkpoints
 
+  redis-durable-execution:
+    name: Redis Durable Execution (${{ matrix.backend.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref_name == 'develop' ||
+      github.ref_name == 'main' ||
+      startsWith(github.ref_name, 'release/') ||
+      startsWith(github.ref_name, 'hotfix/')
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: seekdb
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: oceanbase
+            docker_backend: oceanbase
+            image: oceanbase/oceanbase-ce:latest
+            mode: slim
+            user: root@test
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: mysql
+            docker_backend: mysql
+            image: mysql:8.4
+            user: root
+            password: root
+            port: "3306"
+            db_name: seekdb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Redis durable execution stack (${{ matrix.backend.name }})
+        env:
+          SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
+          SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+          OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode || '' }}
+          OCEANBASE_USER: ${{ matrix.backend.user }}
+          OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
+          OCEANBASE_PORT: ${{ matrix.backend.port }}
+          OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
+        run: make test-redis-docker
+
   pgsql-metadata-checkpoint-validation:
     name: PostgreSQL Metadata + Checkpoint Validation
     runs-on: ubuntu-latest

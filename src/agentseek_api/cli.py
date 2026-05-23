@@ -275,6 +275,10 @@ def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list
     return command
 
 
+def build_worker_command() -> list[str]:
+    return [sys.executable, "-m", "agentseek_api.worker"]
+
+
 def _default_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
     completed = subprocess.run(command, env=env, cwd=cwd, check=False)
     return completed.returncode
@@ -289,6 +293,26 @@ def _execute_runtime_command(args: argparse.Namespace, *, runner: Callable[..., 
         reload_enabled=getattr(args, "reload", False),
     )
     return runner(command, env=env, cwd=str(cwd))
+
+
+def _execute_worker_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
+    config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
+    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    if runner is _default_runner:
+        from agentseek_api import worker as worker_module
+
+        previous_env = os.environ.copy()
+        previous_cwd = Path.cwd()
+        try:
+            os.environ.clear()
+            os.environ.update(env)
+            os.chdir(cwd)
+            return worker_module.main()
+        finally:
+            os.chdir(previous_cwd)
+            os.environ.clear()
+            os.environ.update(previous_env)
+    return runner(build_worker_command(), env=env, cwd=str(cwd))
 
 
 def _load_config_payload(config_path: Path) -> dict[str, object]:
@@ -668,6 +692,8 @@ def _add_command_parsers(
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", default=DEFAULT_API_PORT, type=int)
 
+    subparsers.add_parser("worker", parents=[runtime_parent])
+
     subparsers.add_parser("version")
 
     build_parser = subparsers.add_parser("build", parents=[runtime_parent])
@@ -760,6 +786,8 @@ def run_namespace(
         if command == "serve":
             args.reload = False
             return _execute_runtime_command(args, runner=run, cwd=workdir)
+        if command == "worker":
+            return _execute_worker_command(args, runner=run, cwd=workdir)
         if command == "dockerfile":
             return _execute_dockerfile_command(args, stdout=out, cwd=workdir)
         if command == "build":
