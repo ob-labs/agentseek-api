@@ -13,6 +13,7 @@ from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
+from agentseek_api.core.mcp_config import is_mcp_enabled
 from agentseek_api.settings import settings
 
 
@@ -48,7 +49,7 @@ def _feature_flags() -> dict[str, bool]:
         "crons": False,
         "store": True,
         "a2a": False,
-        "mcp": False,
+        "mcp": is_mcp_enabled(),
         "protocol_v2": True,
     }
 

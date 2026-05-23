@@ -13,6 +13,7 @@ from typing import Protocol
 
 from fastapi import Request
 
+from agentseek_api.core.config_file import active_config_path, get_active_config_payload
 from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
 
@@ -140,18 +141,6 @@ def _load_python_file_backend(module_ref: str) -> object:
     return module
 
 
-def _active_config_path() -> Path | None:
-    if settings.AGENTSEEK_GRAPHS:
-        path = Path(settings.AGENTSEEK_GRAPHS).expanduser().resolve()
-        if path.exists():
-            return path
-    for candidate in ("agentseek.json", "langgraph.json"):
-        path = Path(candidate).resolve()
-        if path.exists():
-            return path
-    return None
-
-
 def _apply_config_dependencies(payload: dict[str, Any], *, config_path: Path) -> None:
     dependencies = payload.get("dependencies")
     if not isinstance(dependencies, list):
@@ -183,14 +172,9 @@ def _normalize_config_symbol_reference(reference: str, *, config_path: Path) -> 
 
 
 def get_config_auth_settings() -> ConfigAuthSettings:
-    config_path = _active_config_path()
-    if config_path is None:
-        return ConfigAuthSettings()
-    try:
-        payload = json.loads(config_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return ConfigAuthSettings()
-    if not isinstance(payload, dict):
+    config_path = active_config_path()
+    payload = get_active_config_payload()
+    if config_path is None or payload is None:
         return ConfigAuthSettings()
     raw_auth = payload.get("auth")
     if not isinstance(raw_auth, dict):
