@@ -116,7 +116,8 @@ uv run agentseek-api version
 - `worker`
   - Requires `EXECUTOR_BACKEND=redis`
   - Uses `REDIS_URL` plus the queue keys below
-  - Redis durable execution currently allows a single active worker lease at a time
+  - Redis durable execution currently uses a single active worker lease at a time
+  - Run and thread stream replay continues from persisted state after worker restarts
 - `build`
   - Use `-t, --tag` to set the image tag
   - Supports `--platform`, `--pull`, and `--no-pull`
@@ -139,10 +140,12 @@ rejected when their runtime behavior is not implemented yet.
   `POST /threads/{thread_id}/runs/{run_id}/resume`
 - 🗄️ SeekDB / OceanBase-first checkpoint persistence via
   `langchain-oceanbase`
-- 📦 Optional Redis-backed run handoff with a dedicated worker process
+- 📦 Redis-backed durable execution with a dedicated worker process
+- ♻️ Persisted run and thread stream replay for resume-after-restart flows
 - 🔐 `noop` and custom auth backends
 - 🐳 Dockerfile generation, image build, and local Docker runtime helpers
-- 🧪 Real backend validation and manual provider-backed streaming checks
+- 🧪 Real backend CI coverage across MySQL, SeekDB, OceanBase, and Redis runtime paths
+- 🧪 Manual provider-backed streaming checks for live SSE proof
 
 ## 🗂️ Config
 
@@ -256,6 +259,15 @@ parent api build --config ./langgraph.json -t my-api:dev
     `AUTH_JWT_ALGORITHM=HS256`, and `sub` as the user identity
 - Assistant management, thread, and run endpoints enforce configured auth.
 
+### Durable execution
+
+- Redis mode persists run stream events and protocol stream events into the
+  metadata database so stream replay does not depend on API-process memory.
+- Interrupted runs can be resumed after worker restart as long as Redis and the
+  metadata database stay available.
+- The worker owns a renewable Redis lease and exits if that lease is lost,
+  which prevents split-brain execution.
+
 ## 🧭 Examples
 
 - `examples/minimal_agentseek/agentseek.json`: minimal first-time config
@@ -293,7 +305,12 @@ Docker and live backend checks:
 make test-cli-docker
 make test-e2e
 make test-seekdb
+make test-redis-docker
 ```
+
+GitHub Actions also runs the Docker-backed backend matrix against MySQL,
+SeekDB, and OceanBase, including the dedicated `Redis Durable Execution`
+workflow jobs.
 
 For local embedded SeekDB smoke coverage, install the optional extra first:
 
