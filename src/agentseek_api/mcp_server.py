@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from contextvars import ContextVar
 from dataclasses import dataclass
+import inspect
 from typing import Any
 from uuid import uuid4
 
+from fastapi import HTTPException
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -36,24 +38,53 @@ class _StreamableHTTPASGIApp:
 
 
 class _AuthenticatedMCPASGIApp:
-    def __init__(self, inner_app: _StreamableHTTPASGIApp) -> None:
+    def __init__(self, inner_app: _StreamableHTTPASGIApp, *, user_resolver) -> None:
         self.inner_app = inner_app
+        self.user_resolver = user_resolver
+
+    @staticmethod
+    async def _buffer_request_messages(receive) -> list[dict[str, Any]]:
+        buffered: list[dict[str, Any]] = []
+        while True:
+            message = await receive()
+            buffered.append(dict(message))
+            if message["type"] != "http.request" or not message.get("more_body", False):
+                return buffered
+
+    @staticmethod
+    def _replay_receive(messages: list[dict[str, Any]]):
+        remaining = [dict(message) for message in messages]
+
+        async def _receive() -> dict[str, Any]:
+            if remaining:
+                return remaining.pop(0)
+            return {"type": "http.disconnect"}
+
+        return _receive
 
     async def __call__(self, scope, receive, send) -> None:  # pragma: no cover
         if scope["type"] != "http":
             await self.inner_app(scope, receive, send)
             return
 
-        request = Request(scope, receive=receive)
-        user = await get_auth_backend().authenticate(request)
-        if not user.is_authenticated:
+        buffered_messages = await self._buffer_request_messages(receive)
+        request = Request(scope, receive=self._replay_receive(buffered_messages))
+        try:
+            resolved = self.user_resolver(request)
+            user = await resolved if inspect.isawaitable(resolved) else resolved
+        except HTTPException as exc:
+            response = JSONResponse({"detail": exc.detail}, status_code=exc.status_code)
+            await response(scope, self._replay_receive(buffered_messages), send)
+            return
+
+        if not isinstance(user, User) or not user.is_authenticated:
             response = JSONResponse({"detail": "Not authenticated"}, status_code=401)
-            await response(scope, receive, send)
+            await response(scope, self._replay_receive(buffered_messages), send)
             return
 
         token = _current_mcp_user.set(user)
         try:
-            await self.inner_app(scope, receive, send)
+            await self.inner_app(scope, self._replay_receive(buffered_messages), send)
         finally:
             _current_mcp_user.reset(token)
 
@@ -146,7 +177,7 @@ def build_mcp_server(service: LangGraphService | None = None) -> Server:
     return server
 
 
-def build_mcp_mount(service: LangGraphService | None = None) -> MCPMount:
+def build_mcp_mount(service: LangGraphService | None = None, *, user_resolver=None) -> MCPMount:
     server = build_mcp_server(service=service)
     session_manager = StreamableHTTPSessionManager(
         app=server,
@@ -157,5 +188,5 @@ def build_mcp_mount(service: LangGraphService | None = None) -> MCPMount:
     return MCPMount(
         server=server,
         session_manager=session_manager,
-        app=_AuthenticatedMCPASGIApp(http_app),
+        app=_AuthenticatedMCPASGIApp(http_app, user_resolver=user_resolver or get_auth_backend().authenticate),
     )

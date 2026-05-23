@@ -4,7 +4,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from agentseek_api.core import auth_middleware
+from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.main import create_app
+from agentseek_api.models.auth import User
 from agentseek_api.services import langgraph_service as langgraph_service_module
 from agentseek_api.settings import settings
 
@@ -18,6 +20,12 @@ class FakeCheckpointer:
 
     def save_checkpoint(self, *, thread_id: str, run_id: str, payload: dict[str, object]) -> None:
         _ = (thread_id, run_id, payload)
+
+
+class BodyReadingAuthBackend:
+    async def authenticate(self, request) -> User:
+        await request.body()
+        return User(identity="body-reader", is_authenticated=True)
 
 
 def _mcp_headers(api_key: str | None = None) -> dict[str, str]:
@@ -63,6 +71,63 @@ def test_mcp_endpoint_lists_tools_for_authenticated_client(auth_client: TestClie
     body = response.json()
     assert body["result"]["tools"]
     assert any(tool["name"] == "default" for tool in body["result"]["tools"])
+
+
+def test_mcp_endpoint_supports_backends_that_read_request_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    monkeypatch.setattr(settings, "AUTH_TYPE", "noop")
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    auth_middleware._backend = BodyReadingAuthBackend()
+    langgraph_service_module._langgraph_service = None
+
+    with TestClient(create_app()) as client:
+        response = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 11, "method": "tools/list"},
+            headers=_mcp_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["tools"]
+    auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
+
+
+def test_mcp_endpoint_honors_current_user_dependency_override(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
+
+    async def override_user(_request) -> User:
+        return User(identity="override-user", is_authenticated=True)
+
+    app = create_app()
+    app.dependency_overrides[get_current_user] = override_user
+    with TestClient(app) as client:
+        response = client.post(
+            "/mcp",
+            json={"jsonrpc": "2.0", "id": 12, "method": "tools/list"},
+            headers=_mcp_headers(),
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["tools"]
+    auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
 
 
 def test_mcp_endpoint_uses_exact_path_without_redirect(auth_client: TestClient) -> None:

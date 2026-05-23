@@ -22,6 +22,8 @@ def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> Non
 
     schemas = client.get(f"/assistants/{assistant_id}/schemas")
     assert schemas.status_code == 200
+    assert schemas.json()["name"] == "react_agent"
+    assert schemas.json()["description"] == ""
     assert schemas.json()["input_schema"] == {"type": "object"}
     assert schemas.json()["output_schema"] == {"type": "object"}
 

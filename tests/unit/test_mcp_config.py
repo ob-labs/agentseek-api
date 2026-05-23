@@ -54,3 +54,23 @@ def test_is_mcp_enabled_respects_disable_flag(monkeypatch, tmp_path: Path) -> No
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
 
     assert is_mcp_enabled() is False
+
+
+def test_is_mcp_enabled_fails_closed_for_invalid_config(monkeypatch, tmp_path: Path) -> None:
+    config_path = tmp_path / "agentseek.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "http": {
+    "disable_mcp": true
+  }
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+
+    assert get_active_config_payload() is None
+    assert is_mcp_enabled() is False

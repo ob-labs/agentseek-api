@@ -1,3 +1,4 @@
+import inspect
 from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import AsyncIterator
 from importlib.metadata import PackageNotFoundError, version as package_version
@@ -12,6 +13,7 @@ from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
 from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
+from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.mcp_config import is_mcp_enabled
@@ -107,12 +109,22 @@ def _register_mcp_routes(app: FastAPI, mcp_mount: MCPMount) -> None:
         )
 
 
+async def _resolve_mcp_user(app: FastAPI, request) -> object:
+    resolver = app.dependency_overrides.get(get_current_user, get_current_user)
+    resolved = resolver(request)
+    if inspect.isawaitable(resolved):
+        return await resolved
+    return resolved
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
     app.state.mcp_enabled = is_mcp_enabled()
     if app.state.mcp_enabled:
-        app.state.mcp_mount = build_mcp_mount()
+        app.state.mcp_mount = build_mcp_mount(
+            user_resolver=lambda request: _resolve_mcp_user(app, request),
+        )
         _register_mcp_routes(app, app.state.mcp_mount)
 
     @app.get("/health")

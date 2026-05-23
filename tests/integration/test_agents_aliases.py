@@ -52,6 +52,8 @@ def test_agents_alias_exposes_graph_schema_and_version_helpers(client: TestClien
     schemas = client.get(f"/agents/{assistant_id}/schemas")
     assert schemas.status_code == 200
     assert schemas.json()["assistant_id"] == assistant_id
+    assert schemas.json()["name"] == "default"
+    assert schemas.json()["description"] == ""
     assert schemas.json()["input_schema"] == {"type": "object"}
 
     latest = client.post(f"/agents/{assistant_id}/latest")
