@@ -28,9 +28,9 @@ uv sync
 
 `agentseek-api` looks for config in this order:
 
-1. `agentseek.json`
-2. `langgraph.json`
-3. `AGENTSEEK_GRAPHS`, if it points to an existing file
+1. `AGENTSEEK_GRAPHS`, if it points to an existing file
+2. `agentseek.json`
+3. `langgraph.json`
 
 Minimal `langgraph.json`:
 
@@ -206,15 +206,18 @@ Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
 ## 🔌 MCP
 
 AgentSeek API exposes registered graphs as MCP tools through a stateless
-Streamable HTTP endpoint mounted under `/mcp/`.
+Streamable HTTP endpoint at `/mcp`.
 
 ### Behavior
 
 - Transport: Streamable HTTP
 - Session model: stateless
 - Auth: same as the rest of the API
+- Paths: `/mcp` and `/mcp/` are both accepted
 - Discovery source: registered graphs from `agentseek.json`,
   `langgraph.json`, or `AGENTSEEK_GRAPHS`
+- Enablement: MCP is enabled by default; `http.disable_mcp: true` disables it
+- Safety: if the active config file exists but cannot be parsed, MCP stays disabled until the config is fixed
 
 Graph object entries can carry MCP-facing metadata directly in the manifest:
 
@@ -279,7 +282,7 @@ async with httpx.AsyncClient(
     trust_env=False,
 ) as http_client:
     async with streamable_http_client(
-        url="http://127.0.0.1:2024/mcp/",
+        url="http://127.0.0.1:2024/mcp",
         http_client=http_client,
     ) as (read, write, _):
         async with ClientSession(read, write) as session:
