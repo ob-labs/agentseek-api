@@ -152,8 +152,8 @@ async def get_assistant_schemas(assistant_id: str) -> dict[str, object]:
     return {
         "assistant_id": assistant.assistant_id,
         "graph_id": assistant.graph_id,
-        "name": entry.tool_name,
-        "description": entry.description,
+        "name": assistant.name,
+        "description": assistant.description,
         "input_schema": entry.input_schema,
         "output_schema": entry.output_schema,
     }
