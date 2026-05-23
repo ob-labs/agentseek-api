@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
-import json
 from dataclasses import dataclass
 from typing import Any
+from uuid import uuid4
 
+from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from mcp.server.lowlevel.server import Server
@@ -13,8 +14,15 @@ import mcp.types as types
 
 from agentseek_api import __version__
 from agentseek_api.core.auth_middleware import get_auth_backend
+from agentseek_api.core.database import db_manager
+from agentseek_api.core.runtime_store import UserScopedStore
 from agentseek_api.models.auth import User
-from agentseek_api.services.langgraph_service import GraphEntry, LangGraphService, get_langgraph_service
+from agentseek_api.services.langgraph_service import (
+    GraphEntry,
+    LangGraphService,
+    ensure_sync_checkpoint_mode,
+    get_langgraph_service,
+)
 
 _current_mcp_user: ContextVar[User | None] = ContextVar("current_mcp_user", default=None)
 
@@ -57,15 +65,6 @@ class MCPMount:
     app: _AuthenticatedMCPASGIApp
 
 
-def graph_tool_result(result: dict[str, Any]) -> types.CallToolResult:
-    text = json.dumps(result, ensure_ascii=False, sort_keys=True)
-    return types.CallToolResult(
-        content=[types.TextContent(type="text", text=text)],
-        structuredContent=result,
-        isError=False,
-    )
-
-
 def list_graph_tools(service: LangGraphService) -> list[types.Tool]:
     tools: list[types.Tool] = []
     for graph_id in service.registered_graph_ids():
@@ -89,17 +88,46 @@ def _entry_for_tool(service: LangGraphService, tool_name: str) -> GraphEntry:
     raise ValueError(f"Unknown tool: {tool_name}")
 
 
-async def _invoke_graph_tool(entry: GraphEntry, arguments: dict[str, Any]) -> types.CallToolResult:
-    graph = entry.build_graph()
+def _current_authenticated_user() -> User:
+    user = _current_mcp_user.get()
+    if user is None or not user.is_authenticated:
+        raise RuntimeError("MCP tool execution requires an authenticated user.")
+    return user
+
+
+def _graph_invocation_config(user: User) -> tuple[UserScopedStore, dict[str, Any]]:
+    thread_id = str(uuid4())
+    checkpoint_ns = f"mcp:{uuid4()}"
+    runtime_store = UserScopedStore(db_manager.get_store(), user_id=user.identity)
+    checkpointer = db_manager.get_langgraph_checkpointer()
+    return runtime_store, {
+        CONF: {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            CONFIG_KEY_CHECKPOINTER: checkpointer,
+            "store": runtime_store,
+            "langgraph_auth_user": user.model_dump(),
+        }
+    }
+
+
+async def _invoke_graph_tool(entry: GraphEntry, arguments: dict[str, Any]) -> dict[str, Any]:
+    ensure_sync_checkpoint_mode(requested_async=False)
+    user = _current_authenticated_user()
+    runtime_store, config = _graph_invocation_config(user)
+    graph = entry.build_graph(
+        checkpointer=db_manager.get_langgraph_checkpointer(),
+        store=runtime_store,
+    )
     prepared = entry.prepare_input(arguments)
     if hasattr(graph, "ainvoke"):
-        raw_result = await graph.ainvoke(prepared)
+        raw_result = await graph.ainvoke(prepared, config)
     else:  # pragma: no cover
-        raw_result = graph.invoke(prepared)
+        raw_result = graph.invoke(prepared, config)
     extracted = entry.extract_output(raw_result, arguments)
     if not isinstance(extracted, dict):
         extracted = {"result": extracted}
-    return graph_tool_result(extracted)
+    return extracted
 
 
 def build_mcp_server(service: LangGraphService | None = None) -> Server:
@@ -111,7 +139,7 @@ def build_mcp_server(service: LangGraphService | None = None) -> Server:
         return list_graph_tools(resolved_service)
 
     @server.call_tool()
-    async def _call_tool(name: str, arguments: dict[str, Any]) -> types.CallToolResult:
+    async def _call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         entry = _entry_for_tool(resolved_service, name)
         return await _invoke_graph_tool(entry, arguments)
 

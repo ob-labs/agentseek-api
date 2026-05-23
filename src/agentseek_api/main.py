@@ -4,6 +4,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 
 from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse, PlainTextResponse
+from starlette.routing import Route
 
 from agentseek_api import __version__
 from agentseek_api.api.assistants import router as assistants_api_router
@@ -45,7 +46,7 @@ def _langchain_oceanbase_version() -> str:
         return "unknown"
 
 
-def _feature_flags() -> dict[str, bool]:
+def _feature_flags(*, mcp_enabled: bool) -> dict[str, bool]:
     return {
         "agents": True,
         "assistants": True,
@@ -54,7 +55,7 @@ def _feature_flags() -> dict[str, bool]:
         "crons": False,
         "store": True,
         "a2a": False,
-        "mcp": is_mcp_enabled(),
+        "mcp": mcp_enabled,
         "protocol_v2": True,
     }
 
@@ -94,12 +95,25 @@ def _apply_auth_openapi(app: FastAPI) -> None:
     app.openapi = custom_openapi  # type: ignore[method-assign]
 
 
+def _register_mcp_routes(app: FastAPI, mcp_mount: MCPMount) -> None:
+    for path in ("/mcp", "/mcp/"):
+        app.router.routes.append(
+            Route(
+                path,
+                endpoint=mcp_mount.app,
+                methods=["GET", "POST", "DELETE"],
+                include_in_schema=False,
+            )
+        )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
-    if is_mcp_enabled():
+    app.state.mcp_enabled = is_mcp_enabled()
+    if app.state.mcp_enabled:
         app.state.mcp_mount = build_mcp_mount()
-        app.mount("/mcp", app.state.mcp_mount.app)
+        _register_mcp_routes(app, app.state.mcp_mount)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -116,7 +130,7 @@ def create_app() -> FastAPI:
         return {
             "version": __version__,
             "langgraph_py_version": _langgraph_py_version(),
-            "flags": _feature_flags(),
+            "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
             "metadata": _server_metadata(),
         }
 
@@ -134,7 +148,7 @@ def create_app() -> FastAPI:
                         "database": "ok",
                         "checkpointer": "ok",
                     },
-                    "flags": _feature_flags(),
+                    "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
                 }
             )
 

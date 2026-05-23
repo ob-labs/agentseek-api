@@ -1,17 +1,7 @@
-import json
 from pathlib import Path
 
-import pytest
-
-from agentseek_api.mcp_server import graph_tool_result, list_graph_tools
+from agentseek_api.mcp_server import list_graph_tools
 from agentseek_api.services.langgraph_service import LangGraphService
-
-
-def test_graph_tool_result_wraps_dict_output() -> None:
-    result = graph_tool_result({"answer": "hello"})
-
-    assert result.structuredContent == {"answer": "hello"}
-    assert result.content[0].text == json.dumps({"answer": "hello"}, ensure_ascii=False, sort_keys=True)
 
 
 def test_list_graph_tools_registers_manifest_tools(tmp_path: Path) -> None:

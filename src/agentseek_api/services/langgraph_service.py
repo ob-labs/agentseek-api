@@ -297,11 +297,19 @@ class LangGraphService:
         input_schema: dict[str, Any] | None = None,
         output_schema: dict[str, Any] | None = None,
     ) -> None:
+        resolved_tool_name = tool_name or graph_id
+        for existing_graph_id, existing_entry in self._registry.items():
+            if existing_graph_id == graph_id:
+                continue
+            if existing_entry.tool_name == resolved_tool_name:
+                raise GraphManifestError(
+                    f"Graph '{graph_id}' declares duplicate MCP tool name '{resolved_tool_name}', already used by '{existing_graph_id}'."
+                )
         self._registry[graph_id] = GraphEntry(
             graph_factory=graph_factory,
             prepare_input=prepare_input,
             extract_output=extract_output,
-            tool_name=tool_name or graph_id,
+            tool_name=resolved_tool_name,
             description=description,
             input_schema=_normalize_schema(input_schema),
             output_schema=_normalize_schema(output_schema),

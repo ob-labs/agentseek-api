@@ -241,6 +241,37 @@ graph = builder.compile()
     assert entry.output_schema["required"] == ["answer"]
 
 
+def test_manifest_rejects_duplicate_mcp_tool_names(tmp_path: Path) -> None:
+    graph_file = tmp_path / "graph.py"
+    graph_file.write_text(
+        """
+from langgraph.graph import END, START, StateGraph
+
+builder = StateGraph(dict)
+builder.add_node("node", lambda state: state)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+""".strip(),
+        encoding="utf-8",
+    )
+    manifest_path = tmp_path / "langgraph.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "graphs": {
+                    "alpha": {"graph": "./graph.py:graph", "name": "shared_tool"},
+                    "beta": {"graph": "./graph.py:graph", "name": "shared_tool"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GraphManifestError, match="duplicate MCP tool name 'shared_tool'"):
+        LangGraphService(manifest_path=manifest_path)
+
+
 def test_manifest_supports_compiled_graph_variables(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     package_dir = tmp_path / "external_graph_pkg_compiled"
     package_dir.mkdir()

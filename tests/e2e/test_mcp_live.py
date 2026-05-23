@@ -14,6 +14,7 @@ from mcp.client.streamable_http import streamable_http_client
 
 from agentseek_api.core import auth_middleware
 from agentseek_api.main import create_app
+from agentseek_api.services import langgraph_service as langgraph_service_module
 from agentseek_api.settings import settings
 
 
@@ -57,6 +58,7 @@ def mcp_live_base_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Genera
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", "examples/auth/custom_backend.py:backend")
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
     auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
 
     app = create_app()
     port = _free_port()
@@ -72,6 +74,7 @@ def mcp_live_base_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Genera
         server.should_exit = True
         thread.join(timeout=10)
         auth_middleware._backend = None
+        langgraph_service_module._langgraph_service = None
 
 
 @pytest.mark.e2e
@@ -83,7 +86,7 @@ async def test_mcp_client_can_list_tools_and_call_default(mcp_live_base_url: str
         trust_env=False,
     ) as http_client:
         async with streamable_http_client(
-            url=f"{mcp_live_base_url}/mcp/",
+            url=f"{mcp_live_base_url}/mcp",
             http_client=http_client,
         ) as (read, write, _):
             async with ClientSession(read, write) as session:
