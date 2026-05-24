@@ -160,4 +160,4 @@ def test_agent_card_endpoint_includes_api_key_auth_metadata(monkeypatch, tmp_pat
             }
         }
     }
-    assert body["security"] == [{"apiKeyAuth": []}]
+    assert body["securityRequirements"] == [{"apiKeyAuth": []}]

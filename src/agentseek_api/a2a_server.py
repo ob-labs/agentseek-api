@@ -52,7 +52,7 @@ def _agent_card_auth_metadata() -> dict[str, Any]:
             if translated_schemes:
                 metadata: dict[str, Any] = {"securitySchemes": translated_schemes}
                 if translated_security:
-                    metadata["security"] = translated_security
+                    metadata["securityRequirements"] = translated_security
                 return metadata
 
     auth_type = settings.AUTH_TYPE.strip().lower()
@@ -66,7 +66,7 @@ def _agent_card_auth_metadata() -> dict[str, Any]:
                     }
                 }
             },
-            "security": [{"apiKeyAuth": []}],
+            "securityRequirements": [{"apiKeyAuth": []}],
         }
     if auth_type == "jwt":
         return {
@@ -78,7 +78,7 @@ def _agent_card_auth_metadata() -> dict[str, Any]:
                     }
                 }
             },
-            "security": [{"bearerAuth": []}],
+            "securityRequirements": [{"bearerAuth": []}],
         }
     return {}
 
@@ -120,13 +120,9 @@ def _translate_openapi_security_requirements(
     for item in security:
         if not isinstance(item, dict):
             continue
-        filtered = {
-            name: scopes
-            for name, scopes in item.items()
-            if isinstance(name, str) and name in retained_scheme_names and isinstance(scopes, list)
-        }
-        if filtered:
-            translated.append(filtered)
+        if not all(isinstance(name, str) and name in retained_scheme_names and isinstance(scopes, list) for name, scopes in item.items()):
+            continue
+        translated.append(item)
     return translated
 
 

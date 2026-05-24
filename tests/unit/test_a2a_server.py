@@ -167,7 +167,7 @@ def test_build_agent_card_includes_config_auth_metadata(monkeypatch) -> None:
             }
         }
     }
-    assert card["security"] == [{"apiKeyAuth": []}]
+    assert card["securityRequirements"] == [{"apiKeyAuth": []}]
 
 
 def test_build_agent_card_filters_unsupported_config_auth_metadata(monkeypatch) -> None:
@@ -210,10 +210,41 @@ def test_build_agent_card_filters_unsupported_config_auth_metadata(monkeypatch) 
             }
         }
     }
-    assert card["security"] == [
-        {"apiKeyAuth": []},
-        {"apiKeyAuth": []},
-    ]
+    assert card["securityRequirements"] == [{"apiKeyAuth": []}]
+
+
+def test_build_agent_card_drops_mixed_supported_and_unsupported_requirement_objects(monkeypatch) -> None:
+    assistant = _assistant()
+    entry = _entry(
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+    monkeypatch.setattr(
+        "agentseek_api.a2a_server.get_config_auth_openapi",
+        lambda: {
+            "securitySchemes": {
+                "apiKeyAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-API-Key",
+                },
+                "oauthAuth": {
+                    "type": "oauth2",
+                },
+            },
+            "security": [
+                {"apiKeyAuth": [], "oauthAuth": []},
+                {"apiKeyAuth": []},
+            ],
+        },
+    )
+
+    card = build_agent_card(base_url="https://example.com", assistant=assistant, entry=entry)
+
+    assert card["securityRequirements"] == [{"apiKeyAuth": []}]
 
 
 def test_build_agent_card_includes_builtin_api_key_auth_metadata(monkeypatch) -> None:
@@ -238,4 +269,4 @@ def test_build_agent_card_includes_builtin_api_key_auth_metadata(monkeypatch) ->
             }
         }
     }
-    assert card["security"] == [{"apiKeyAuth": []}]
+    assert card["securityRequirements"] == [{"apiKeyAuth": []}]
