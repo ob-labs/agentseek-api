@@ -342,7 +342,7 @@ def test_message_send_reuses_same_user_task_on_same_assistant(monkeypatch: pytes
     assert get_response.json()["result"]["contextId"] == "context-1"
 
 
-def test_message_stream_returns_sse_and_preserves_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_message_stream_returns_update_events_and_preserves_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with _a2a_client(monkeypatch, tmp_path) as client:
         assistant = _create_stress_assistant(client)
 
@@ -380,7 +380,9 @@ def test_message_stream_returns_sse_and_preserves_snapshot(monkeypatch: pytest.M
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
     assert "event: message" in body
-    assert '"state": "completed"' in body
+    assert '"kind": "status-update"' in body
+    assert '"kind": "artifact-update"' in body
+    assert '"lastChunk": true' in body
     assert "stream me" in body
     assert get_response.status_code == 200
     assert get_response.json()["result"]["id"] == "stream-task"

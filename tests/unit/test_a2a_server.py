@@ -335,6 +335,42 @@ def test_a2a_task_registry_evicts_oldest_terminal_records_when_over_limit() -> N
     assert registry.get("task-3").state == "completed"
 
 
+def test_a2a_task_registry_evicts_oldest_record_when_active_tasks_exceed_limit() -> None:
+    registry = A2ATaskRegistry(max_tasks=2)
+    registry.save(
+        A2ATaskRecord(
+            task_id="task-1",
+            assistant_id="assistant-123",
+            user_id="user-1",
+            context_id="context-1",
+            state="working",
+        )
+    )
+    registry.save(
+        A2ATaskRecord(
+            task_id="task-2",
+            assistant_id="assistant-123",
+            user_id="user-1",
+            context_id="context-2",
+            state="working",
+        )
+    )
+    registry.save(
+        A2ATaskRecord(
+            task_id="task-3",
+            assistant_id="assistant-123",
+            user_id="user-1",
+            context_id="context-3",
+            state="working",
+        )
+    )
+
+    with pytest.raises(ValueError, match="Unknown task: task-1"):
+        registry.get("task-1")
+    assert registry.get("task-2").state == "working"
+    assert registry.get("task-3").state == "working"
+
+
 @pytest.mark.asyncio
 async def test_handle_a2a_request_message_send_returns_completed_task(monkeypatch) -> None:
     registry = A2ATaskRegistry()
@@ -402,7 +438,7 @@ async def test_handle_a2a_request_message_send_returns_completed_task(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_handle_a2a_request_message_stream_returns_sse_and_persists_snapshot(monkeypatch) -> None:
+async def test_handle_a2a_request_message_stream_prefers_astream_and_emits_update_events(monkeypatch) -> None:
     registry = A2ATaskRegistry()
     assistant = _assistant(description="A2A assistant")
     entry = _entry(
@@ -416,10 +452,16 @@ async def test_handle_a2a_request_message_stream_returns_sse_and_persists_snapsh
     async def fake_load_assistant(_assistant_id: str) -> AssistantRead:
         return assistant
 
+    seen: dict[str, int] = {"ainvoke_calls": 0}
+
     class _Graph:
+        async def ainvoke(self, prepared, config):
+            seen["ainvoke_calls"] += 1
+            return {"final_text": '{"echo":"ainvoke fallback"}'}
+
         async def astream(self, prepared, config):
-            yield {"text": '{"echo":"chunk one"}'}
-            yield {"final_text": '{"echo":"streamed final"}'}
+            yield {"messages": [HumanMessage(content="chunk one")]}
+            yield {"messages": [HumanMessage(content="streamed final")]}
 
     entry.build_graph = lambda checkpointer=None, store=None: _Graph()
     entry.prepare_input = lambda payload: payload
@@ -458,12 +500,16 @@ async def test_handle_a2a_request_message_stream_returns_sse_and_persists_snapsh
     body = b"".join(chunk if isinstance(chunk, bytes) else chunk.encode("utf-8") for chunk in chunks).decode("utf-8")
 
     assert 'event: message' in body
-    assert '"state": "working"' in body
-    assert '"state": "completed"' in body
+    assert '"kind": "status-update"' in body
+    assert '"kind": "artifact-update"' in body
+    assert '"append": true' in body
+    assert '"lastChunk": true' in body
+    assert '"final": true' in body
     assert 'streamed final' in body
+    assert seen["ainvoke_calls"] == 0
     saved = registry.get("stream-task")
     assert saved.state == "completed"
-    assert saved.artifacts[0]["parts"][0]["text"] == '{"echo":"streamed final"}'
+    assert saved.artifacts[0]["parts"][0]["text"] == "streamed final"
 
 
 @pytest.mark.asyncio

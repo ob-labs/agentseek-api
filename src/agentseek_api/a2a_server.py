@@ -9,7 +9,7 @@ from uuid import uuid4
 
 from fastapi import HTTPException
 from fastapi.responses import StreamingResponse
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 from sqlalchemy import select
 
@@ -64,7 +64,10 @@ class A2ATaskRegistry:
                     evicted = True
                     break
             if not evicted:
-                break
+                oldest_task_id = next(iter(self._tasks), None)
+                if oldest_task_id is None:
+                    break
+                del self._tasks[oldest_task_id]
 
 
 def is_a2a_compatible_entry(entry: GraphEntry) -> bool:
@@ -258,6 +261,52 @@ def _is_terminal_state(state: str) -> bool:
     return state in {"completed", "failed", "cancelled"}
 
 
+def _message_content(message: BaseMessage) -> str:
+    content = getattr(message, "content", "")
+    if isinstance(content, str):
+        return content
+    return json.dumps(content, default=str)
+
+
+def _extract_chunk_messages(chunk: Any) -> list[BaseMessage]:
+    messages: list[BaseMessage] = []
+    if isinstance(chunk, BaseMessage):
+        return [chunk]
+    if isinstance(chunk, dict):
+        nested_messages = chunk.get("messages")
+        if isinstance(nested_messages, list):
+            messages.extend(item for item in nested_messages if isinstance(item, BaseMessage))
+        for value in chunk.values():
+            if value is nested_messages:
+                continue
+            messages.extend(_extract_chunk_messages(value))
+    elif isinstance(chunk, (list, tuple)):
+        for item in chunk:
+            messages.extend(_extract_chunk_messages(item))
+    return messages
+
+
+def _extract_stream_chunk_text(chunk: Any) -> str | None:
+    messages = _extract_chunk_messages(chunk)
+    if messages:
+        texts = [_message_content(message) for message in messages if _message_content(message)]
+        combined = "\n".join(texts).strip()
+        return combined or None
+    text = getattr(chunk, "text", None)
+    if isinstance(text, str) and text:
+        return text
+    if isinstance(chunk, dict):
+        raw_text = chunk.get("text")
+        if isinstance(raw_text, str) and raw_text:
+            return raw_text
+    return None
+
+
+def _is_root_stream_event(event: dict[str, Any]) -> bool:
+    parent_ids = event.get("parent_ids")
+    return isinstance(parent_ids, list) and not parent_ids
+
+
 def _extract_request_text(message: dict[str, Any]) -> str:
     parts = message.get("parts")
     if not isinstance(parts, list) or not parts:
@@ -285,6 +334,11 @@ def _extract_output_text(extracted: Any) -> str:
         text = extracted.get("text")
         if isinstance(text, str):
             return text
+        messages = extracted.get("messages")
+        if isinstance(messages, list):
+            message_texts = [_message_content(message) for message in messages if isinstance(message, BaseMessage)]
+            if message_texts:
+                return message_texts[-1]
     return json.dumps(extracted, default=str)
 
 
@@ -329,13 +383,24 @@ async def _invoke_a2a_graph_stream(
     graph_payload = {"messages": [HumanMessage(content=text)]}
     prepared = entry.prepare_input(graph_payload)
 
-    if hasattr(graph, "ainvoke"):
-        raw_result = await graph.ainvoke(prepared, config)
-        extracted = entry.extract_output(raw_result, graph_payload)
-        if isinstance(extracted, dict):
-            yield extracted
-        else:
-            yield {"result": extracted}
+    if hasattr(graph, "astream_events"):
+        async for stream_event in graph.astream_events(prepared, config, version="v2"):
+            raw_event_name = stream_event.get("event")
+            if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:
+                data = stream_event.get("data", {})
+                chunk = data.get("chunk") if isinstance(data, dict) else None
+                text = _extract_stream_chunk_text(chunk)
+                if text:
+                    yield {"text": text}
+            if raw_event_name == "on_chain_end" and _is_root_stream_event(stream_event):
+                data = stream_event.get("data", {})
+                output = data.get("output") if isinstance(data, dict) else None
+                extracted = entry.extract_output(output, graph_payload)
+                if isinstance(extracted, dict):
+                    yield extracted
+                else:
+                    yield {"result": extracted}
+                return
         return
 
     if hasattr(graph, "astream"):
@@ -345,6 +410,15 @@ async def _invoke_a2a_graph_stream(
                 yield extracted
             else:
                 yield {"result": extracted}
+        return
+
+    if hasattr(graph, "ainvoke"):
+        raw_result = await graph.ainvoke(prepared, config)
+        extracted = entry.extract_output(raw_result, graph_payload)
+        if isinstance(extracted, dict):
+            yield extracted
+        else:
+            yield {"result": extracted}
         return
 
     raw_result = graph.invoke(prepared, config)  # pragma: no cover
@@ -392,6 +466,36 @@ def _cancel_task(record: A2ATaskRecord) -> A2ATaskRecord:
         record.state = "cancelled"
         record.status_message = "Task cancelled"
     return record
+
+
+def _task_status_update_event(record: A2ATaskRecord, *, final: bool) -> dict[str, Any]:
+    status: dict[str, Any] = {"state": record.state}
+    if record.status_message:
+        status["message"] = {"kind": "text", "text": record.status_message}
+    return {
+        "kind": "status-update",
+        "taskId": record.task_id,
+        "contextId": record.context_id,
+        "status": status,
+        "final": final,
+    }
+
+
+def _task_artifact_update_event(
+    record: A2ATaskRecord,
+    *,
+    artifact: dict[str, Any],
+    append: bool,
+    last_chunk: bool,
+) -> dict[str, Any]:
+    return {
+        "kind": "artifact-update",
+        "taskId": record.task_id,
+        "contextId": record.context_id,
+        "artifact": artifact,
+        "append": append,
+        "lastChunk": last_chunk,
+    }
 
 
 def _sse_jsonrpc_event(*, request_id: Any, result: dict[str, Any]) -> str:
@@ -478,9 +582,13 @@ async def handle_a2a_request(
         async def _event_iter() -> AsyncIterator[str]:
             record.state = "working"
             registry.save(record)
-            yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+            yield _sse_jsonrpc_event(
+                request_id=request_id,
+                result=_task_status_update_event(record, final=False),
+            )
 
             final_extracted: dict[str, Any] | None = None
+            pending_text: str | None = None
             try:
                 async for extracted in _invoke_a2a_graph_stream(
                     entry=entry,
@@ -489,22 +597,57 @@ async def handle_a2a_request(
                     text=text,
                 ):
                     final_extracted = extracted
+                    chunk_text = _extract_stream_chunk_text(extracted)
+                    if chunk_text is None:
+                        continue
+                    if pending_text is not None:
+                        yield _sse_jsonrpc_event(
+                            request_id=request_id,
+                            result=_task_artifact_update_event(
+                                record,
+                                artifact=make_text_artifact(pending_text),
+                                append=True,
+                                last_chunk=False,
+                            ),
+                        )
+                    pending_text = chunk_text
             except Exception as exc:  # noqa: BLE001
                 record.state = "failed"
                 record.status_message = str(exc)
                 registry.save(record)
-                yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+                yield _sse_jsonrpc_event(
+                    request_id=request_id,
+                    result=_task_status_update_event(record, final=True),
+                )
                 return
 
             if record.cancellation_requested:
                 registry.save(record)
-                yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+                yield _sse_jsonrpc_event(
+                    request_id=request_id,
+                    result=_task_status_update_event(record, final=True),
+                )
                 return
 
+            final_text = _extract_output_text(final_extracted or {})
+            terminal_chunk_text = pending_text or final_text
+            if terminal_chunk_text:
+                yield _sse_jsonrpc_event(
+                    request_id=request_id,
+                    result=_task_artifact_update_event(
+                        record,
+                        artifact=make_text_artifact(terminal_chunk_text),
+                        append=True,
+                        last_chunk=True,
+                    ),
+                )
             record.state = "completed"
-            record.artifacts = [make_text_artifact(_extract_output_text(final_extracted or {}))]
+            record.artifacts = [make_text_artifact(final_text)]
             registry.save(record)
-            yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+            yield _sse_jsonrpc_event(
+                request_id=request_id,
+                result=_task_status_update_event(record, final=True),
+            )
 
         return StreamingResponse(_event_iter(), media_type="text/event-stream")
 
