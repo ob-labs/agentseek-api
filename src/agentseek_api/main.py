@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
@@ -215,12 +215,12 @@ def create_app() -> FastAPI:
                 entry=entry,
             )
 
-        @app.post("/a2a/{assistant_id}", include_in_schema=False)
+        @app.post("/a2a/{assistant_id}", include_in_schema=False, response_model=None)
         async def a2a_jsonrpc(
             assistant_id: str,
             payload: dict[str, Any],
             user=Depends(get_current_user),
-        ) -> dict[str, Any]:
+        ) -> Response | dict[str, Any]:
             return await handle_a2a_request(
                 assistant_id=assistant_id,
                 payload=payload,

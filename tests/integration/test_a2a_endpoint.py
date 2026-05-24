@@ -99,11 +99,11 @@ def _a2a_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Tes
         langgraph_service_module._langgraph_service = None
 
 
-def _create_stress_assistant(client: TestClient) -> dict[str, object]:
+def _create_stress_assistant(client: TestClient, *, name: str = "Messages Echo") -> dict[str, object]:
     response = client.post(
         "/assistants",
         headers={"X-API-Key": "secret"},
-        json={"name": "Messages Echo", "graph_id": "stress_test", "description": "Echoes text"},
+        json={"name": name, "graph_id": "stress_test", "description": "Echoes text"},
     )
     response.raise_for_status()
     return response.json()
@@ -279,3 +279,207 @@ def test_tasks_get_rejects_cross_user_access(monkeypatch: pytest.MonkeyPatch, tm
 
     assert get_response.status_code == 200
     assert get_response.json()["error"]["message"] == f"Unknown task: {task_id}"
+
+
+def test_message_send_reuses_same_user_task_on_same_assistant(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client)
+
+        first_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-a"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "reuse-same-assistant-1",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"first turn"}'}],
+                        "messageId": "msg-reuse-1",
+                        "contextId": "context-1",
+                        "taskId": "shared-task",
+                    }
+                },
+            },
+        )
+
+        second_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-a"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "reuse-same-assistant-2",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"second turn"}'}],
+                        "messageId": "msg-reuse-2",
+                        "taskId": "shared-task",
+                    }
+                },
+            },
+        )
+
+        get_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-a"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "reuse-same-assistant-get",
+                "method": "tasks/get",
+                "params": {"id": "shared-task"},
+            },
+        )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json()["result"]["id"] == "shared-task"
+    assert second_response.json()["result"]["contextId"] == "context-1"
+    assert get_response.status_code == 200
+    assert get_response.json()["result"]["id"] == "shared-task"
+    assert get_response.json()["result"]["contextId"] == "context-1"
+
+
+def test_message_stream_returns_sse_and_preserves_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client)
+
+        with client.stream(
+            "POST",
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "text/event-stream"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "stream-1",
+                "method": "message/stream",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"stream me"}'}],
+                        "messageId": "msg-stream",
+                        "taskId": "stream-task",
+                    }
+                },
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes()).decode("utf-8")
+
+        get_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "stream-get",
+                "method": "tasks/get",
+                "params": {"id": "stream-task"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert "event: message" in body
+    assert '"state": "completed"' in body
+    assert "stream me" in body
+    assert get_response.status_code == 200
+    assert get_response.json()["result"]["id"] == "stream-task"
+    assert get_response.json()["result"]["status"]["state"] == "completed"
+
+
+def test_tasks_cancel_returns_terminal_task_state(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client)
+        send_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "cancel-send",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"cancel me"}'}],
+                        "messageId": "msg-cancel",
+                    }
+                },
+            },
+        )
+        task_id = send_response.json()["result"]["id"]
+
+        cancel_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "cancel-task",
+                "method": "tasks/cancel",
+                "params": {"id": task_id},
+            },
+        )
+
+    assert cancel_response.status_code == 200
+    assert cancel_response.json()["result"]["id"] == task_id
+    assert cancel_response.json()["result"]["status"]["state"] == "completed"
+
+
+def test_message_send_rejects_cross_assistant_task_reuse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant_a = _create_stress_assistant(client, name="Assistant A")
+        assistant_b = _create_stress_assistant(client, name="Assistant B")
+
+        first_response = client.post(
+            f"/a2a/{assistant_a['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-a"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "reuse-cross-assistant-1",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"owner"}'}],
+                        "messageId": "msg-cross-assistant-1",
+                        "contextId": "context-1",
+                        "taskId": "shared-task",
+                    }
+                },
+            },
+        )
+
+        second_response = client.post(
+            f"/a2a/{assistant_b['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-a"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "reuse-cross-assistant-2",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"intruder"}'}],
+                        "messageId": "msg-cross-assistant-2",
+                        "taskId": "shared-task",
+                    }
+                },
+            },
+        )
+
+        get_response = client.post(
+            f"/a2a/{assistant_a['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-a"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "reuse-cross-assistant-get",
+                "method": "tasks/get",
+                "params": {"id": "shared-task"},
+            },
+        )
+
+    assert first_response.status_code == 200
+    assert second_response.status_code == 200
+    assert second_response.json()["error"]["message"] == "Unknown task: shared-task"
+    assert get_response.status_code == 200
+    assert get_response.json()["result"]["id"] == "shared-task"
+    assert get_response.json()["result"]["contextId"] == "context-1"

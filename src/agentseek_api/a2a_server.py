@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
 from uuid import uuid4
 
 from fastapi import HTTPException
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import HumanMessage
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 from sqlalchemy import select
@@ -31,16 +33,20 @@ class A2ATaskRecord:
     state: str = "submitted"
     status_message: str = ""
     artifacts: list[dict[str, Any]] = field(default_factory=list)
+    cancellation_requested: bool = False
 
 
 class A2ATaskRegistry:
-    def __init__(self) -> None:
+    def __init__(self, *, max_tasks: int = 1000) -> None:
         self._tasks: dict[str, A2ATaskRecord] = {}
         self._lock = Lock()
+        self._max_tasks = max_tasks
 
     def save(self, record: A2ATaskRecord) -> None:
         with self._lock:
+            self._tasks.pop(record.task_id, None)
             self._tasks[record.task_id] = record
+            self._prune_locked()
 
     def get(self, task_id: str) -> A2ATaskRecord:
         with self._lock:
@@ -48,6 +54,17 @@ class A2ATaskRegistry:
                 return self._tasks[task_id]
             except KeyError as exc:
                 raise ValueError(f"Unknown task: {task_id}") from exc
+
+    def _prune_locked(self) -> None:
+        while len(self._tasks) > self._max_tasks:
+            evicted = False
+            for task_id, record in list(self._tasks.items()):
+                if _is_terminal_state(record.state):
+                    del self._tasks[task_id]
+                    evicted = True
+                    break
+            if not evicted:
+                break
 
 
 def is_a2a_compatible_entry(entry: GraphEntry) -> bool:
@@ -237,6 +254,10 @@ def _task_result(record: A2ATaskRecord) -> dict[str, Any]:
     }
 
 
+def _is_terminal_state(state: str) -> bool:
+    return state in {"completed", "failed", "cancelled"}
+
+
 def _extract_request_text(message: dict[str, Any]) -> str:
     parts = message.get("parts")
     if not isinstance(parts, list) or not parts:
@@ -292,6 +313,91 @@ async def _invoke_a2a_graph(
     return {"result": extracted}
 
 
+async def _invoke_a2a_graph_stream(
+    *,
+    entry: GraphEntry,
+    user: User,
+    context_id: str,
+    text: str,
+) -> AsyncIterator[dict[str, Any]]:
+    runtime_store, config = build_graph_config(user=user, context_id=context_id)
+    configurable = config.get(CONF, {})
+    graph = entry.build_graph(
+        checkpointer=configurable.get(CONFIG_KEY_CHECKPOINTER),
+        store=runtime_store,
+    )
+    graph_payload = {"messages": [HumanMessage(content=text)]}
+    prepared = entry.prepare_input(graph_payload)
+
+    if hasattr(graph, "ainvoke"):
+        raw_result = await graph.ainvoke(prepared, config)
+        extracted = entry.extract_output(raw_result, graph_payload)
+        if isinstance(extracted, dict):
+            yield extracted
+        else:
+            yield {"result": extracted}
+        return
+
+    if hasattr(graph, "astream"):
+        async for raw_result in graph.astream(prepared, config):
+            extracted = entry.extract_output(raw_result, graph_payload)
+            if isinstance(extracted, dict):
+                yield extracted
+            else:
+                yield {"result": extracted}
+        return
+
+    raw_result = graph.invoke(prepared, config)  # pragma: no cover
+    extracted = entry.extract_output(raw_result, graph_payload)
+    if isinstance(extracted, dict):
+        yield extracted
+    else:  # pragma: no cover
+        yield {"result": extracted}
+
+
+def _resolve_task_record(
+    *,
+    registry: A2ATaskRegistry,
+    assistant_id: str,
+    user: User,
+    context_id: str | None,
+    task_id: str,
+) -> A2ATaskRecord | None:
+    try:
+        existing = registry.get(task_id)
+    except ValueError:
+        existing = None
+
+    if existing is not None:
+        if existing.user_id != user.identity or existing.assistant_id != assistant_id:
+            return None
+        existing.context_id = context_id or existing.context_id
+        existing.state = "submitted"
+        existing.status_message = ""
+        existing.artifacts = []
+        existing.cancellation_requested = False
+        return existing
+
+    return A2ATaskRecord(
+        task_id=task_id,
+        assistant_id=assistant_id,
+        user_id=user.identity,
+        context_id=context_id or str(uuid4()),
+    )
+
+
+def _cancel_task(record: A2ATaskRecord) -> A2ATaskRecord:
+    if not _is_terminal_state(record.state):
+        record.cancellation_requested = True
+        record.state = "cancelled"
+        record.status_message = "Task cancelled"
+    return record
+
+
+def _sse_jsonrpc_event(*, request_id: Any, result: dict[str, Any]) -> str:
+    return f"event: message\ndata: {json.dumps(_jsonrpc_result(request_id, result))}\n\n"
+
+
 async def handle_a2a_request(
     *,
     assistant_id: str,
@@ -330,41 +436,85 @@ async def handle_a2a_request(
             return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
         return _jsonrpc_result(request_id, _task_result(record))
 
-    if method != "message/send":
+    if method == "tasks/cancel":
+        task_id = params.get("id")
+        if not isinstance(task_id, str) or not task_id:
+            return _jsonrpc_error(request_id, code=-32602, message="tasks/cancel requires params.id.")
+        try:
+            record = registry.get(task_id)
+        except ValueError as exc:
+            return _jsonrpc_error(request_id, code=-32004, message=str(exc))
+        if record.assistant_id != assistant_id or record.user_id != user.identity:
+            return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
+        registry.save(_cancel_task(record))
+        return _jsonrpc_result(request_id, _task_result(record))
+
+    if method not in {"message/send", "message/stream"}:
         return _jsonrpc_error(request_id, code=-32601, message=f"Unsupported method: {method}")
 
     message = params.get("message")
     if not isinstance(message, dict):
-        return _jsonrpc_error(request_id, code=-32602, message="message/send requires params.message.")
+        return _jsonrpc_error(request_id, code=-32602, message=f"{method} requires params.message.")
 
     try:
         text = _extract_request_text(message)
     except ValueError as exc:
         return _jsonrpc_error(request_id, code=-32602, message=str(exc))
 
-    context_id = _normalize_optional_id(message.get("contextId")) or _normalize_optional_id(params.get("contextId")) or str(uuid4())
+    context_id = _normalize_optional_id(message.get("contextId")) or _normalize_optional_id(params.get("contextId"))
     task_id = _normalize_optional_id(message.get("taskId")) or _normalize_optional_id(params.get("taskId")) or str(uuid4())
-
-    try:
-        existing = registry.get(task_id)
-    except ValueError:
-        existing = None
-    if existing is not None and existing.user_id != user.identity:
-        return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
-
-    record = A2ATaskRecord(
-        task_id=task_id,
+    record = _resolve_task_record(
+        registry=registry,
         assistant_id=assistant_id,
-        user_id=user.identity,
+        user=user,
         context_id=context_id,
+        task_id=task_id,
     )
+    if record is None:
+        return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
     registry.save(record)
 
+    if method == "message/stream":
+        async def _event_iter() -> AsyncIterator[str]:
+            record.state = "working"
+            registry.save(record)
+            yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+
+            final_extracted: dict[str, Any] | None = None
+            try:
+                async for extracted in _invoke_a2a_graph_stream(
+                    entry=entry,
+                    user=user,
+                    context_id=record.context_id,
+                    text=text,
+                ):
+                    final_extracted = extracted
+            except Exception as exc:  # noqa: BLE001
+                record.state = "failed"
+                record.status_message = str(exc)
+                registry.save(record)
+                yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+                return
+
+            if record.cancellation_requested:
+                registry.save(record)
+                yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+                return
+
+            record.state = "completed"
+            record.artifacts = [make_text_artifact(_extract_output_text(final_extracted or {}))]
+            registry.save(record)
+            yield _sse_jsonrpc_event(request_id=request_id, result=_task_result(record))
+
+        return StreamingResponse(_event_iter(), media_type="text/event-stream")
+
     try:
+        record.state = "working"
+        registry.save(record)
         extracted = await _invoke_a2a_graph(
             entry=entry,
             user=user,
-            context_id=context_id,
+            context_id=record.context_id,
             text=text,
         )
     except Exception as exc:  # noqa: BLE001
@@ -372,6 +522,10 @@ async def handle_a2a_request(
         record.status_message = str(exc)
         registry.save(record)
         return _jsonrpc_error(request_id, code=-32000, message=str(exc))
+
+    if record.cancellation_requested:
+        registry.save(record)
+        return _jsonrpc_result(request_id, _task_result(record))
 
     record.state = "completed"
     record.artifacts = [make_text_artifact(_extract_output_text(extracted))]
