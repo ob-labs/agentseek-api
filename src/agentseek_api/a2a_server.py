@@ -5,6 +5,7 @@ from typing import Any
 from fastapi import HTTPException
 from sqlalchemy import select
 
+from agentseek_api import __version__
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant
 from agentseek_api.models.api import AssistantRead
@@ -33,10 +34,17 @@ def build_agent_card(base_url: str, assistant: AssistantRead, entry: GraphEntry)
     return {
         "name": assistant.name,
         "description": description,
-        "url": url,
-        "preferredTransport": "JSONRPC",
-        "defaultInputModes": ["text"],
-        "defaultOutputModes": ["text"],
+        "supportedInterfaces": [
+            {
+                "url": url,
+                "protocolBinding": "JSONRPC",
+                "protocolVersion": "1.0",
+            }
+        ],
+        "version": __version__,
+        "capabilities": {"streaming": False, "pushNotifications": False},
+        "defaultInputModes": ["text/plain"],
+        "defaultOutputModes": ["text/plain"],
         "skills": [
             {
                 "id": entry.tool_name,

@@ -1,5 +1,7 @@
 import json
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 from fastapi import Request
 from fastapi.testclient import TestClient
@@ -48,7 +50,26 @@ async def header_user_override(request: Request) -> User:
     return User(identity=identity, is_authenticated=True)
 
 
-def test_agent_card_endpoint_returns_assistant_shaped_card(monkeypatch, tmp_path: Path) -> None:
+def _write_agent_config(*, config_path: Path, stress_graph_path: Path, disable_a2a: bool) -> None:
+    payload: dict[str, object] = {
+        "graphs": {
+            "stress_test": {
+                "graph": f"{stress_graph_path}:build_graph",
+                "input_schema": {
+                    "type": "object",
+                    "properties": {"messages": {"type": "array"}},
+                    "required": ["messages"],
+                },
+            }
+        }
+    }
+    if disable_a2a:
+        payload["http"] = {"disable_a2a": True}
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+@contextmanager
+def _agent_card_client(monkeypatch, tmp_path: Path, *, disable_a2a: bool = False) -> Iterator[TestClient]:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
@@ -56,30 +77,23 @@ def test_agent_card_endpoint_returns_assistant_shaped_card(monkeypatch, tmp_path
 
     stress_graph_path = Path(__file__).resolve().parents[2] / "examples" / "graphs" / "stress_test" / "graph.py"
     config_path = tmp_path / "agentseek.json"
-    config_path.write_text(
-        json.dumps(
-            {
-                "graphs": {
-                    "stress_test": {
-                        "graph": f"{stress_graph_path}:build_graph",
-                        "input_schema": {
-                            "type": "object",
-                            "properties": {"messages": {"type": "array"}},
-                            "required": ["messages"],
-                        },
-                    }
-                }
-            }
-        ),
-        encoding="utf-8",
-    )
+    _write_agent_config(config_path=config_path, stress_graph_path=stress_graph_path, disable_a2a=disable_a2a)
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
     auth_middleware._backend = None
     langgraph_service_module._langgraph_service = None
 
-    app = create_app()
-    app.dependency_overrides[get_current_user] = header_user_override
-    with TestClient(app) as client:
+    try:
+        app = create_app()
+        app.dependency_overrides[get_current_user] = header_user_override
+        with TestClient(app) as client:
+            yield client
+    finally:
+        auth_middleware._backend = None
+        langgraph_service_module._langgraph_service = None
+
+
+def test_agent_card_endpoint_returns_assistant_shaped_card(monkeypatch, tmp_path: Path) -> None:
+    with _agent_card_client(monkeypatch, tmp_path) as client:
         assistant = client.post(
             "/assistants",
             json={
@@ -97,7 +111,11 @@ def test_agent_card_endpoint_returns_assistant_shaped_card(monkeypatch, tmp_path
     body = response.json()
     assert body["name"] == "Stress Agent"
     assert body["description"] == "Deterministic agent card coverage"
-    assert body["url"].endswith(f"/a2a/{assistant_id}")
+    assert body["supportedInterfaces"][0]["url"].endswith(f"/a2a/{assistant_id}")
 
-    auth_middleware._backend = None
-    langgraph_service_module._langgraph_service = None
+
+def test_agent_card_endpoint_is_not_mounted_when_a2a_is_disabled(monkeypatch, tmp_path: Path) -> None:
+    with _agent_card_client(monkeypatch, tmp_path, disable_a2a=True) as client:
+        response = client.get("/.well-known/agent-card.json?assistant_id=assistant-123")
+
+    assert response.status_code == 404

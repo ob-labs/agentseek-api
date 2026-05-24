@@ -87,5 +87,17 @@ def test_build_agent_card_prefers_assistant_metadata_over_graph_metadata() -> No
 
     assert card["name"] == "Assistant Preferred"
     assert card["description"] == "Assistant description"
-    assert card["url"] == "https://example.com/a2a/assistant-123"
+    assert card["version"]
+    assert card["capabilities"] == {"streaming": False, "pushNotifications": False}
+    assert card["defaultInputModes"] == ["text/plain"]
+    assert card["defaultOutputModes"] == ["text/plain"]
+    assert card["supportedInterfaces"] == [
+        {
+            "url": "https://example.com/a2a/assistant-123",
+            "protocolBinding": "JSONRPC",
+            "protocolVersion": "1.0",
+        }
+    ]
+    assert "url" not in card
+    assert "preferredTransport" not in card
     assert card["skills"][0]["id"] == "graph-tool"

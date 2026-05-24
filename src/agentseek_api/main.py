@@ -189,21 +189,23 @@ def create_app() -> FastAPI:
         )
         return PlainTextResponse(body + "\n")
 
-    @app.get("/.well-known/agent-card.json", include_in_schema=False)
-    async def agent_card(
-        request: Request,
-        assistant_id: str,
-        _user=Depends(get_current_user),
-    ) -> dict[str, object]:
-        assistant = await load_assistant(assistant_id)
-        entry = get_langgraph_service().get_entry(assistant.graph_id)
-        if not is_a2a_compatible_entry(entry):
-            raise HTTPException(status_code=400, detail="Assistant graph is not A2A-compatible")
-        return build_agent_card(
-            base_url=str(request.base_url).rstrip("/"),
-            assistant=assistant,
-            entry=entry,
-        )
+    if app.state.a2a_enabled:
+
+        @app.get("/.well-known/agent-card.json", include_in_schema=False)
+        async def agent_card(
+            request: Request,
+            assistant_id: str,
+            _user=Depends(get_current_user),
+        ) -> dict[str, object]:
+            assistant = await load_assistant(assistant_id)
+            entry = get_langgraph_service().get_entry(assistant.graph_id)
+            if not is_a2a_compatible_entry(entry):
+                raise HTTPException(status_code=400, detail="Assistant graph is not A2A-compatible")
+            return build_agent_card(
+                base_url=str(request.base_url).rstrip("/"),
+                assistant=assistant,
+                entry=entry,
+            )
 
     app.include_router(assistants_api_router, prefix="/assistants", tags=["Assistants"])
     app.include_router(assistants_api_router, prefix="/agents", tags=["Agents"])
