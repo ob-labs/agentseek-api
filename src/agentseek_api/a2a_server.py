@@ -11,18 +11,27 @@ from agentseek_api.models.api import AssistantRead
 from agentseek_api.services.langgraph_service import GraphEntry
 
 
+def _has_messages_sequence(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    messages = payload.get("messages")
+    return isinstance(messages, list | tuple)
+
+
 def is_a2a_compatible_entry(entry: GraphEntry) -> bool:
     input_schema = entry.input_schema
     properties = input_schema.get("properties")
     required = input_schema.get("required")
-    if not isinstance(properties, dict) or not isinstance(required, list):
-        return False
+    if isinstance(properties, dict) and isinstance(required, list):
+        messages = properties.get("messages")
+        if isinstance(messages, dict) and messages.get("type") == "array" and "messages" in required:
+            return True
 
-    messages = properties.get("messages")
-    if not isinstance(messages, dict):
+    try:
+        prepared = entry.prepare_input({"message": "ping"})
+    except Exception:  # noqa: BLE001
         return False
-
-    return messages.get("type") == "array" and "messages" in required
+    return _has_messages_sequence(prepared)
 
 
 def build_agent_card(base_url: str, assistant: AssistantRead, entry: GraphEntry) -> dict[str, Any]:

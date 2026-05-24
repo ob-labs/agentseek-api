@@ -1,12 +1,7 @@
 from fastapi.testclient import TestClient
 
-from agentseek_api.services.langgraph_service import get_langgraph_service
 
-
-def test_agent_card_endpoint_returns_assistant_shaped_card(
-    client: TestClient,
-    monkeypatch,
-) -> None:
+def test_agent_card_endpoint_returns_assistant_shaped_card(client: TestClient) -> None:
     assistant = client.post(
         "/assistants",
         json={
@@ -17,17 +12,6 @@ def test_agent_card_endpoint_returns_assistant_shaped_card(
     )
     assistant.raise_for_status()
     assistant_id = assistant.json()["assistant_id"]
-
-    entry = get_langgraph_service().get_entry("stress_test")
-    monkeypatch.setattr(
-        entry,
-        "input_schema",
-        {
-            "type": "object",
-            "properties": {"messages": {"type": "array"}},
-            "required": ["messages"],
-        },
-    )
 
     response = client.get(f"/.well-known/agent-card.json?assistant_id={assistant_id}")
 
