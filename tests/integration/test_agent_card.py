@@ -121,6 +121,7 @@ def test_agent_card_endpoint_returns_assistant_shaped_card(monkeypatch, tmp_path
     body = response.json()
     assert body["name"] == "Stress Agent"
     assert body["description"] == "Deterministic agent card coverage"
+    assert body["capabilities"] == {"streaming": True, "pushNotifications": False}
     assert body["name"] != "Manifest Stress Graph"
     assert body["description"] != "Manifest graph description should lose to assistant metadata"
     assert body["supportedInterfaces"][0]["url"].endswith(f"/a2a/{assistant_id}")

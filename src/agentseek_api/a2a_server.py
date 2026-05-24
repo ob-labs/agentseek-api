@@ -195,7 +195,7 @@ def build_agent_card(base_url: str, assistant: AssistantRead, entry: GraphEntry)
             }
         ],
         "version": __version__,
-        "capabilities": {"streaming": False, "pushNotifications": False},
+        "capabilities": {"streaming": True, "pushNotifications": False},
         "defaultInputModes": ["text/plain"],
         "defaultOutputModes": ["text/plain"],
         "skills": [

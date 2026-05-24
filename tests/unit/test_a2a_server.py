@@ -111,7 +111,7 @@ def test_build_agent_card_prefers_assistant_metadata_over_graph_metadata() -> No
     assert card["name"] == "Assistant Preferred"
     assert card["description"] == "Assistant description"
     assert card["version"]
-    assert card["capabilities"] == {"streaming": False, "pushNotifications": False}
+    assert card["capabilities"] == {"streaming": True, "pushNotifications": False}
     assert card["defaultInputModes"] == ["text/plain"]
     assert card["defaultOutputModes"] == ["text/plain"]
     assert card["supportedInterfaces"] == [
