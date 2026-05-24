@@ -15,6 +15,7 @@ from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
+from agentseek_api.core.a2a_config import is_a2a_enabled
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.mcp_config import is_mcp_enabled
 from agentseek_api.mcp_server import MCPMount, build_mcp_mount
@@ -48,7 +49,7 @@ def _langchain_oceanbase_version() -> str:
         return "unknown"
 
 
-def _feature_flags(*, mcp_enabled: bool) -> dict[str, bool]:
+def _feature_flags(*, a2a_enabled: bool, mcp_enabled: bool) -> dict[str, bool]:
     return {
         "agents": True,
         "assistants": True,
@@ -56,7 +57,7 @@ def _feature_flags(*, mcp_enabled: bool) -> dict[str, bool]:
         "runs": True,
         "crons": False,
         "store": True,
-        "a2a": False,
+        "a2a": a2a_enabled,
         "mcp": mcp_enabled,
         "protocol_v2": True,
     }
@@ -120,6 +121,7 @@ async def _resolve_mcp_user(app: FastAPI, request) -> object:
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
+    app.state.a2a_enabled = is_a2a_enabled()
     app.state.mcp_enabled = is_mcp_enabled()
     if app.state.mcp_enabled:
         app.state.mcp_mount = build_mcp_mount(
@@ -142,7 +144,10 @@ def create_app() -> FastAPI:
         return {
             "version": __version__,
             "langgraph_py_version": _langgraph_py_version(),
-            "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
+            "flags": _feature_flags(
+                a2a_enabled=app.state.a2a_enabled,
+                mcp_enabled=app.state.mcp_enabled,
+            ),
             "metadata": _server_metadata(),
         }
 
@@ -160,7 +165,10 @@ def create_app() -> FastAPI:
                         "database": "ok",
                         "checkpointer": "ok",
                     },
-                    "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
+                    "flags": _feature_flags(
+                        a2a_enabled=app.state.a2a_enabled,
+                        mcp_enabled=app.state.mcp_enabled,
+                    ),
                 }
             )
 
