@@ -2,13 +2,20 @@ import inspect
 from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import AsyncIterator
 from importlib.metadata import PackageNotFoundError, version as package_version
+from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from agentseek_api import __version__
-from agentseek_api.a2a_server import build_agent_card, is_a2a_compatible_entry, load_assistant
+from agentseek_api.a2a_server import (
+    A2ATaskRegistry,
+    build_agent_card,
+    handle_a2a_request,
+    is_a2a_compatible_entry,
+    load_assistant,
+)
 from agentseek_api.api.assistants import router as assistants_api_router
 from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
@@ -124,6 +131,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
     app.state.a2a_enabled = is_a2a_enabled()
+    app.state.a2a_registry = A2ATaskRegistry()
     app.state.mcp_enabled = is_mcp_enabled()
     if app.state.mcp_enabled:
         app.state.mcp_mount = build_mcp_mount(
@@ -205,6 +213,20 @@ def create_app() -> FastAPI:
                 base_url=str(request.base_url).rstrip("/"),
                 assistant=assistant,
                 entry=entry,
+            )
+
+        @app.post("/a2a/{assistant_id}", include_in_schema=False)
+        async def a2a_jsonrpc(
+            assistant_id: str,
+            payload: dict[str, Any],
+            user=Depends(get_current_user),
+        ) -> dict[str, Any]:
+            return await handle_a2a_request(
+                assistant_id=assistant_id,
+                payload=payload,
+                user=user,
+                service=get_langgraph_service(),
+                registry=app.state.a2a_registry,
             )
 
     app.include_router(assistants_api_router, prefix="/assistants", tags=["Assistants"])

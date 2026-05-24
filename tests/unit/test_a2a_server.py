@@ -1,8 +1,18 @@
 from datetime import UTC, datetime
 
+import pytest
+from langchain_core.messages import HumanMessage
+
 from agentseek_api.models.api import AssistantRead
+from agentseek_api.models.auth import User
 from agentseek_api.services.langgraph_service import GraphEntry
-from agentseek_api.a2a_server import build_agent_card, is_a2a_compatible_entry
+from agentseek_api.a2a_server import (
+    A2ATaskRecord,
+    A2ATaskRegistry,
+    build_agent_card,
+    handle_a2a_request,
+    is_a2a_compatible_entry,
+)
 
 
 def _entry(
@@ -270,3 +280,131 @@ def test_build_agent_card_includes_builtin_api_key_auth_metadata(monkeypatch) ->
         }
     }
     assert card["securityRequirements"] == [{"apiKeyAuth": []}]
+
+
+def test_a2a_task_registry_returns_saved_record() -> None:
+    registry = A2ATaskRegistry()
+    record = A2ATaskRecord(
+        task_id="task-1",
+        assistant_id="assistant-123",
+        context_id="context-1",
+        status_message="done",
+        artifacts=[{"artifactId": "artifact-1"}],
+    )
+
+    registry.save(record)
+
+    assert registry.get("task-1") is record
+
+
+@pytest.mark.asyncio
+async def test_handle_a2a_request_message_send_returns_completed_task(monkeypatch) -> None:
+    registry = A2ATaskRegistry()
+    assistant = _assistant(description="A2A assistant")
+    entry = _entry(
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+    captured: dict[str, object] = {}
+
+    async def fake_load_assistant(_assistant_id: str) -> AssistantRead:
+        return assistant
+
+    class _Graph:
+        async def ainvoke(self, prepared, config):
+            captured["prepared"] = prepared
+            captured["config"] = config
+            return {"final_text": '{"echo":"hello from a2a"}'}
+
+    entry.build_graph = lambda checkpointer=None, store=None: _Graph()
+    entry.prepare_input = lambda payload: payload
+    entry.extract_output = lambda result, payload: result
+
+    class _Service:
+        def get_entry(self, graph_id: str) -> GraphEntry:
+            assert graph_id == "stress_test"
+            return entry
+
+    monkeypatch.setattr("agentseek_api.a2a_server.load_assistant", fake_load_assistant)
+    monkeypatch.setattr("agentseek_api.a2a_server.build_graph_config", lambda *, user, context_id: (object(), {"thread_id": context_id}))
+
+    response = await handle_a2a_request(
+        assistant_id=assistant.assistant_id,
+        payload={
+            "jsonrpc": "2.0",
+            "id": "1",
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "hello from a2a"}],
+                    "messageId": "msg-1",
+                }
+            },
+        },
+        user=User(identity="unit-user", is_authenticated=True),
+        service=_Service(),
+        registry=registry,
+    )
+
+    assert response["result"]["kind"] == "task"
+    assert response["result"]["status"]["state"] == "completed"
+    assert response["result"]["artifacts"][0]["parts"][0]["text"] == '{"echo":"hello from a2a"}'
+    assert response["result"]["id"]
+    assert response["result"]["contextId"]
+    prepared = captured["prepared"]
+    assert isinstance(prepared, dict)
+    assert len(prepared["messages"]) == 1
+    assert isinstance(prepared["messages"][0], HumanMessage)
+    assert prepared["messages"][0].content == "hello from a2a"
+    assert registry.get(response["result"]["id"]).artifacts == response["result"]["artifacts"]
+
+
+@pytest.mark.asyncio
+async def test_handle_a2a_request_tasks_get_returns_saved_snapshot(monkeypatch) -> None:
+    registry = A2ATaskRegistry()
+    assistant = _assistant()
+
+    async def fake_load_assistant(_assistant_id: str) -> AssistantRead:
+        return assistant
+
+    class _Service:
+        def get_entry(self, graph_id: str) -> GraphEntry:
+            assert graph_id == "stress_test"
+            return _entry(
+                input_schema={
+                    "type": "object",
+                    "properties": {"messages": {"type": "array"}},
+                    "required": ["messages"],
+                }
+            )
+
+    record = A2ATaskRecord(
+        task_id="task-lookup",
+        assistant_id=assistant.assistant_id,
+        context_id="context-1",
+        state="completed",
+        artifacts=[{"artifactId": "artifact-1", "parts": [{"kind": "text", "text": "lookup me"}]}],
+    )
+    registry.save(record)
+    monkeypatch.setattr("agentseek_api.a2a_server.load_assistant", fake_load_assistant)
+
+    response = await handle_a2a_request(
+        assistant_id=assistant.assistant_id,
+        payload={
+            "jsonrpc": "2.0",
+            "id": "2",
+            "method": "tasks/get",
+            "params": {"id": "task-lookup"},
+        },
+        user=User(identity="unit-user", is_authenticated=True),
+        service=_Service(),
+        registry=registry,
+    )
+
+    assert response["result"]["id"] == "task-lookup"
+    assert response["result"]["status"]["state"] == "completed"
+    assert response["result"]["artifacts"][0]["parts"][0]["text"] == "lookup me"
