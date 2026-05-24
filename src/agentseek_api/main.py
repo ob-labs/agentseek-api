@@ -121,7 +121,10 @@ async def _resolve_mcp_user(app: FastAPI, request) -> object:
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
-    app.state.a2a_enabled = is_a2a_enabled()
+    # Track config readiness separately from runtime availability. A2A routes are
+    # not mounted in this task, so public feature flags must stay false.
+    app.state.a2a_config_enabled = is_a2a_enabled()
+    app.state.a2a_enabled = False
     app.state.mcp_enabled = is_mcp_enabled()
     if app.state.mcp_enabled:
         app.state.mcp_mount = build_mcp_mount(
