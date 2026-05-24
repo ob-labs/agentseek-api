@@ -287,6 +287,7 @@ def test_a2a_task_registry_returns_saved_record() -> None:
     record = A2ATaskRecord(
         task_id="task-1",
         assistant_id="assistant-123",
+        user_id="user-1",
         context_id="context-1",
         status_message="done",
         artifacts=[{"artifactId": "artifact-1"}],
@@ -364,6 +365,127 @@ async def test_handle_a2a_request_message_send_returns_completed_task(monkeypatc
 
 
 @pytest.mark.asyncio
+async def test_handle_a2a_request_preserves_message_context_and_task_ids(monkeypatch) -> None:
+    registry = A2ATaskRegistry()
+    assistant = _assistant()
+    entry = _entry(
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+
+    async def fake_load_assistant(_assistant_id: str) -> AssistantRead:
+        return assistant
+
+    class _Graph:
+        async def ainvoke(self, prepared, config):
+            return {"final_text": '{"echo":"continued"}'}
+
+    entry.build_graph = lambda checkpointer=None, store=None: _Graph()
+    entry.prepare_input = lambda payload: payload
+    entry.extract_output = lambda result, payload: result
+
+    class _Service:
+        def get_entry(self, graph_id: str) -> GraphEntry:
+            assert graph_id == "stress_test"
+            return entry
+
+    monkeypatch.setattr("agentseek_api.a2a_server.load_assistant", fake_load_assistant)
+    monkeypatch.setattr("agentseek_api.a2a_server.build_graph_config", lambda *, user, context_id: (object(), {"thread_id": context_id}))
+
+    response = await handle_a2a_request(
+        assistant_id=assistant.assistant_id,
+        payload={
+            "jsonrpc": "2.0",
+            "id": "preserve-1",
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "continued"}],
+                    "messageId": "msg-continued",
+                    "contextId": "context-from-message",
+                    "taskId": "task-from-message",
+                }
+            },
+        },
+        user=User(identity="unit-user", is_authenticated=True),
+        service=_Service(),
+        registry=registry,
+    )
+
+    assert response["result"]["id"] == "task-from-message"
+    assert response["result"]["contextId"] == "context-from-message"
+    saved = registry.get("task-from-message")
+    assert saved.context_id == "context-from-message"
+    assert saved.user_id == "unit-user"
+
+
+@pytest.mark.asyncio
+async def test_handle_a2a_request_rejects_cross_user_task_id_reuse(monkeypatch) -> None:
+    registry = A2ATaskRegistry()
+    assistant = _assistant()
+    entry = _entry(
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+
+    async def fake_load_assistant(_assistant_id: str) -> AssistantRead:
+        return assistant
+
+    class _Graph:
+        async def ainvoke(self, prepared, config):
+            return {"final_text": '{"echo":"hello"}'}
+
+    entry.build_graph = lambda checkpointer=None, store=None: _Graph()
+    entry.prepare_input = lambda payload: payload
+    entry.extract_output = lambda result, payload: result
+
+    class _Service:
+        def get_entry(self, graph_id: str) -> GraphEntry:
+            assert graph_id == "stress_test"
+            return entry
+
+    registry.save(
+        A2ATaskRecord(
+            task_id="shared-task",
+            assistant_id=assistant.assistant_id,
+            user_id="owner-user",
+            context_id="context-1",
+            state="completed",
+        )
+    )
+    monkeypatch.setattr("agentseek_api.a2a_server.load_assistant", fake_load_assistant)
+    monkeypatch.setattr("agentseek_api.a2a_server.build_graph_config", lambda *, user, context_id: (object(), {"thread_id": context_id}))
+
+    response = await handle_a2a_request(
+        assistant_id=assistant.assistant_id,
+        payload={
+            "jsonrpc": "2.0",
+            "id": "reuse-1",
+            "method": "message/send",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "hello"}],
+                    "taskId": "shared-task",
+                }
+            },
+        },
+        user=User(identity="other-user", is_authenticated=True),
+        service=_Service(),
+        registry=registry,
+    )
+
+    assert response["error"]["message"] == "Unknown task: shared-task"
+
+
+@pytest.mark.asyncio
 async def test_handle_a2a_request_tasks_get_returns_saved_snapshot(monkeypatch) -> None:
     registry = A2ATaskRegistry()
     assistant = _assistant()
@@ -385,6 +507,7 @@ async def test_handle_a2a_request_tasks_get_returns_saved_snapshot(monkeypatch) 
     record = A2ATaskRecord(
         task_id="task-lookup",
         assistant_id=assistant.assistant_id,
+        user_id="unit-user",
         context_id="context-1",
         state="completed",
         artifacts=[{"artifactId": "artifact-1", "parts": [{"kind": "text", "text": "lookup me"}]}],
@@ -408,3 +531,49 @@ async def test_handle_a2a_request_tasks_get_returns_saved_snapshot(monkeypatch) 
     assert response["result"]["id"] == "task-lookup"
     assert response["result"]["status"]["state"] == "completed"
     assert response["result"]["artifacts"][0]["parts"][0]["text"] == "lookup me"
+
+
+@pytest.mark.asyncio
+async def test_handle_a2a_request_tasks_get_rejects_cross_user_access(monkeypatch) -> None:
+    registry = A2ATaskRegistry()
+    assistant = _assistant()
+
+    async def fake_load_assistant(_assistant_id: str) -> AssistantRead:
+        return assistant
+
+    class _Service:
+        def get_entry(self, graph_id: str) -> GraphEntry:
+            assert graph_id == "stress_test"
+            return _entry(
+                input_schema={
+                    "type": "object",
+                    "properties": {"messages": {"type": "array"}},
+                    "required": ["messages"],
+                }
+            )
+
+    registry.save(
+        A2ATaskRecord(
+            task_id="task-owned-by-a",
+            assistant_id=assistant.assistant_id,
+            user_id="user-a",
+            context_id="context-1",
+            state="completed",
+        )
+    )
+    monkeypatch.setattr("agentseek_api.a2a_server.load_assistant", fake_load_assistant)
+
+    response = await handle_a2a_request(
+        assistant_id=assistant.assistant_id,
+        payload={
+            "jsonrpc": "2.0",
+            "id": "cross-user-get",
+            "method": "tasks/get",
+            "params": {"id": "task-owned-by-a"},
+        },
+        user=User(identity="user-b", is_authenticated=True),
+        service=_Service(),
+        registry=registry,
+    )
+
+    assert response["error"]["message"] == "Unknown task: task-owned-by-a"

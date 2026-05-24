@@ -26,6 +26,7 @@ from agentseek_api.settings import settings
 class A2ATaskRecord:
     task_id: str
     assistant_id: str
+    user_id: str
     context_id: str
     state: str = "submitted"
     status_message: str = ""
@@ -249,6 +250,10 @@ def _extract_request_text(message: dict[str, Any]) -> str:
     return "\n".join(texts)
 
 
+def _normalize_optional_id(value: Any) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 def _extract_output_text(extracted: Any) -> str:
     if isinstance(extracted, str):
         return extracted
@@ -321,7 +326,7 @@ async def handle_a2a_request(
             record = registry.get(task_id)
         except ValueError as exc:
             return _jsonrpc_error(request_id, code=-32004, message=str(exc))
-        if record.assistant_id != assistant_id:
+        if record.assistant_id != assistant_id or record.user_id != user.identity:
             return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
         return _jsonrpc_result(request_id, _task_result(record))
 
@@ -337,14 +342,22 @@ async def handle_a2a_request(
     except ValueError as exc:
         return _jsonrpc_error(request_id, code=-32602, message=str(exc))
 
-    context_id = params.get("contextId")
-    if not isinstance(context_id, str) or not context_id:
-        context_id = str(uuid4())
-    task_id = params.get("taskId")
-    if not isinstance(task_id, str) or not task_id:
-        task_id = str(uuid4())
+    context_id = _normalize_optional_id(message.get("contextId")) or _normalize_optional_id(params.get("contextId")) or str(uuid4())
+    task_id = _normalize_optional_id(message.get("taskId")) or _normalize_optional_id(params.get("taskId")) or str(uuid4())
 
-    record = A2ATaskRecord(task_id=task_id, assistant_id=assistant_id, context_id=context_id)
+    try:
+        existing = registry.get(task_id)
+    except ValueError:
+        existing = None
+    if existing is not None and existing.user_id != user.identity:
+        return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
+
+    record = A2ATaskRecord(
+        task_id=task_id,
+        assistant_id=assistant_id,
+        user_id=user.identity,
+        context_id=context_id,
+    )
     registry.save(record)
 
     try:

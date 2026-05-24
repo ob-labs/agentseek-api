@@ -109,6 +109,34 @@ def _create_stress_assistant(client: TestClient) -> dict[str, object]:
     return response.json()
 
 
+def test_a2a_route_requires_auth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+
+    stress_graph_path = Path(__file__).resolve().parents[2] / "examples" / "graphs" / "stress_test" / "graph.py"
+    config_path = tmp_path / "agentseek.json"
+    _write_agent_config(config_path=config_path, stress_graph_path=stress_graph_path)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
+
+    try:
+        with TestClient(create_app()) as client:
+            response = client.post(
+                "/a2a/assistant-123",
+                headers={"Accept": "application/json"},
+                json={"jsonrpc": "2.0", "id": "unauth", "method": "tasks/get", "params": {"id": "task-1"}},
+            )
+    finally:
+        auth_middleware._backend = None
+        langgraph_service_module._langgraph_service = None
+
+    assert response.status_code == 401
+
+
 def test_message_send_returns_completed_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     with _a2a_client(monkeypatch, tmp_path) as client:
         assistant = _create_stress_assistant(client)
@@ -136,6 +164,48 @@ def test_message_send_returns_completed_task(monkeypatch: pytest.MonkeyPatch, tm
     assert result["status"]["state"] == "completed"
     assert result["contextId"]
     assert "hello from a2a" in result["artifacts"][0]["parts"][0]["text"]
+
+
+def test_message_send_preserves_message_context_and_task_ids(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client)
+
+        response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "preserve-ids",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"preserve ids"}'}],
+                        "messageId": "msg-preserve",
+                        "contextId": "context-from-message",
+                        "taskId": "task-from-message",
+                    }
+                },
+            },
+        )
+
+        get_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "preserve-ids-get",
+                "method": "tasks/get",
+                "params": {"id": "task-from-message"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["result"]["id"] == "task-from-message"
+    assert response.json()["result"]["contextId"] == "context-from-message"
+    assert get_response.status_code == 200
+    assert get_response.json()["result"]["id"] == "task-from-message"
+    assert get_response.json()["result"]["contextId"] == "context-from-message"
 
 
 def test_tasks_get_returns_saved_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -173,3 +243,39 @@ def test_tasks_get_returns_saved_snapshot(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert get_response.status_code == 200
     assert get_response.json()["result"]["id"] == task_id
     assert get_response.json()["result"]["status"]["state"] == "completed"
+
+
+def test_tasks_get_rejects_cross_user_access(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client)
+        send_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-a"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "owner-send",
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": '{"delay":0.0,"steps":1,"note":"private task"}'}],
+                        "messageId": "msg-private",
+                    }
+                },
+            },
+        )
+        task_id = send_response.json()["result"]["id"]
+
+        get_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "user-b"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "other-get",
+                "method": "tasks/get",
+                "params": {"id": task_id},
+            },
+        )
+
+    assert get_response.status_code == 200
+    assert get_response.json()["error"]["message"] == f"Unknown task: {task_id}"
