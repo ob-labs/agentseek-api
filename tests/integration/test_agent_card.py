@@ -154,9 +154,10 @@ def test_agent_card_endpoint_includes_api_key_auth_metadata(monkeypatch, tmp_pat
     body = response.json()
     assert body["securitySchemes"] == {
         "apiKeyAuth": {
-            "type": "apiKey",
-            "in": "header",
-            "name": "x-api-key",
+            "apiKeySecurityScheme": {
+                "location": "header",
+                "name": "x-api-key",
+            }
         }
     }
     assert body["security"] == [{"apiKeyAuth": []}]

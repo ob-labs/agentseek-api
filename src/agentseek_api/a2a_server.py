@@ -37,19 +37,33 @@ def _agent_card_auth_metadata() -> dict[str, Any]:
         security_schemes = auth_openapi.get("securitySchemes")
         security = auth_openapi.get("security")
         if isinstance(security_schemes, dict) and isinstance(security, list):
-            return {
-                "securitySchemes": security_schemes,
-                "security": security,
-            }
+            translated_schemes: dict[str, Any] = {}
+            for scheme_name, scheme in security_schemes.items():
+                if not isinstance(scheme_name, str) or not isinstance(scheme, dict):
+                    continue
+                translated = _translate_openapi_security_scheme(scheme)
+                if translated is not None:
+                    translated_schemes[scheme_name] = translated
+
+            translated_security = _translate_openapi_security_requirements(
+                security,
+                retained_scheme_names=set(translated_schemes.keys()),
+            )
+            if translated_schemes:
+                metadata: dict[str, Any] = {"securitySchemes": translated_schemes}
+                if translated_security:
+                    metadata["security"] = translated_security
+                return metadata
 
     auth_type = settings.AUTH_TYPE.strip().lower()
     if auth_type == "api_key":
         return {
             "securitySchemes": {
                 "apiKeyAuth": {
-                    "type": "apiKey",
-                    "in": "header",
-                    "name": "x-api-key",
+                    "apiKeySecurityScheme": {
+                        "location": "header",
+                        "name": "x-api-key",
+                    }
                 }
             },
             "security": [{"apiKeyAuth": []}],
@@ -58,14 +72,62 @@ def _agent_card_auth_metadata() -> dict[str, Any]:
         return {
             "securitySchemes": {
                 "bearerAuth": {
-                    "type": "http",
-                    "scheme": "bearer",
-                    "bearerFormat": "JWT",
+                    "httpAuthSecurityScheme": {
+                        "scheme": "bearer",
+                        "bearerFormat": "JWT",
+                    }
                 }
             },
             "security": [{"bearerAuth": []}],
         }
     return {}
+
+
+def _translate_openapi_security_scheme(scheme: dict[str, Any]) -> dict[str, Any] | None:
+    description = scheme.get("description")
+    description_value = description if isinstance(description, str) and description else None
+
+    if scheme.get("type") == "apiKey":
+        location = scheme.get("in")
+        name = scheme.get("name")
+        if isinstance(location, str) and isinstance(name, str):
+            translated: dict[str, Any] = {
+                "location": location,
+                "name": name,
+            }
+            if description_value is not None:
+                translated["description"] = description_value
+            return {"apiKeySecurityScheme": translated}
+
+    if scheme.get("type") == "http" and scheme.get("scheme") == "bearer":
+        translated: dict[str, Any] = {"scheme": "bearer"}
+        bearer_format = scheme.get("bearerFormat")
+        if isinstance(bearer_format, str) and bearer_format:
+            translated["bearerFormat"] = bearer_format
+        if description_value is not None:
+            translated["description"] = description_value
+        return {"httpAuthSecurityScheme": translated}
+
+    return None
+
+
+def _translate_openapi_security_requirements(
+    security: list[Any],
+    *,
+    retained_scheme_names: set[str],
+) -> list[dict[str, list[Any]]]:
+    translated: list[dict[str, list[Any]]] = []
+    for item in security:
+        if not isinstance(item, dict):
+            continue
+        filtered = {
+            name: scopes
+            for name, scopes in item.items()
+            if isinstance(name, str) and name in retained_scheme_names and isinstance(scopes, list)
+        }
+        if filtered:
+            translated.append(filtered)
+    return translated
 
 
 def build_agent_card(base_url: str, assistant: AssistantRead, entry: GraphEntry) -> dict[str, Any]:
