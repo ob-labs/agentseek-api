@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime
 
 import pytest
@@ -510,6 +511,96 @@ async def test_handle_a2a_request_message_stream_prefers_astream_and_emits_updat
     saved = registry.get("stream-task")
     assert saved.state == "completed"
     assert saved.artifacts[0]["parts"][0]["text"] == "streamed final"
+
+
+@pytest.mark.asyncio
+async def test_handle_a2a_request_message_stream_stops_after_cancellation(monkeypatch) -> None:
+    registry = A2ATaskRegistry()
+    assistant = _assistant(description="A2A assistant")
+    entry = _entry(
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+
+    async def fake_load_assistant(_assistant_id: str) -> AssistantRead:
+        return assistant
+
+    first_chunk_processed = asyncio.Event()
+    continue_stream = asyncio.Event()
+
+    class _Graph:
+        async def astream(self, prepared, config):
+            yield {"messages": [HumanMessage(content="chunk one")]}
+            first_chunk_processed.set()
+            await continue_stream.wait()
+
+    entry.build_graph = lambda checkpointer=None, store=None: _Graph()
+    entry.prepare_input = lambda payload: payload
+    entry.extract_output = lambda result, payload: result
+
+    class _Service:
+        def get_entry(self, graph_id: str) -> GraphEntry:
+            assert graph_id == "stress_test"
+            return entry
+
+    monkeypatch.setattr("agentseek_api.a2a_server.load_assistant", fake_load_assistant)
+    monkeypatch.setattr("agentseek_api.a2a_server.build_graph_config", lambda *, user, context_id: (object(), {"thread_id": context_id}))
+
+    response = await handle_a2a_request(
+        assistant_id=assistant.assistant_id,
+        payload={
+            "jsonrpc": "2.0",
+            "id": "stream-cancel-1",
+            "method": "message/stream",
+            "params": {
+                "message": {
+                    "role": "user",
+                    "parts": [{"kind": "text", "text": "cancel this stream"}],
+                    "messageId": "msg-stream-cancel-1",
+                    "taskId": "stream-cancel-task",
+                }
+            },
+        },
+        user=User(identity="unit-user", is_authenticated=True),
+        service=_Service(),
+        registry=registry,
+    )
+
+    assert isinstance(response, StreamingResponse)
+    iterator = response.body_iterator.__aiter__()
+    first_event = await anext(iterator)
+    first_text = first_event if isinstance(first_event, str) else first_event.decode("utf-8")
+    assert '"kind": "status-update"' in first_text
+    assert '"state": "working"' in first_text
+
+    next_event_task = asyncio.create_task(anext(iterator))
+    await first_chunk_processed.wait()
+
+    record = registry.get("stream-cancel-task")
+    record.cancellation_requested = True
+    record.state = "cancelled"
+    record.status_message = "Task cancelled"
+    registry.save(record)
+    second_event = await asyncio.wait_for(next_event_task, timeout=0.2)
+    second_text = second_event if isinstance(second_event, str) else second_event.decode("utf-8")
+    assert '"artifact-update"' in second_text
+    assert '"lastChunk": true' in second_text
+    assert "chunk one" in second_text
+
+    third_event = await asyncio.wait_for(anext(iterator), timeout=0.2)
+    third_text = third_event if isinstance(third_event, str) else third_event.decode("utf-8")
+    assert '"state": "cancelled"' in third_text
+    assert '"kind": "status-update"' in third_text
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(iterator)
+
+    saved = registry.get("stream-cancel-task")
+    assert saved.state == "cancelled"
+    assert saved.artifacts[0]["parts"][0]["text"] == "chunk one"
 
 
 @pytest.mark.asyncio

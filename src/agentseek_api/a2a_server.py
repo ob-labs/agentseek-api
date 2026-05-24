@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from dataclasses import dataclass, field
 from threading import Lock
 from typing import Any
@@ -693,13 +695,58 @@ async def handle_a2a_request(
 
             final_extracted: dict[str, Any] | None = None
             pending_text: str | None = None
+            stream_queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+            async def _produce_stream() -> None:
+                try:
+                    async for extracted in _invoke_a2a_graph_stream(
+                        entry=entry,
+                        user=user,
+                        context_id=record.context_id,
+                        text=text,
+                    ):
+                        await stream_queue.put(("item", extracted))
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:  # noqa: BLE001
+                    await stream_queue.put(("error", exc))
+                    return
+                await stream_queue.put(("done", None))
+
+            producer_task = asyncio.create_task(_produce_stream())
             try:
-                async for extracted in _invoke_a2a_graph_stream(
-                    entry=entry,
-                    user=user,
-                    context_id=record.context_id,
-                    text=text,
-                ):
+                while True:
+                    if record.cancellation_requested:
+                        if pending_text is not None:
+                            artifact = make_text_artifact(pending_text)
+                            record.artifacts = [artifact]
+                            yield _sse_jsonrpc_event(
+                                request_id=request_id,
+                                result=_task_artifact_update_event(
+                                    record,
+                                    artifact=artifact,
+                                    append=True,
+                                    last_chunk=True,
+                                    sdk_compatible=sdk_compatible,
+                                ),
+                            )
+                        else:
+                            record.artifacts = []
+                        registry.save(record)
+                        yield _sse_jsonrpc_event(
+                            request_id=request_id,
+                            result=_task_status_update_event(record, final=True, sdk_compatible=sdk_compatible),
+                        )
+                        return
+                    try:
+                        event_kind, event_payload = await asyncio.wait_for(stream_queue.get(), timeout=0.05)
+                    except asyncio.TimeoutError:
+                        continue
+                    if event_kind == "error":
+                        raise event_payload
+                    if event_kind == "done":
+                        break
+                    extracted = event_payload
                     final_extracted = extracted
                     chunk_text = _extract_stream_chunk_text(extracted)
                     if chunk_text is None:
@@ -725,8 +772,28 @@ async def handle_a2a_request(
                     result=_task_status_update_event(record, final=True, sdk_compatible=sdk_compatible),
                 )
                 return
+            finally:
+                if not producer_task.done():
+                    producer_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await producer_task
 
             if record.cancellation_requested:
+                if pending_text is not None:
+                    artifact = make_text_artifact(pending_text)
+                    record.artifacts = [artifact]
+                    yield _sse_jsonrpc_event(
+                        request_id=request_id,
+                        result=_task_artifact_update_event(
+                            record,
+                            artifact=artifact,
+                            append=True,
+                            last_chunk=True,
+                            sdk_compatible=sdk_compatible,
+                        ),
+                    )
+                else:
+                    record.artifacts = []
                 registry.save(record)
                 yield _sse_jsonrpc_event(
                     request_id=request_id,
