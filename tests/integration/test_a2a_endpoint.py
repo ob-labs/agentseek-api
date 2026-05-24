@@ -485,3 +485,77 @@ def test_message_send_rejects_cross_assistant_task_reuse(monkeypatch: pytest.Mon
     assert get_response.status_code == 200
     assert get_response.json()["result"]["id"] == "shared-task"
     assert get_response.json()["result"]["contextId"] == "context-1"
+
+
+def test_sdk_send_message_and_get_task_aliases_accept_protobuf_json_shape(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client, name="SDK Alias Assistant")
+
+        send_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "sdk-user"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "sdk-send-1",
+                "method": "SendMessage",
+                "params": {
+                    "message": {
+                        "messageId": "sdk-message-1",
+                        "role": "ROLE_USER",
+                        "parts": [{"text": '{"delay":0.0,"steps":1,"note":"hello from sdk alias"}'}],
+                    }
+                },
+            },
+        )
+
+        task_id = send_response.json()["result"]["task"]["id"]
+        get_response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "sdk-user"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "sdk-get-1",
+                "method": "GetTask",
+                "params": {"id": task_id},
+            },
+        )
+
+    assert send_response.status_code == 200
+    assert send_response.json()["result"]["task"]["id"] == task_id
+    assert send_response.json()["result"]["task"]["status"]["state"] == "TASK_STATE_COMPLETED"
+    assert "hello from sdk alias" in send_response.json()["result"]["task"]["artifacts"][0]["parts"][0]["text"]
+    assert get_response.status_code == 200
+    assert get_response.json()["result"]["id"] == task_id
+    assert get_response.json()["result"]["status"]["state"] == "TASK_STATE_COMPLETED"
+
+
+def test_sdk_streaming_alias_returns_streamresponse_shape(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client, name="SDK Streaming Assistant")
+
+        with client.stream(
+            "POST",
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "text/event-stream", "x-user-id": "sdk-user"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "sdk-stream-1",
+                "method": "SendStreamingMessage",
+                "params": {
+                    "message": {
+                        "messageId": "sdk-stream-message-1",
+                        "role": "ROLE_USER",
+                        "parts": [{"text": '{"delay":0.0,"steps":1,"note":"stream via sdk alias"}'}],
+                    }
+                },
+            },
+        ) as response:
+            body = b"".join(response.iter_bytes()).decode("utf-8")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/event-stream")
+    assert '"statusUpdate"' in body
+    assert '"artifactUpdate"' in body
+    assert "stream via sdk alias" in body

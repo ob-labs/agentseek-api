@@ -236,6 +236,14 @@ def make_text_artifact(text: str) -> dict[str, Any]:
     }
 
 
+def make_sdk_text_artifact(text: str) -> dict[str, Any]:
+    return {
+        "artifactId": str(uuid4()),
+        "name": "Assistant Response",
+        "parts": [{"text": text}],
+    }
+
+
 def _jsonrpc_result(request_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
@@ -244,21 +252,54 @@ def _jsonrpc_error(request_id: Any, *, code: int, message: str) -> dict[str, Any
     return {"jsonrpc": "2.0", "id": request_id, "error": {"code": code, "message": message}}
 
 
-def _task_result(record: A2ATaskRecord) -> dict[str, Any]:
-    status: dict[str, Any] = {"state": record.state}
-    if record.status_message:
+def _task_result(record: A2ATaskRecord, *, sdk_compatible: bool = False) -> dict[str, Any]:
+    status_state = _sdk_task_state(record.state) if sdk_compatible else record.state
+    status: dict[str, Any] = {"state": status_state}
+    if record.status_message and not sdk_compatible:
         status["message"] = {"kind": "text", "text": record.status_message}
-    return {
+    artifacts = (
+        [make_sdk_text_artifact(_artifact_text(artifact)) for artifact in record.artifacts]
+        if sdk_compatible
+        else record.artifacts
+    )
+    result = {
         "id": record.task_id,
         "contextId": record.context_id,
-        "kind": "task",
         "status": status,
-        "artifacts": record.artifacts,
+        "artifacts": artifacts,
     }
+    if not sdk_compatible:
+        result["kind"] = "task"
+    return result
 
 
 def _is_terminal_state(state: str) -> bool:
     return state in {"completed", "failed", "cancelled"}
+
+
+def _sdk_task_state(state: str) -> str:
+    return {
+        "submitted": "TASK_STATE_SUBMITTED",
+        "working": "TASK_STATE_WORKING",
+        "completed": "TASK_STATE_COMPLETED",
+        "failed": "TASK_STATE_FAILED",
+        "cancelled": "TASK_STATE_CANCELED",
+    }.get(state, "TASK_STATE_UNSPECIFIED")
+
+
+def _artifact_text(artifact: dict[str, Any]) -> str:
+    parts = artifact.get("parts")
+    if not isinstance(parts, list):
+        return ""
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        text = part.get("text")
+        if isinstance(text, str):
+            return text
+        if part.get("kind") == "text" and isinstance(part.get("text"), str):
+            return part["text"]
+    return ""
 
 
 def _message_content(message: BaseMessage) -> str:
@@ -314,9 +355,19 @@ def _extract_request_text(message: dict[str, Any]) -> str:
 
     texts: list[str] = []
     for part in parts:
-        if not isinstance(part, dict) or part.get("kind") != "text" or not isinstance(part.get("text"), str):
+        if not isinstance(part, dict):
             raise ValueError("Only text parts are supported.")
-        texts.append(part["text"])
+        direct_text = part.get("text")
+        if isinstance(direct_text, str):
+            texts.append(direct_text)
+            continue
+        if part.get("kind") == "text" and isinstance(direct_text, str):
+            texts.append(direct_text)
+            continue
+        if isinstance(direct_text, dict) and isinstance(direct_text.get("text"), str):
+            texts.append(direct_text["text"])
+            continue
+        raise ValueError("Only text parts are supported.")
     return "\n".join(texts)
 
 
@@ -468,17 +519,26 @@ def _cancel_task(record: A2ATaskRecord) -> A2ATaskRecord:
     return record
 
 
-def _task_status_update_event(record: A2ATaskRecord, *, final: bool) -> dict[str, Any]:
-    status: dict[str, Any] = {"state": record.state}
-    if record.status_message:
+def _task_status_update_event(
+    record: A2ATaskRecord,
+    *,
+    final: bool,
+    sdk_compatible: bool = False,
+) -> dict[str, Any]:
+    status_state = _sdk_task_state(record.state) if sdk_compatible else record.state
+    status: dict[str, Any] = {"state": status_state}
+    if record.status_message and not sdk_compatible:
         status["message"] = {"kind": "text", "text": record.status_message}
-    return {
-        "kind": "status-update",
+    event = {
         "taskId": record.task_id,
         "contextId": record.context_id,
         "status": status,
-        "final": final,
     }
+    if sdk_compatible:
+        return {"statusUpdate": event}
+    event["final"] = final
+    event["kind"] = "status-update"
+    return event
 
 
 def _task_artifact_update_event(
@@ -487,15 +547,38 @@ def _task_artifact_update_event(
     artifact: dict[str, Any],
     append: bool,
     last_chunk: bool,
+    sdk_compatible: bool = False,
 ) -> dict[str, Any]:
-    return {
-        "kind": "artifact-update",
+    artifact_payload = make_sdk_text_artifact(_artifact_text(artifact)) if sdk_compatible else artifact
+    event = {
         "taskId": record.task_id,
         "contextId": record.context_id,
-        "artifact": artifact,
+        "artifact": artifact_payload,
         "append": append,
         "lastChunk": last_chunk,
     }
+    if sdk_compatible:
+        return {"artifactUpdate": event}
+    event["kind"] = "artifact-update"
+    return event
+
+
+def _sdk_send_message_result(record: A2ATaskRecord) -> dict[str, Any]:
+    return {"task": _task_result(record, sdk_compatible=True)}
+
+
+def _canonical_a2a_method(method: str) -> tuple[str, bool]:
+    mapping = {
+        "message/send": ("message/send", False),
+        "message/stream": ("message/stream", False),
+        "tasks/get": ("tasks/get", False),
+        "tasks/cancel": ("tasks/cancel", False),
+        "SendMessage": ("message/send", True),
+        "SendStreamingMessage": ("message/stream", True),
+        "GetTask": ("tasks/get", True),
+        "CancelTask": ("tasks/cancel", True),
+    }
+    return mapping.get(method, (method, False))
 
 
 def _sse_jsonrpc_event(*, request_id: Any, result: dict[str, Any]) -> str:
@@ -523,7 +606,7 @@ async def handle_a2a_request(
     if not is_a2a_compatible_entry(entry):
         return _jsonrpc_error(request_id, code=-32000, message="Assistant graph is not A2A-compatible.")
 
-    method = payload["method"]
+    method, sdk_compatible = _canonical_a2a_method(payload["method"])
     params = payload.get("params")
     if not isinstance(params, dict):
         return _jsonrpc_error(request_id, code=-32602, message="params must be an object.")
@@ -538,7 +621,7 @@ async def handle_a2a_request(
             return _jsonrpc_error(request_id, code=-32004, message=str(exc))
         if record.assistant_id != assistant_id or record.user_id != user.identity:
             return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
-        return _jsonrpc_result(request_id, _task_result(record))
+        return _jsonrpc_result(request_id, _task_result(record, sdk_compatible=sdk_compatible))
 
     if method == "tasks/cancel":
         task_id = params.get("id")
@@ -551,7 +634,7 @@ async def handle_a2a_request(
         if record.assistant_id != assistant_id or record.user_id != user.identity:
             return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
         registry.save(_cancel_task(record))
-        return _jsonrpc_result(request_id, _task_result(record))
+        return _jsonrpc_result(request_id, _task_result(record, sdk_compatible=sdk_compatible))
 
     if method not in {"message/send", "message/stream"}:
         return _jsonrpc_error(request_id, code=-32601, message=f"Unsupported method: {method}")
@@ -584,7 +667,7 @@ async def handle_a2a_request(
             registry.save(record)
             yield _sse_jsonrpc_event(
                 request_id=request_id,
-                result=_task_status_update_event(record, final=False),
+                result=_task_status_update_event(record, final=False, sdk_compatible=sdk_compatible),
             )
 
             final_extracted: dict[str, Any] | None = None
@@ -608,6 +691,7 @@ async def handle_a2a_request(
                                 artifact=make_text_artifact(pending_text),
                                 append=True,
                                 last_chunk=False,
+                                sdk_compatible=sdk_compatible,
                             ),
                         )
                     pending_text = chunk_text
@@ -617,7 +701,7 @@ async def handle_a2a_request(
                 registry.save(record)
                 yield _sse_jsonrpc_event(
                     request_id=request_id,
-                    result=_task_status_update_event(record, final=True),
+                    result=_task_status_update_event(record, final=True, sdk_compatible=sdk_compatible),
                 )
                 return
 
@@ -625,7 +709,7 @@ async def handle_a2a_request(
                 registry.save(record)
                 yield _sse_jsonrpc_event(
                     request_id=request_id,
-                    result=_task_status_update_event(record, final=True),
+                    result=_task_status_update_event(record, final=True, sdk_compatible=sdk_compatible),
                 )
                 return
 
@@ -639,6 +723,7 @@ async def handle_a2a_request(
                         artifact=make_text_artifact(terminal_chunk_text),
                         append=True,
                         last_chunk=True,
+                        sdk_compatible=sdk_compatible,
                     ),
                 )
             record.state = "completed"
@@ -646,7 +731,7 @@ async def handle_a2a_request(
             registry.save(record)
             yield _sse_jsonrpc_event(
                 request_id=request_id,
-                result=_task_status_update_event(record, final=True),
+                result=_task_status_update_event(record, final=True, sdk_compatible=sdk_compatible),
             )
 
         return StreamingResponse(_event_iter(), media_type="text/event-stream")
@@ -668,12 +753,18 @@ async def handle_a2a_request(
 
     if record.cancellation_requested:
         registry.save(record)
-        return _jsonrpc_result(request_id, _task_result(record))
+        return _jsonrpc_result(
+            request_id,
+            _sdk_send_message_result(record) if sdk_compatible else _task_result(record),
+        )
 
     record.state = "completed"
     record.artifacts = [make_text_artifact(_extract_output_text(extracted))]
     registry.save(record)
-    return _jsonrpc_result(request_id, _task_result(record))
+    return _jsonrpc_result(
+        request_id,
+        _sdk_send_message_result(record) if sdk_compatible else _task_result(record),
+    )
 
 
 async def load_assistant(assistant_id: str) -> AssistantRead:
