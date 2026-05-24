@@ -71,11 +71,19 @@ def _write_agent_config(*, config_path: Path, stress_graph_path: Path, disable_a
 
 
 @contextmanager
-def _agent_card_client(monkeypatch, tmp_path: Path, *, disable_a2a: bool = False) -> Iterator[TestClient]:
+def _agent_card_client(
+    monkeypatch,
+    tmp_path: Path,
+    *,
+    disable_a2a: bool = False,
+    auth_type: str = "noop",
+) -> Iterator[TestClient]:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AUTH_TYPE", auth_type)
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user" if auth_type == "api_key" else "")
 
     stress_graph_path = Path(__file__).resolve().parents[2] / "examples" / "graphs" / "stress_test" / "graph.py"
     config_path = tmp_path / "agentseek.json"
@@ -123,3 +131,32 @@ def test_agent_card_endpoint_is_not_mounted_when_a2a_is_disabled(monkeypatch, tm
         response = client.get("/.well-known/agent-card.json?assistant_id=assistant-123")
 
     assert response.status_code == 404
+
+
+def test_agent_card_endpoint_includes_api_key_auth_metadata(monkeypatch, tmp_path: Path) -> None:
+    headers = {"X-API-Key": "secret"}
+    with _agent_card_client(monkeypatch, tmp_path, auth_type="api_key") as client:
+        assistant = client.post(
+            "/assistants",
+            json={
+                "name": "Secured Stress Agent",
+                "description": "A2A api key auth discovery",
+                "graph_id": "stress_test",
+            },
+            headers=headers,
+        )
+        assistant.raise_for_status()
+        assistant_id = assistant.json()["assistant_id"]
+
+        response = client.get(f"/.well-known/agent-card.json?assistant_id={assistant_id}", headers=headers)
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["securitySchemes"] == {
+        "apiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "x-api-key",
+        }
+    }
+    assert body["security"] == [{"apiKeyAuth": []}]

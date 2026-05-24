@@ -113,3 +113,62 @@ def test_build_agent_card_prefers_assistant_metadata_over_graph_metadata() -> No
     assert "url" not in card
     assert "preferredTransport" not in card
     assert card["skills"][0]["id"] == "graph-tool"
+
+
+def test_build_agent_card_includes_config_auth_metadata(monkeypatch) -> None:
+    assistant = _assistant()
+    entry = _entry(
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+    monkeypatch.setattr(
+        "agentseek_api.a2a_server.get_config_auth_openapi",
+        lambda: {
+            "securitySchemes": {
+                "apiKeyAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "X-API-Key",
+                }
+            },
+            "security": [{"apiKeyAuth": []}],
+        },
+    )
+
+    card = build_agent_card(base_url="https://example.com", assistant=assistant, entry=entry)
+
+    assert card["securitySchemes"] == {
+        "apiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "X-API-Key",
+        }
+    }
+    assert card["security"] == [{"apiKeyAuth": []}]
+
+
+def test_build_agent_card_includes_builtin_api_key_auth_metadata(monkeypatch) -> None:
+    assistant = _assistant()
+    entry = _entry(
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+    monkeypatch.setattr("agentseek_api.a2a_server.get_config_auth_openapi", lambda: None)
+    monkeypatch.setattr("agentseek_api.a2a_server.settings.AUTH_TYPE", "api_key")
+
+    card = build_agent_card(base_url="https://example.com", assistant=assistant, entry=entry)
+
+    assert card["securitySchemes"] == {
+        "apiKeyAuth": {
+            "type": "apiKey",
+            "in": "header",
+            "name": "x-api-key",
+        }
+    }
+    assert card["security"] == [{"apiKeyAuth": []}]

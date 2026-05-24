@@ -6,10 +6,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from agentseek_api import __version__
+from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant
 from agentseek_api.models.api import AssistantRead
 from agentseek_api.services.langgraph_service import GraphEntry
+from agentseek_api.settings import settings
 
 
 def is_a2a_compatible_entry(entry: GraphEntry) -> bool:
@@ -29,12 +31,49 @@ def is_a2a_compatible_entry(entry: GraphEntry) -> bool:
     return messages.get("type") == "array" and "messages" in required
 
 
+def _agent_card_auth_metadata() -> dict[str, Any]:
+    auth_openapi = get_config_auth_openapi()
+    if isinstance(auth_openapi, dict):
+        security_schemes = auth_openapi.get("securitySchemes")
+        security = auth_openapi.get("security")
+        if isinstance(security_schemes, dict) and isinstance(security, list):
+            return {
+                "securitySchemes": security_schemes,
+                "security": security,
+            }
+
+    auth_type = settings.AUTH_TYPE.strip().lower()
+    if auth_type == "api_key":
+        return {
+            "securitySchemes": {
+                "apiKeyAuth": {
+                    "type": "apiKey",
+                    "in": "header",
+                    "name": "x-api-key",
+                }
+            },
+            "security": [{"apiKeyAuth": []}],
+        }
+    if auth_type == "jwt":
+        return {
+            "securitySchemes": {
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                }
+            },
+            "security": [{"bearerAuth": []}],
+        }
+    return {}
+
+
 def build_agent_card(base_url: str, assistant: AssistantRead, entry: GraphEntry) -> dict[str, Any]:
     description = assistant.description or entry.description
     url = f"{base_url}/a2a/{assistant.assistant_id}"
     skill_description = description or f"Runs the {assistant.graph_id} graph."
 
-    return {
+    card: dict[str, Any] = {
         "name": assistant.name,
         "description": description,
         "supportedInterfaces": [
@@ -57,6 +96,8 @@ def build_agent_card(base_url: str, assistant: AssistantRead, entry: GraphEntry)
             }
         ],
     }
+    card.update(_agent_card_auth_metadata())
+    return card
 
 
 async def load_assistant(assistant_id: str) -> AssistantRead:
