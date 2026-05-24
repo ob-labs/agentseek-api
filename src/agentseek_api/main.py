@@ -3,11 +3,12 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import AsyncIterator
 from importlib.metadata import PackageNotFoundError, version as package_version
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from agentseek_api import __version__
+from agentseek_api.a2a_server import build_agent_card, is_a2a_compatible_entry, load_assistant
 from agentseek_api.api.assistants import router as assistants_api_router
 from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
@@ -19,6 +20,7 @@ from agentseek_api.core.a2a_config import is_a2a_enabled
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.mcp_config import is_mcp_enabled
 from agentseek_api.mcp_server import MCPMount, build_mcp_mount
+from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.settings import settings
 
 
@@ -186,6 +188,22 @@ def create_app() -> FastAPI:
             ]
         )
         return PlainTextResponse(body + "\n")
+
+    @app.get("/.well-known/agent-card.json", include_in_schema=False)
+    async def agent_card(
+        request: Request,
+        assistant_id: str,
+        _user=Depends(get_current_user),
+    ) -> dict[str, object]:
+        assistant = await load_assistant(assistant_id)
+        entry = get_langgraph_service().get_entry(assistant.graph_id)
+        if not is_a2a_compatible_entry(entry):
+            raise HTTPException(status_code=400, detail="Assistant graph is not A2A-compatible")
+        return build_agent_card(
+            base_url=str(request.base_url).rstrip("/"),
+            assistant=assistant,
+            entry=entry,
+        )
 
     app.include_router(assistants_api_router, prefix="/assistants", tags=["Assistants"])
     app.include_router(assistants_api_router, prefix="/agents", tags=["Agents"])
