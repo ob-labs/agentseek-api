@@ -115,6 +115,25 @@ def test_build_agent_card_prefers_assistant_metadata_over_graph_metadata() -> No
     assert card["skills"][0]["id"] == "graph-tool"
 
 
+def test_build_agent_card_keeps_top_level_description_strictly_assistant_first() -> None:
+    assistant = _assistant(name="Assistant Preferred", description="")
+    entry = _entry(
+        tool_name="graph-tool",
+        description="Graph description",
+        input_schema={
+            "type": "object",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        },
+    )
+
+    card = build_agent_card(base_url="https://example.com", assistant=assistant, entry=entry)
+
+    assert card["name"] == "Assistant Preferred"
+    assert card["description"] == ""
+    assert card["skills"][0]["description"] == "Graph description"
+
+
 def test_build_agent_card_includes_config_auth_metadata(monkeypatch) -> None:
     assistant = _assistant()
     entry = _entry(

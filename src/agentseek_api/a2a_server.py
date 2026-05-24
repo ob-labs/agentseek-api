@@ -69,9 +69,9 @@ def _agent_card_auth_metadata() -> dict[str, Any]:
 
 
 def build_agent_card(base_url: str, assistant: AssistantRead, entry: GraphEntry) -> dict[str, Any]:
-    description = assistant.description or entry.description
+    description = assistant.description or ""
     url = f"{base_url}/a2a/{assistant.assistant_id}"
-    skill_description = description or f"Runs the {assistant.graph_id} graph."
+    skill_description = assistant.description or entry.description or f"Runs the {assistant.graph_id} graph."
 
     card: dict[str, Any] = {
         "name": assistant.name,
