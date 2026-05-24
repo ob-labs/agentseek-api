@@ -62,20 +62,11 @@ def test_is_a2a_compatible_entry_rejects_non_message_schema() -> None:
     assert is_a2a_compatible_entry(entry) is False
 
 
-def test_is_a2a_compatible_entry_accepts_inferred_messages_preparer() -> None:
+def test_is_a2a_compatible_entry_rejects_message_prepare_input_without_explicit_schema() -> None:
     entry = _entry(
         input_schema={"type": "object"},
     )
     entry.prepare_input = lambda payload: {"messages": [{"role": "user", "content": payload["message"]}]}
-
-    assert is_a2a_compatible_entry(entry) is True
-
-
-def test_is_a2a_compatible_entry_rejects_non_message_prepare_input() -> None:
-    entry = _entry(
-        input_schema={"type": "object"},
-    )
-    entry.prepare_input = lambda payload: {"foo": payload["message"]}
 
     assert is_a2a_compatible_entry(entry) is False
 
