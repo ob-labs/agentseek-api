@@ -104,6 +104,66 @@ graph = builder.compile()
     langgraph_service_module._langgraph_service = None
 
 
+def test_info_endpoint_reports_a2a_runtime_state_from_startup(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    graph_path = tmp_path / "graph.py"
+    graph_path.write_text(
+        """
+from langgraph.graph import END, START, StateGraph
+
+builder = StateGraph(dict)
+builder.add_node("node", lambda state: state)
+builder.add_edge(START, "node")
+builder.add_edge("node", END)
+graph = builder.compile()
+""".strip(),
+        encoding="utf-8",
+    )
+    config_path = tmp_path / "agentseek.json"
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": {
+      "graph": "./graph.py:graph"
+    }
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
+    auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
+
+    app = create_app()
+    config_path.write_text(
+        """
+{
+  "graphs": {
+    "chat": {
+      "graph": "./graph.py:graph"
+    }
+  },
+  "http": {
+    "disable_a2a": true
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with TestClient(app) as test_client:
+        response = test_client.get("/info")
+
+    assert response.status_code == 200
+    assert response.json()["flags"]["a2a"] is True
+    auth_middleware._backend = None
+    langgraph_service_module._langgraph_service = None
+
+
 def test_metrics_endpoint_prometheus_default(client: TestClient) -> None:
     response = client.get("/metrics")
     assert response.status_code == 200

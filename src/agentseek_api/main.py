@@ -2,12 +2,20 @@ import inspect
 from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import AsyncIterator
 from importlib.metadata import PackageNotFoundError, version as package_version
+from typing import Any
 
-from fastapi import FastAPI, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Route
 
 from agentseek_api import __version__
+from agentseek_api.a2a_server import (
+    A2ATaskRegistry,
+    build_agent_card,
+    handle_a2a_request,
+    is_a2a_compatible_entry,
+    load_assistant,
+)
 from agentseek_api.api.assistants import router as assistants_api_router
 from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
@@ -15,9 +23,11 @@ from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
+from agentseek_api.core.a2a_config import is_a2a_enabled
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.mcp_config import is_mcp_enabled
 from agentseek_api.mcp_server import MCPMount, build_mcp_mount
+from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.settings import settings
 
 
@@ -48,7 +58,7 @@ def _langchain_oceanbase_version() -> str:
         return "unknown"
 
 
-def _feature_flags(*, mcp_enabled: bool) -> dict[str, bool]:
+def _feature_flags(*, a2a_enabled: bool, mcp_enabled: bool) -> dict[str, bool]:
     return {
         "agents": True,
         "assistants": True,
@@ -56,7 +66,7 @@ def _feature_flags(*, mcp_enabled: bool) -> dict[str, bool]:
         "runs": True,
         "crons": False,
         "store": True,
-        "a2a": False,
+        "a2a": a2a_enabled,
         "mcp": mcp_enabled,
         "protocol_v2": True,
     }
@@ -120,6 +130,8 @@ async def _resolve_mcp_user(app: FastAPI, request) -> object:
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
     _apply_auth_openapi(app)
+    app.state.a2a_enabled = is_a2a_enabled()
+    app.state.a2a_registry = A2ATaskRegistry()
     app.state.mcp_enabled = is_mcp_enabled()
     if app.state.mcp_enabled:
         app.state.mcp_mount = build_mcp_mount(
@@ -142,7 +154,10 @@ def create_app() -> FastAPI:
         return {
             "version": __version__,
             "langgraph_py_version": _langgraph_py_version(),
-            "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
+            "flags": _feature_flags(
+                a2a_enabled=app.state.a2a_enabled,
+                mcp_enabled=app.state.mcp_enabled,
+            ),
             "metadata": _server_metadata(),
         }
 
@@ -160,7 +175,10 @@ def create_app() -> FastAPI:
                         "database": "ok",
                         "checkpointer": "ok",
                     },
-                    "flags": _feature_flags(mcp_enabled=app.state.mcp_enabled),
+                    "flags": _feature_flags(
+                        a2a_enabled=app.state.a2a_enabled,
+                        mcp_enabled=app.state.mcp_enabled,
+                    ),
                 }
             )
 
@@ -178,6 +196,38 @@ def create_app() -> FastAPI:
             ]
         )
         return PlainTextResponse(body + "\n")
+
+    if app.state.a2a_enabled:
+
+        @app.get("/.well-known/agent-card.json", include_in_schema=False)
+        async def agent_card(
+            request: Request,
+            assistant_id: str,
+            _user=Depends(get_current_user),
+        ) -> dict[str, object]:
+            assistant = await load_assistant(assistant_id)
+            entry = get_langgraph_service().get_entry(assistant.graph_id)
+            if not is_a2a_compatible_entry(entry):
+                raise HTTPException(status_code=400, detail="Assistant graph is not A2A-compatible")
+            return build_agent_card(
+                base_url=str(request.base_url).rstrip("/"),
+                assistant=assistant,
+                entry=entry,
+            )
+
+        @app.post("/a2a/{assistant_id}", include_in_schema=False, response_model=None)
+        async def a2a_jsonrpc(
+            assistant_id: str,
+            payload: dict[str, Any],
+            user=Depends(get_current_user),
+        ) -> Response | dict[str, Any]:
+            return await handle_a2a_request(
+                assistant_id=assistant_id,
+                payload=payload,
+                user=user,
+                service=get_langgraph_service(),
+                registry=app.state.a2a_registry,
+            )
 
     app.include_router(assistants_api_router, prefix="/assistants", tags=["Assistants"])
     app.include_router(assistants_api_router, prefix="/agents", tags=["Agents"])
