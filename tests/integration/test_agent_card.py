@@ -55,6 +55,8 @@ def _write_agent_config(*, config_path: Path, stress_graph_path: Path, disable_a
         "graphs": {
             "stress_test": {
                 "graph": f"{stress_graph_path}:build_graph",
+                "name": "Manifest Stress Graph",
+                "description": "Manifest graph description should lose to assistant metadata",
                 "input_schema": {
                     "type": "object",
                     "properties": {"messages": {"type": "array"}},
@@ -111,6 +113,8 @@ def test_agent_card_endpoint_returns_assistant_shaped_card(monkeypatch, tmp_path
     body = response.json()
     assert body["name"] == "Stress Agent"
     assert body["description"] == "Deterministic agent card coverage"
+    assert body["name"] != "Manifest Stress Graph"
+    assert body["description"] != "Manifest graph description should lose to assistant metadata"
     assert body["supportedInterfaces"][0]["url"].endswith(f"/a2a/{assistant_id}")
 
 

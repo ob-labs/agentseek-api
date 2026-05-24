@@ -62,6 +62,18 @@ def test_is_a2a_compatible_entry_rejects_non_message_schema() -> None:
     assert is_a2a_compatible_entry(entry) is False
 
 
+def test_is_a2a_compatible_entry_rejects_non_object_root_schema() -> None:
+    entry = _entry(
+        input_schema={
+            "type": "array",
+            "properties": {"messages": {"type": "array"}},
+            "required": ["messages"],
+        }
+    )
+
+    assert is_a2a_compatible_entry(entry) is False
+
+
 def test_is_a2a_compatible_entry_rejects_message_prepare_input_without_explicit_schema() -> None:
     entry = _entry(
         input_schema={"type": "object"},

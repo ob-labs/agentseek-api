@@ -14,6 +14,9 @@ from agentseek_api.services.langgraph_service import GraphEntry
 
 def is_a2a_compatible_entry(entry: GraphEntry) -> bool:
     input_schema = entry.input_schema
+    if input_schema.get("type") != "object":
+        return False
+
     properties = input_schema.get("properties")
     required = input_schema.get("required")
     if not isinstance(properties, dict) or not isinstance(required, list):
