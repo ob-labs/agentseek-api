@@ -11,7 +11,7 @@ import httpx
 import pytest
 import uvicorn
 from a2a.client import ClientConfig, create_client
-from a2a.types import AgentCard, GetTaskRequest, SendMessageRequest, TaskState
+from a2a.types import GetTaskRequest, SendMessageRequest, TaskState
 from google.protobuf.json_format import ParseDict
 
 from agentseek_api.core import auth_middleware
@@ -120,16 +120,10 @@ async def test_a2a_sdk_client_can_fetch_card_stream_and_get_task(a2a_live_base_u
         assert assistant_response.status_code == 200
         assistant_id = assistant_response.json()["assistant_id"]
 
-        card_response = await http_client.get(
-            f"{a2a_live_base_url}/.well-known/agent-card.json",
-            params={"assistant_id": assistant_id},
-        )
-        assert card_response.status_code == 200
-        card = ParseDict(card_response.json(), AgentCard())
-
         client = await create_client(
-            card,
+            a2a_live_base_url,
             client_config=ClientConfig(httpx_client=http_client),
+            relative_card_path=f"/.well-known/agent-card.json?assistant_id={assistant_id}",
         )
         request = ParseDict(
             {

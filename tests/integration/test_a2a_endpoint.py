@@ -559,3 +559,47 @@ def test_sdk_streaming_alias_returns_streamresponse_shape(monkeypatch: pytest.Mo
     assert '"statusUpdate"' in body
     assert '"artifactUpdate"' in body
     assert "stream via sdk alias" in body
+
+
+def test_sdk_get_task_alias_uses_task_not_found_error_code(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client, name="SDK Missing Task Assistant")
+        response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "sdk-user"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "sdk-missing-task",
+                "method": "GetTask",
+                "params": {"id": "missing-task"},
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32001
+
+
+def test_sdk_send_message_alias_uses_internal_error_code_on_graph_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    with _a2a_client(monkeypatch, tmp_path) as client:
+        assistant = _create_stress_assistant(client, name="SDK Failure Assistant")
+        response = client.post(
+            f"/a2a/{assistant['assistant_id']}",
+            headers={"X-API-Key": "secret", "Accept": "application/json", "x-user-id": "sdk-user"},
+            json={
+                "jsonrpc": "2.0",
+                "id": "sdk-failure-send",
+                "method": "SendMessage",
+                "params": {
+                    "message": {
+                        "messageId": "sdk-failure-message-1",
+                        "role": "ROLE_USER",
+                        "parts": [{"text": '{"delay":0.0,"steps":1,"fail":true}'}],
+                    }
+                },
+            },
+        )
+
+    assert response.status_code == 200
+    assert response.json()["error"]["code"] == -32603

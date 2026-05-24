@@ -8,8 +8,9 @@ Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
 > [Agent Protocol](https://github.com/langchain-ai/agent-protocol) as the main
 > external compatibility reference. The current runtime already covers the core
 > thread, run, streaming, and protocol-v2 event flows. Some protocol surfaces
-> are still pending, and agent resources are exposed through both
-> `/assistants` and direct `/agents` aliases.
+> are still pending, and agent resources are exposed through `/assistants`,
+> direct `/agents` aliases, Streamable HTTP MCP, and LangSmith-style A2A
+> endpoints.
 
 ## 🚀 Quickstart
 
@@ -135,6 +136,7 @@ rejected when their runtime behavior is not implemented yet.
   or `AGENTSEEK_GRAPHS`
 - 🌊 SSE streaming with `message_chunk` events
 - 🧰 MCP tool exposure for registered graphs over Streamable HTTP
+- 🤝 A2A assistant endpoints with agent-card discovery, streaming, and task lookup/cancel
 - 🧵 Thread, run, wait, cancel, history, state, and protocol-v2 stream flows
 - 🤖 Agent resources exposed through both `/assistants` and `/agents`
 - 🧑‍💻 Human-in-the-loop resume through
@@ -168,6 +170,7 @@ Useful config fields:
 - `auth.openapi`: OpenAPI `securitySchemes` and `security` metadata for auth
 - `auth.disable_studio_auth`: accepted for LangGraph config compatibility
 - `http.disable_mcp`: disable the MCP endpoint
+- `http.disable_a2a`: disable the A2A endpoint and agent-card discovery route
 - `base_image`, `python_version`, `image_distro`, `pip_config_file`,
   `dockerfile_lines`: Docker build customization fields
 
@@ -293,6 +296,72 @@ async with httpx.AsyncClient(
 
 This milestone only covers exposing AgentSeek graphs as MCP tools. It does not
 add outbound MCP client support inside AgentSeek graphs.
+
+## 🤝 A2A
+
+AgentSeek API exposes assistants through a LangSmith-style A2A endpoint at
+`/a2a/{assistant_id}` plus agent-card discovery at
+`/.well-known/agent-card.json?assistant_id={assistant_id}`.
+
+### Behavior
+
+- Methods: `message/send`, `message/stream`, `tasks/get`, `tasks/cancel`
+- Agent card discovery: assistant-scoped `/.well-known/agent-card.json`
+- Auth: same as the rest of the API
+- Paths: `/a2a/{assistant_id}` only
+- Discovery source: assistants backed by message-compatible graphs
+- Threading: incoming `contextId` is forwarded as LangGraph `thread_id`
+- Enablement: A2A is enabled by default; `http.disable_a2a: true` disables both the RPC endpoint and agent-card discovery
+- Safety: if the active config file exists but cannot be parsed, A2A stays disabled until the config is fixed
+
+### Disable A2A
+
+Set `http.disable_a2a` in your config file:
+
+```json
+{
+  "$schema": "https://langgra.ph/schema.json",
+  "graphs": {
+    "chat": "chat.graph:graph"
+  },
+  "http": {
+    "disable_a2a": true
+  }
+}
+```
+
+### Python client example
+
+```python
+import httpx
+
+assistant_id = "<assistant-id>"
+payload = {
+    "jsonrpc": "2.0",
+    "id": "send-1",
+    "method": "message/send",
+    "params": {
+        "message": {
+            "role": "user",
+            "parts": [{"kind": "text", "text": "hello"}],
+            "messageId": "msg-1",
+        }
+    },
+}
+
+with httpx.Client(headers={"X-API-Key": "secret"}, trust_env=False) as client:
+    response = client.post(
+        f"http://127.0.0.1:2024/a2a/{assistant_id}",
+        json=payload,
+        headers={"Accept": "application/json"},
+    )
+    response.raise_for_status()
+    print(response.json())
+```
+
+This endpoint targets practical LangSmith parity for assistant-to-assistant
+messaging and SDK interoperability. Task tracking is in-process, so task lookup
+and cancellation only apply to tasks created on the current API process.
 
 ## 📚 Use As A Library
 
@@ -420,4 +489,4 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 1. [x] Add Redis-backed task queue and worker handoff for durable run execution
 2. [ ] Deepen Agent Protocol schema parity beyond the current alias coverage
 3. [ ] Add crons and scheduler support
-4. [ ] Add MCP and A2A endpoint parity
+4. [x] Add MCP and A2A endpoint parity

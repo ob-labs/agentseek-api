@@ -597,16 +597,25 @@ async def handle_a2a_request(
     if payload.get("jsonrpc") != "2.0" or not isinstance(payload.get("method"), str):
         return _jsonrpc_error(request_id, code=-32600, message="Invalid JSON-RPC request.")
 
+    method, sdk_compatible = _canonical_a2a_method(payload["method"])
+
     try:
         assistant = await load_assistant(assistant_id)
     except HTTPException as exc:
-        return _jsonrpc_error(request_id, code=-32004, message=str(exc.detail))
+        return _jsonrpc_error(
+            request_id,
+            code=-32001 if sdk_compatible else -32004,
+            message=str(exc.detail),
+        )
 
     entry = service.get_entry(assistant.graph_id)
     if not is_a2a_compatible_entry(entry):
-        return _jsonrpc_error(request_id, code=-32000, message="Assistant graph is not A2A-compatible.")
+        return _jsonrpc_error(
+            request_id,
+            code=-32004 if sdk_compatible else -32000,
+            message="Assistant graph is not A2A-compatible.",
+        )
 
-    method, sdk_compatible = _canonical_a2a_method(payload["method"])
     params = payload.get("params")
     if not isinstance(params, dict):
         return _jsonrpc_error(request_id, code=-32602, message="params must be an object.")
@@ -618,9 +627,13 @@ async def handle_a2a_request(
         try:
             record = registry.get(task_id)
         except ValueError as exc:
-            return _jsonrpc_error(request_id, code=-32004, message=str(exc))
+            return _jsonrpc_error(request_id, code=-32001 if sdk_compatible else -32004, message=str(exc))
         if record.assistant_id != assistant_id or record.user_id != user.identity:
-            return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
+            return _jsonrpc_error(
+                request_id,
+                code=-32001 if sdk_compatible else -32004,
+                message=f"Unknown task: {task_id}",
+            )
         return _jsonrpc_result(request_id, _task_result(record, sdk_compatible=sdk_compatible))
 
     if method == "tasks/cancel":
@@ -630,9 +643,13 @@ async def handle_a2a_request(
         try:
             record = registry.get(task_id)
         except ValueError as exc:
-            return _jsonrpc_error(request_id, code=-32004, message=str(exc))
+            return _jsonrpc_error(request_id, code=-32001 if sdk_compatible else -32004, message=str(exc))
         if record.assistant_id != assistant_id or record.user_id != user.identity:
-            return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
+            return _jsonrpc_error(
+                request_id,
+                code=-32001 if sdk_compatible else -32004,
+                message=f"Unknown task: {task_id}",
+            )
         registry.save(_cancel_task(record))
         return _jsonrpc_result(request_id, _task_result(record, sdk_compatible=sdk_compatible))
 
@@ -658,7 +675,11 @@ async def handle_a2a_request(
         task_id=task_id,
     )
     if record is None:
-        return _jsonrpc_error(request_id, code=-32004, message=f"Unknown task: {task_id}")
+        return _jsonrpc_error(
+            request_id,
+            code=-32001 if sdk_compatible else -32004,
+            message=f"Unknown task: {task_id}",
+        )
     registry.save(record)
 
     if method == "message/stream":
@@ -749,7 +770,11 @@ async def handle_a2a_request(
         record.state = "failed"
         record.status_message = str(exc)
         registry.save(record)
-        return _jsonrpc_error(request_id, code=-32000, message=str(exc))
+        return _jsonrpc_error(
+            request_id,
+            code=-32603 if sdk_compatible else -32000,
+            message=str(exc),
+        )
 
     if record.cancellation_requested:
         registry.save(record)
