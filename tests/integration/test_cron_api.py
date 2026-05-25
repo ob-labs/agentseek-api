@@ -157,3 +157,34 @@ def test_search_count_get_patch_and_delete_crons(client: TestClient) -> None:
 
     missing_response = client.get(f"/runs/crons/{first_body['cron_id']}")
     assert missing_response.status_code == 404
+
+
+def test_patch_cron_rejects_explicit_null_input(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "original"},
+            "enabled": True,
+        },
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    response = client.patch(f"/runs/crons/{cron_id}", json={"input": None})
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "input cannot be null"}
+
+
+def test_search_crons_rejects_negative_limit_and_offset(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+
+    response = client.post(
+        "/runs/crons/search",
+        json={"assistant_id": assistant_id, "enabled": True, "limit": -1, "offset": -1},
+    )
+
+    assert response.status_code == 422

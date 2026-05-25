@@ -147,8 +147,8 @@ class CronSearchRequest(BaseModel):
     assistant_id: str | None = None
     enabled: bool | None = None
     thread_id: str | None = None
-    limit: int = 10
-    offset: int = 0
+    limit: int = Field(default=10, ge=0)
+    offset: int = Field(default=0, ge=0)
 
 
 class CronCountRequest(BaseModel):

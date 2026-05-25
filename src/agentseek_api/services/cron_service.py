@@ -74,13 +74,19 @@ async def patch_cron(*, cron_id: str, payload: CronPatch, user: User) -> CronRea
         if row is None:
             raise HTTPException(status_code=404, detail="Cron not found")
 
+        schedule_was_updated = False
         if payload.schedule is not None:
             validate_schedule(payload.schedule, timezone_name="UTC")
             row.schedule = payload.schedule
             row.next_run_at = compute_next_run_at(payload.schedule, timezone_name="UTC")
+            schedule_was_updated = True
         if payload.enabled is not None:
+            if payload.enabled and not row.enabled and not schedule_was_updated:
+                row.next_run_at = compute_next_run_at(row.schedule, timezone_name="UTC")
             row.enabled = payload.enabled
-        if payload.input is not None:
+        if "input" in payload.model_fields_set:
+            if payload.input is None:
+                raise ValueError("input cannot be null")
             row.input_json = payload.input
 
         await session.commit()
