@@ -16,7 +16,11 @@ from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import ThreadCreate, ThreadPatch, ThreadPruneRequest, ThreadRead, ThreadSearchRequest
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolCommandRequest, ProtocolEventStreamRequest
-from agentseek_api.services.run_preparation import prepare_and_submit_run, resume_run
+from agentseek_api.services.run_preparation import (
+    ActiveThreadRunConflictError,
+    prepare_and_submit_run,
+    resume_run,
+)
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import (
     delete_run_stream_events,
@@ -632,6 +636,8 @@ async def handle_protocol_command(
             )
         except ValueError as exc:
             return _protocol_error(request_id=payload.id, code="invalid_argument", message=str(exc), status_code=404)
+        except ActiveThreadRunConflictError as exc:
+            return _protocol_error(request_id=payload.id, code="thread_busy", message=str(exc), status_code=409)
 
         return JSONResponse(
             content={

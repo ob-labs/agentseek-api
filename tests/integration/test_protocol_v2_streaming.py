@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
 
 from fastapi.testclient import TestClient
+
+from agentseek_api.services.run_jobs import RunExecutionJob
 
 
 def _parse_sse_events(stream_text: str) -> list[dict[str, object]]:
@@ -88,6 +91,55 @@ def test_protocol_run_start_replays_messages_tools_values_and_lifecycle(client: 
     assert len(replay_events) == 1
     assert replay_events[0]["event"] == "values"
     assert replay_events[0]["id"] == str(last_seq)
+
+
+def test_protocol_run_start_rejects_busy_thread(client: TestClient, monkeypatch) -> None:
+    class DeferredExecutor:
+        def __init__(self) -> None:
+            self.submitted: list[Callable[[], Awaitable[None]] | RunExecutionJob] = []
+
+        async def submit(self, job: Callable[[], Awaitable[None]] | RunExecutionJob) -> None:
+            self.submitted.append(job)
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: DeferredExecutor())
+
+    assistant = client.post("/assistants", json={"name": "protocol-busy", "graph_id": "stress_test"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "protocol-busy"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    first = client.post(
+        f"/threads/{thread_id}/commands",
+        json={
+            "id": 30,
+            "method": "run.start",
+            "params": {
+                "assistant_id": assistant_id,
+                "input": {"delay": 0.05, "steps": 20},
+            },
+        },
+    )
+    assert first.status_code == 200
+    assert first.json()["type"] == "success"
+
+    second = client.post(
+        f"/threads/{thread_id}/commands",
+        json={
+            "id": 31,
+            "method": "run.start",
+            "params": {
+                "assistant_id": assistant_id,
+                "input": {"delay": 0.05, "steps": 20},
+            },
+        },
+    )
+    assert second.status_code == 409
+    assert second.json()["type"] == "error"
+    assert second.json()["error"] == "thread_busy"
+    assert second.json()["message"] == "Another run is already active for this thread"
 
 
 def test_protocol_input_respond_resumes_interrupted_run(client: TestClient) -> None:
