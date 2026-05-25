@@ -3,7 +3,6 @@ from datetime import UTC, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 SUPPORTED_RRULE_KEYS = {
-    "COUNT",
     "FREQ",
     "INTERVAL",
     "UNTIL",
@@ -82,8 +81,6 @@ def validate_schedule(schedule: str, *, timezone_name: str = "UTC") -> None:
 
     if "INTERVAL" in parsed:
         _parse_positive_int(parsed["INTERVAL"], clause="INTERVAL")
-    if "COUNT" in parsed:
-        _parse_positive_int(parsed["COUNT"], clause="COUNT")
     if "BYHOUR" in parsed:
         _parse_bounded_int(parsed["BYHOUR"], clause="BYHOUR", lower=0, upper=23)
     if "BYMINUTE" in parsed:
