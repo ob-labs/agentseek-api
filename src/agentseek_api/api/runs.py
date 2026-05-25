@@ -263,6 +263,7 @@ async def stream_run(
 
     async def _event_iter() -> AsyncIterator[str]:
         current_seq = after_seq
+        use_redis_executor = _uses_redis_executor()
         records_by_seq: dict[int, dict[str, object]] = {
             seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
         }
@@ -275,10 +276,7 @@ async def stream_run(
             payload = json.dumps(event_payload)
             yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
 
-        if row.status in TERMINAL_RUN_STATUSES:
-            return
-
-        if _uses_redis_executor():
+        if use_redis_executor:
             async for seq, event in _iter_persisted_run_records(
                 run_id=run_id,
                 thread_id=thread_id,
@@ -288,6 +286,9 @@ async def stream_run(
                 event_name = str(event.get("event", "message"))
                 event_payload = {"run_id": run_id, **event}
                 yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
+            return
+
+        if row.status in TERMINAL_RUN_STATUSES:
             return
 
         async for seq, event in run_broker.stream_records(run_id, after_seq=current_seq):
