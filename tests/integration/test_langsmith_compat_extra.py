@@ -37,20 +37,26 @@ def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> Non
     assert schemas.json()["output_schema"] == {"type": "object"}
 
     subgraphs = client.get(f"/assistants/{assistant_id}/subgraphs")
-    assert subgraphs.status_code == 200
-    assert isinstance(subgraphs.json(), list)
+    assert subgraphs.status_code == 501
+    assert subgraphs.json()["detail"] == "Assistant subgraph inspection is not supported"
 
     namespaced = client.get(f"/assistants/{assistant_id}/subgraphs/root")
-    assert namespaced.status_code == 200
-    assert isinstance(namespaced.json(), list)
+    assert namespaced.status_code == 501
+    assert namespaced.json()["detail"] == "Assistant subgraph inspection is not supported"
 
     versioned = client.post(f"/assistants/{assistant_id}/versions")
     assert versioned.status_code == 200
-    assert versioned.json()["version"] >= 1
+    assert versioned.json() == {
+        "assistant_id": assistant_id,
+        "current_version": 1,
+        "latest_version": 1,
+        "available_versions": [1],
+        "supports_version_history": False,
+    }
 
     latest = client.post(f"/assistants/{assistant_id}/latest")
-    assert latest.status_code == 200
-    assert latest.json()["assistant_id"] == assistant_id
+    assert latest.status_code == 409
+    assert latest.json()["detail"] == "Assistant version promotion is not supported"
 
 
 def test_run_join_and_delete_endpoints(client: TestClient) -> None:

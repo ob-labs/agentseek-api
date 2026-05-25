@@ -9,6 +9,8 @@ from agentseek_api.models.api import AssistantCreate, AssistantPatch, AssistantR
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
+ASSISTANT_SUBGRAPHS_UNSUPPORTED = "Assistant subgraph inspection is not supported"
+ASSISTANT_VERSION_PROMOTION_UNSUPPORTED = "Assistant version promotion is not supported"
 
 
 def _to_read_model(row: Assistant) -> AssistantRead:
@@ -162,21 +164,28 @@ async def get_assistant_schemas(assistant_id: str) -> dict[str, object]:
 @router.get("/{assistant_id}/subgraphs")
 async def get_assistant_subgraphs(assistant_id: str) -> list[dict[str, object]]:
     _ = await get_assistant(assistant_id)
-    return []
+    raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
 
 
 @router.get("/{assistant_id}/subgraphs/{namespace}")
 async def get_assistant_subgraphs_by_namespace(assistant_id: str, namespace: str) -> list[dict[str, object]]:
     _ = (await get_assistant(assistant_id), namespace)
-    return []
+    raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
 
 
 @router.post("/{assistant_id}/versions")
 async def get_assistant_versions(assistant_id: str) -> dict[str, object]:
     assistant = await get_assistant(assistant_id)
-    return {"assistant_id": assistant.assistant_id, "version": assistant.version}
+    return {
+        "assistant_id": assistant.assistant_id,
+        "current_version": assistant.version,
+        "latest_version": assistant.version,
+        "available_versions": [assistant.version],
+        "supports_version_history": False,
+    }
 
 
 @router.post("/{assistant_id}/latest", response_model=AssistantRead)
 async def set_latest_assistant_version(assistant_id: str) -> AssistantRead:
-    return await get_assistant(assistant_id)
+    _ = await get_assistant(assistant_id)
+    raise HTTPException(status_code=409, detail=ASSISTANT_VERSION_PROMOTION_UNSUPPORTED)
