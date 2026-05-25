@@ -45,7 +45,7 @@ async def test_claim_due_crons_returns_each_due_cron_once(
     await db_manager.initialize()
     try:
         session_factory = db_manager.get_session_factory()
-        due_at = datetime.now(UTC) - timedelta(minutes=1)
+        due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
         async with session_factory() as session:
             assistant = Assistant(name="scheduler-unit", graph_id="default")
             session.add(assistant)
@@ -98,7 +98,7 @@ async def test_claim_due_crons_only_reclaims_abandoned_started_ticks(
     await db_manager.initialize()
     try:
         session_factory = db_manager.get_session_factory()
-        due_at = datetime.now(UTC) - timedelta(minutes=1)
+        due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
         async with session_factory() as session:
             assistant = Assistant(name="scheduler-reclaim", graph_id="default")
             session.add(assistant)
@@ -133,6 +133,6 @@ async def test_claim_due_crons_only_reclaims_abandoned_started_ticks(
             assert _as_utc(persisted.next_run_at) > due_at
             assert len(ticks) == 1
             assert ticks[0].status == "started"
-            assert ticks[0].scheduler_id == "scheduler-a"
+            assert ticks[0].scheduler_id == "scheduler-c"
     finally:
         await db_manager.close()

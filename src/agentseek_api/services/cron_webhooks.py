@@ -12,6 +12,10 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import CronJob, CronTick, CronWebhookAttempt
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 class AsyncWebhookClient(Protocol):
     async def post(self, url: str, json: dict[str, object]) -> Any:
         ...
@@ -43,7 +47,7 @@ def build_webhook_payload(*, cron: CronJob, tick: CronTick) -> dict[str, object]
         "cron_id": cron.cron_id,
         "tick_id": tick.id,
         "status": tick.status,
-        "scheduled_for": tick.scheduled_for.isoformat(),
+        "scheduled_for": _as_utc(tick.scheduled_for).isoformat(),
     }
     if tick.run_id is not None:
         payload["run_id"] = tick.run_id

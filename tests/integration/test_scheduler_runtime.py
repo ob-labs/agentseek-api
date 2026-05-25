@@ -129,6 +129,9 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
             "assistant_id": assistant_id,
             "schedule": "FREQ=MINUTELY;INTERVAL=1",
             "input": {"kind": "stateless"},
+            "metadata": {"source": "scheduler-runtime"},
+            "config": {"model": "gpt-test"},
+            "context": {"tenant": "acme"},
         },
         headers={"x-user-id": "owner"},
     )
@@ -167,6 +170,12 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
     created_runs = asyncio.run(_list_runs_for_thread(stateless_threads[0].thread_id))
     assert len(created_runs) == 1
     assert created_runs[0].status == "success"
+    assert created_runs[0].metadata_json == {
+        "source": "scheduler-runtime",
+        "cron_id": stateless.json()["cron_id"],
+        "scheduled_for": due_at.isoformat(),
+    }
+    assert created_runs[0].kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}}
 
     busy_thread_runs = asyncio.run(_list_runs_for_thread(thread_id))
     assert busy_thread_runs == []
@@ -179,6 +188,12 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
     assert persisted_thread_bound is not None
     assert _as_utc(persisted_stateless.next_run_at) > due_at
     assert _as_utc(persisted_thread_bound.next_run_at) > due_at
+    assert persisted_stateless.last_tick_status == "success"
+    assert persisted_stateless.last_run_at is not None
+    assert persisted_stateless.last_error is None
+    assert persisted_thread_bound.last_tick_status == "skipped"
+    assert persisted_thread_bound.last_run_at is None
+    assert persisted_thread_bound.last_error is None
     assert len(stateless_ticks) == 1
     assert stateless_ticks[0].status == "success"
     assert stateless_ticks[0].run_id == created_runs[0].run_id

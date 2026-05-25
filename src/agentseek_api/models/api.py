@@ -137,7 +137,12 @@ class CronCreate(BaseModel):
 
     assistant_id: str
     schedule: str
+    timezone: str | None = None
     input: Any
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    webhook: str | None = None
     enabled: bool = True
 
 
@@ -163,7 +168,12 @@ class CronPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schedule: str | None = None
+    timezone: str | None = None
     input: Any | None = None
+    metadata: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
+    webhook: str | None = None
     enabled: bool | None = None
 
 
@@ -173,7 +183,14 @@ class CronRead(BaseModel):
     thread_id: str | None
     enabled: bool
     schedule: str
+    timezone: str
+    webhook: str | None = None
     next_run_at: datetime
+    last_run_at: datetime | None = None
+    last_tick_status: str | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
 
 
 class CronSearchResponse(BaseModel):

@@ -12,6 +12,59 @@ from agentseek_api.settings import settings
 
 
 @pytest.mark.asyncio
+async def test_create_cron_persists_webhook_timezone_and_runtime_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(settings, "SEEKDB_URL", "sqlite+aiosqlite:///:memory:")
+
+    class FakeCheckpointer:
+        def __init__(self, connection_args: dict[str, str]) -> None:
+            self.connection_args = connection_args
+
+        def setup(self) -> None:
+            return None
+
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+
+    manager = DatabaseManager()
+    await manager.initialize()
+    try:
+        monkeypatch.setattr("agentseek_api.services.cron_service.db_manager", manager)
+        user = User(identity="user-1", is_authenticated=True)
+
+        created = await create_cron(
+            assistant_id="assistant-1",
+            thread_id=None,
+            payload=CronCreate(
+                assistant_id="assistant-1",
+                schedule="FREQ=DAILY;INTERVAL=1;BYHOUR=9;BYMINUTE=15",
+                timezone="Asia/Shanghai",
+                input={"kind": "extended"},
+                metadata={"source": "cron-test"},
+                config={"model": "gpt-test"},
+                context={"tenant": "acme"},
+                webhook="https://example.com/hook",
+                enabled=True,
+            ),
+            user=user,
+        )
+
+        session_factory = manager.get_session_factory()
+        async with session_factory() as session:
+            row = await session.scalar(select(CronJob).where(CronJob.cron_id == created.cron_id))
+
+        assert row is not None
+        assert created.timezone == "Asia/Shanghai"
+        assert created.webhook == "https://example.com/hook"
+        assert row.timezone == "Asia/Shanghai"
+        assert row.webhook == "https://example.com/hook"
+        assert row.metadata_json == {"source": "cron-test"}
+        assert row.kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}}
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
 async def test_search_crons_filters_by_assistant_and_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "SEEKDB_URL", "sqlite+aiosqlite:///:memory:")
 
@@ -115,6 +168,64 @@ async def test_patch_cron_recomputes_next_run_at(monkeypatch: pytest.MonkeyPatch
 
         assert updated.schedule == "FREQ=MINUTELY;INTERVAL=5"
         assert updated.next_run_at <= created.next_run_at
+    finally:
+        await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_patch_cron_updates_webhook_timezone_and_runtime_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "SEEKDB_URL", "sqlite+aiosqlite:///:memory:")
+
+    class FakeCheckpointer:
+        def __init__(self, connection_args: dict[str, str]) -> None:
+            self.connection_args = connection_args
+
+        def setup(self) -> None:
+            return None
+
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+
+    manager = DatabaseManager()
+    await manager.initialize()
+    try:
+        monkeypatch.setattr("agentseek_api.services.cron_service.db_manager", manager)
+        user = User(identity="user-1", is_authenticated=True)
+
+        created = await create_cron(
+            assistant_id="assistant-1",
+            thread_id=None,
+            payload=CronCreate(
+                assistant_id="assistant-1",
+                schedule="FREQ=MINUTELY;INTERVAL=15",
+                input={"kind": "original"},
+                enabled=True,
+            ),
+            user=user,
+        )
+
+        updated = await patch_cron(
+            cron_id=created.cron_id,
+            payload=CronPatch(
+                timezone="America/Los_Angeles",
+                metadata={"source": "patched"},
+                config={"temperature": 0.1},
+                context={"workspace": "west"},
+                webhook="https://example.com/patched",
+            ),
+            user=user,
+        )
+
+        session_factory = manager.get_session_factory()
+        async with session_factory() as session:
+            row = await session.scalar(select(CronJob).where(CronJob.cron_id == created.cron_id))
+
+        assert row is not None
+        assert updated.timezone == "America/Los_Angeles"
+        assert updated.webhook == "https://example.com/patched"
+        assert row.timezone == "America/Los_Angeles"
+        assert row.webhook == "https://example.com/patched"
+        assert row.metadata_json == {"source": "patched"}
+        assert row.kwargs_json == {"config": {"temperature": 0.1}, "context": {"workspace": "west"}}
     finally:
         await manager.close()
 

@@ -66,6 +66,12 @@ async def _mark_tick_outcome(
         tick.status = status
         tick.run_id = run_id
         tick.skip_reason = skip_reason
+        cron = await session.scalar(select(CronJob).where(CronJob.cron_id == tick.cron_id))
+        if cron is not None and status in TERMINAL_TICK_STATUSES:
+            cron.last_tick_status = status
+            cron.last_error = skip_reason if status == "error" else None
+            if status != "skipped":
+                cron.last_run_at = datetime.now(UTC)
         await session.commit()
 
 
@@ -118,6 +124,12 @@ async def _reconcile_terminal_ticks(
                 run = await session.scalar(select(Run).where(Run.run_id == tick.run_id))
                 if run is not None and run.status in TERMINAL_RUN_STATUSES:
                     tick.status = run.status
+                    tick.skip_reason = run.last_error if run.status == "error" else None
+            if tick.status in TERMINAL_TICK_STATUSES:
+                cron.last_tick_status = tick.status
+                cron.last_error = tick.skip_reason if tick.status == "error" else None
+                if tick.status != "skipped":
+                    cron.last_run_at = _as_utc(tick.updated_at)
             delivery_is_available = tick.webhook_delivery_status is None or (
                 tick.webhook_delivery_status == "delivering" and _as_utc(tick.updated_at) <= stale_before
             )
@@ -225,6 +237,7 @@ async def claim_due_crons(
 
 async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
     user = _cron_user(claim.user_id)
+    scheduled_for_iso = _as_utc(claim.scheduled_for).isoformat()
     try:
         if claim.thread_id is None:
             thread = await create_thread_for_user(
@@ -236,7 +249,12 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
                 assistant_id=claim.assistant_id,
                 payload=claim.input_json,
                 user=user,
-                metadata={"cron_id": claim.cron_id, "scheduled_for": claim.scheduled_for.isoformat()},
+                metadata={
+                    **claim.metadata_json,
+                    "cron_id": claim.cron_id,
+                    "scheduled_for": scheduled_for_iso,
+                },
+                kwargs=claim.kwargs_json,
             )
             await _mark_tick_outcome(tick_id=claim.tick_id, status="queued", run_id=run.run_id)
             return CronDispatchResult(
@@ -260,7 +278,12 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
             assistant_id=claim.assistant_id,
             payload=claim.input_json,
             user=user,
-            metadata={"cron_id": claim.cron_id, "scheduled_for": claim.scheduled_for.isoformat()},
+            metadata={
+                **claim.metadata_json,
+                "cron_id": claim.cron_id,
+                "scheduled_for": scheduled_for_iso,
+            },
+            kwargs=claim.kwargs_json,
         )
     except ActiveThreadRunConflictError:
         await _mark_tick_outcome(tick_id=claim.tick_id, status="skipped", skip_reason="thread_busy")

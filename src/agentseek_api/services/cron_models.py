@@ -18,6 +18,8 @@ class ClaimedCron:
     user_id: str
     schedule: str
     input_json: Any
+    metadata_json: dict[str, Any]
+    kwargs_json: dict[str, Any]
     scheduled_for: datetime
 
     @classmethod
@@ -30,6 +32,8 @@ class ClaimedCron:
             user_id=row.user_id,
             schedule=row.schedule,
             input_json=row.input_json,
+            metadata_json=row.metadata_json,
+            kwargs_json=row.kwargs_json,
             scheduled_for=scheduled_for,
         )
 

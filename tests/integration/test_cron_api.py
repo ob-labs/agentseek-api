@@ -33,7 +33,12 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
         json={
             "assistant_id": assistant_id,
             "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "timezone": "Asia/Shanghai",
             "input": ["stateless-cron", {"kind": "list-payload"}],
+            "metadata": {"source": "integration"},
+            "config": {"model": "gpt-test"},
+            "context": {"tenant": "acme"},
+            "webhook": "https://example.com/hook",
         },
     )
 
@@ -43,15 +48,26 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
     assert body["thread_id"] is None
     assert body["enabled"] is True
     assert body["schedule"] == "FREQ=MINUTELY;INTERVAL=5"
+    assert body["timezone"] == "Asia/Shanghai"
+    assert body["webhook"] == "https://example.com/hook"
+    assert body["last_run_at"] is None
+    assert body["last_tick_status"] is None
+    assert body["last_error"] is None
     assert body["next_run_at"] is not None
+    assert body["created_at"] is not None
+    assert body["updated_at"] is not None
     assert body["cron_id"]
 
     persisted = asyncio.run(_fetch_cron(body["cron_id"]))
     assert persisted is not None
     assert persisted.assistant_id == assistant_id
     assert persisted.thread_id is None
+    assert persisted.timezone == "Asia/Shanghai"
     assert persisted.schedule == "FREQ=MINUTELY;INTERVAL=5"
     assert persisted.input_json == ["stateless-cron", {"kind": "list-payload"}]
+    assert persisted.metadata_json == {"source": "integration"}
+    assert persisted.kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}}
+    assert persisted.webhook == "https://example.com/hook"
     assert persisted.next_run_at is not None
     assert persisted.next_run_at.isoformat() == body["next_run_at"]
 
@@ -177,6 +193,23 @@ def test_patch_cron_rejects_explicit_null_input(client: TestClient) -> None:
 
     assert response.status_code == 400
     assert response.json() == {"detail": "input cannot be null"}
+
+
+def test_create_cron_rejects_non_http_webhook(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+
+    response = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "invalid-webhook"},
+            "webhook": "/relative/path",
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.json() == {"detail": "webhook must be an absolute http or https URL"}
 
 
 def test_search_crons_rejects_negative_limit_and_offset(client: TestClient) -> None:
