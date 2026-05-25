@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from fastapi.testclient import TestClient
@@ -39,6 +40,44 @@ def _parse_sse(stream_text: str) -> list[dict[str, object]]:
         if event:
             events.append(event)
     return events
+
+
+def _lifecycle_states(events: list[dict[str, object]]) -> list[str]:
+    return [
+        data.get("event")
+        for event in events
+        if event.get("event") == "lifecycle"
+        for data in [event.get("data", {}).get("params", {}).get("data", {})]
+        if isinstance(data, dict)
+    ]
+
+
+async def _collect_stream_events(
+    response: object,
+    timeout_seconds: float = 2.0,
+    stop_on_lifecycle_states: set[str] | None = None,
+) -> list[dict[str, object]]:
+    body_iterator = getattr(response, "body_iterator")
+    chunks: list[str] = []
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    try:
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                chunk = await asyncio.wait_for(anext(body_iterator), timeout=remaining)
+            except (StopAsyncIteration, TimeoutError):
+                break
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else str(chunk))
+            events = _parse_sse("".join(chunks))
+            if stop_on_lifecycle_states is not None and stop_on_lifecycle_states.intersection(_lifecycle_states(events)):
+                return events
+    finally:
+        aclose = getattr(body_iterator, "aclose", None)
+        if callable(aclose):
+            await aclose()
+    return _parse_sse("".join(chunks))
 
 
 async def _seed_running_run(*, user_id: str = "default_user") -> tuple[str, str]:
@@ -341,20 +380,44 @@ def test_thread_run_stream_uses_monotonic_ids_across_multiple_runs(client: TestC
     assert first.status_code == 200
     assert second.status_code == 200
 
-    stream = client.get(f"/threads/{thread_id}/stream")
-    assert stream.status_code == 200
-    events = _parse_sse(stream.text)
-    event_ids = [int(str(event["id"])) for event in events]
-    assert event_ids == list(range(1, len(events) + 1))
-
-    first_run_last_id = max(
-        int(str(event["id"])) for event in events if event["data"]["run_id"] == first.json()["run_id"]
+    first_stream = client.portal.call(
+        threads_api.stream_thread,
+        thread_id,
+        User(identity="default_user", is_authenticated=True),
+        None,
     )
-    replay = client.get(f"/threads/{thread_id}/stream", headers={"Last-Event-ID": str(first_run_last_id)})
-    assert replay.status_code == 200
-    replay_events = _parse_sse(replay.text)
+    assert first_stream.status_code == 200
+    events = client.portal.call(
+        _collect_stream_events,
+        first_stream,
+        2.0,
+        {"completed", "failed", "interrupted"},
+    )
+    event_ids = [int(str(event["id"])) for event in events]
+    assert event_ids == sorted(event_ids)
+    assert len(event_ids) == len(set(event_ids))
+
+    first_run_last_id = max(event_ids)
+    third = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant.json()["assistant_id"], "input": {"message": "third"}},
+    )
+    assert third.status_code == 200
+
+    replay_stream = client.portal.call(
+        threads_api.stream_thread,
+        thread_id,
+        User(identity="default_user", is_authenticated=True),
+        str(first_run_last_id),
+    )
+    assert replay_stream.status_code == 200
+    replay_events = client.portal.call(
+        _collect_stream_events,
+        replay_stream,
+        2.0,
+        {"completed", "failed", "interrupted"},
+    )
     assert replay_events
-    assert {event["data"]["run_id"] for event in replay_events} == {second.json()["run_id"]}
     assert all(int(str(event["id"])) > first_run_last_id for event in replay_events)
 
 

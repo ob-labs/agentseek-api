@@ -1,7 +1,11 @@
+import asyncio
 import threading
 import time
 
 from fastapi.testclient import TestClient
+
+from agentseek_api.api import threads as threads_api
+from agentseek_api.models.auth import User
 
 
 def _create_assistant(client: TestClient, *, graph_id: str = "default") -> str:
@@ -14,6 +18,62 @@ def _create_thread(client: TestClient) -> str:
     response = client.post("/threads", json={"metadata": {"extra": True}})
     assert response.status_code == 200
     return response.json()["thread_id"]
+
+
+def _parse_sse_lines(lines: list[str]) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for chunk in "\n".join(lines).strip().split("\n\n"):
+        event: dict[str, object] = {}
+        for line in chunk.splitlines():
+            if line.startswith("id: "):
+                event["id"] = line.removeprefix("id: ")
+            elif line.startswith("event: "):
+                event["event"] = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                import json
+
+                event["data"] = json.loads(line.removeprefix("data: "))
+        if event:
+            events.append(event)
+    return events
+
+
+def _lifecycle_states(events: list[dict[str, object]]) -> list[str]:
+    return [
+        data.get("event")
+        for event in events
+        if event.get("event") == "lifecycle"
+        for data in [event.get("data", {}).get("params", {}).get("data", {})]
+        if isinstance(data, dict)
+    ]
+
+
+async def _collect_stream_events(
+    response: object,
+    timeout_seconds: float,
+    required_lifecycle_states: set[str],
+) -> list[dict[str, object]]:
+    body_iterator = getattr(response, "body_iterator")
+    chunks: list[str] = []
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    try:
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                chunk = await asyncio.wait_for(anext(body_iterator), timeout=remaining)
+            except (StopAsyncIteration, TimeoutError):
+                break
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else str(chunk))
+            events = _parse_sse_lines("".join(chunks).split("\n"))
+            if required_lifecycle_states.issubset(set(_lifecycle_states(events))):
+                return events
+    finally:
+        aclose = getattr(body_iterator, "aclose", None)
+        if callable(aclose):
+            await aclose()
+    return _parse_sse_lines("".join(chunks).split("\n"))
 
 
 def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> None:
@@ -120,7 +180,12 @@ def test_checkpoint_state_thread_stream_and_protocol_endpoints(client: TestClien
     assert checkpointed.json()["checkpoint"]["thread_id"] == thread_id
     assert checkpointed.json()["values"]["manual"] is True
 
-    thread_stream = client.get(f"/threads/{thread_id}/stream")
+    thread_stream = client.portal.call(
+        threads_api.stream_thread,
+        thread_id,
+        User(identity="default_user", is_authenticated=True),
+        None,
+    )
     assert thread_stream.status_code == 200
     assert thread_stream.headers["content-type"].startswith("text/event-stream")
 
@@ -167,21 +232,22 @@ def test_empty_thread_state_returns_empty_payload(client: TestClient) -> None:
 def test_thread_stream_stays_live_for_future_runs(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    captured: dict[str, object] = {}
+    response = client.portal.call(
+        threads_api.stream_thread,
+        thread_id,
+        User(identity="default_user", is_authenticated=True),
+        None,
+    )
+    assert response.status_code == 200
+    captured: dict[str, list[dict[str, object]]] = {}
 
     def consume_stream() -> None:
-        with client.stream("GET", f"/threads/{thread_id}/stream") as response:
-            captured["status_code"] = response.status_code
-            lines: list[str] = []
-            deadline = time.time() + 5
-            for line in response.iter_lines():
-                if line is not None:
-                    lines.append(line)
-                if any("event: end" in item for item in lines):
-                    break
-                if time.time() > deadline:
-                    break
-            captured["lines"] = lines
+        captured["events"] = client.portal.call(
+            _collect_stream_events,
+            response,
+            5.0,
+            {"started", "completed"},
+        )
 
     thread = threading.Thread(target=consume_stream, daemon=True)
     thread.start()
@@ -195,7 +261,7 @@ def test_thread_stream_stays_live_for_future_runs(client: TestClient) -> None:
 
     thread.join(timeout=10)
 
-    assert captured["status_code"] == 200
-    lines = captured["lines"]
-    assert any("event: start" in line for line in lines)
-    assert any("event: end" in line for line in lines)
+    events = captured["events"]
+    lifecycle_states = _lifecycle_states(events)
+    assert "started" in lifecycle_states
+    assert "completed" in lifecycle_states

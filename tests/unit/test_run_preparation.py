@@ -126,7 +126,7 @@ async def test_prepare_run_raises_when_assistant_missing(monkeypatch: pytest.Mon
 async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_assistant = type("FakeAssistant", (), {"graph_id": "stress_test"})()
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
-    create_session = FakeSession([fake_thread, fake_assistant])
+    create_session = FakeSession([fake_thread, None, fake_assistant])
     db_run = type("DbRun", (), {"run_id": "r1", "status": "pending", "output_json": None, "last_error": None})()
     exec_session = FakeSession([db_run])
     reload_session = FakeSession([db_run])
@@ -269,7 +269,7 @@ async def test_prepare_run_marks_thread_busy_before_background_execution(monkeyp
             "last_error": None,
         },
     )()
-    create_session = FakeSession([fake_thread, fake_assistant])
+    create_session = FakeSession([fake_thread, None, fake_assistant])
     reload_session = FakeSession([db_run])
     session_factory = FakeSessionFactory([create_session, reload_session])
     executor = DeferredExecutor()
@@ -300,7 +300,7 @@ async def test_prepare_run_marks_thread_busy_before_background_execution(monkeyp
 async def test_prepare_run_cleans_protocol_state_when_submit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None})()
     fake_assistant = type("FakeAssistant", (), {"graph_id": "default"})()
-    create_session = FakeSession([fake_thread, fake_assistant])
+    create_session = FakeSession([fake_thread, None, fake_assistant])
     persist_session = CallbackSession([lambda: create_session.added[-1], fake_thread])
     session_factory = FakeSessionFactory([create_session, persist_session])
     protocol_broker = ThreadProtocolEventBroker()

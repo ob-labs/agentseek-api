@@ -600,9 +600,9 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         assert len(pruned_history.json()) == 1
         assert pruned_history.json()[0]["values"]["manual"] == "second"
 
-        thread_stream = await client.get(f"/threads/{alpha_thread['thread_id']}/stream", headers=_user_headers(user_id))
-        assert thread_stream.status_code == 200
-        assert thread_stream.headers["content-type"].startswith("text/event-stream")
+        async with client.stream("GET", f"/threads/{alpha_thread['thread_id']}/stream", headers=_user_headers(user_id)) as thread_stream:
+            assert thread_stream.status_code == 200
+            assert thread_stream.headers["content-type"].startswith("text/event-stream")
 
         command = await client.post(
             f"/threads/{alpha_thread['thread_id']}/commands",
