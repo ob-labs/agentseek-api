@@ -54,10 +54,36 @@ async def claim_due_crons(
     scheduler_id: str,
     now: datetime | None = None,
 ) -> list[ClaimedCron]:
-    _ = scheduler_id
     current_time = now or datetime.now(UTC)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
+        reclaimed_ticks = list(
+            (
+                await session.scalars(
+                    select(CronTick)
+                    .where(
+                        CronTick.status == "started",
+                    )
+                    .order_by(CronTick.scheduled_for.asc(), CronTick.id.asc())
+                    .limit(limit)
+                    .with_for_update()
+                )
+            ).all()
+        )
+
+        claimed: list[ClaimedCron] = []
+        seen_cron_ids: set[str] = set()
+        for tick in reclaimed_ticks:
+            row = await session.scalar(select(CronJob).where(CronJob.cron_id == tick.cron_id))
+            if row is None:
+                continue
+            claimed.append(ClaimedCron.from_row(row, tick_id=tick.id, scheduled_for=tick.scheduled_for))
+            seen_cron_ids.add(row.cron_id)
+
+        remaining = max(0, limit - len(claimed))
+        if remaining == 0:
+            return claimed
+
         rows = list(
             (
                 await session.scalars(
@@ -67,14 +93,15 @@ async def claim_due_crons(
                         CronJob.next_run_at <= current_time,
                     )
                     .order_by(CronJob.next_run_at.asc(), CronJob.cron_id.asc())
-                    .limit(limit)
+                    .limit(remaining)
                     .with_for_update()
                 )
             ).all()
         )
 
-        claimed: list[ClaimedCron] = []
         for row in rows:
+            if row.cron_id in seen_cron_ids:
+                continue
             scheduled_for = row.next_run_at
             tick = CronTick(
                 cron_id=row.cron_id,
@@ -96,36 +123,36 @@ async def claim_due_crons(
 
 async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
     user = _cron_user(claim.user_id)
-    if claim.thread_id is None:
-        thread = await create_thread_for_user(
-            payload=ThreadCreate(metadata={"stateless": True, "cron_id": claim.cron_id}),
-            user=user,
-        )
-        run = await prepare_and_submit_run(
-            thread_id=thread.thread_id,
-            assistant_id=claim.assistant_id,
-            payload=claim.input_json,
-            user=user,
-            metadata={"cron_id": claim.cron_id, "scheduled_for": claim.scheduled_for.isoformat()},
-        )
-        await _mark_tick_outcome(tick_id=claim.tick_id, status="queued", run_id=run.run_id)
-        return CronDispatchResult(
-            cron_id=claim.cron_id,
-            status="queued",
-            thread_id=thread.thread_id,
-            run_id=run.run_id,
-        )
-
-    if await _thread_is_busy(thread_id=claim.thread_id, user_id=claim.user_id):
-        await _mark_tick_outcome(tick_id=claim.tick_id, status="skipped", skip_reason="thread_busy")
-        return CronDispatchResult(
-            cron_id=claim.cron_id,
-            status="skipped",
-            thread_id=claim.thread_id,
-            skip_reason="thread_busy",
-        )
-
     try:
+        if claim.thread_id is None:
+            thread = await create_thread_for_user(
+                payload=ThreadCreate(metadata={"stateless": True, "cron_id": claim.cron_id}),
+                user=user,
+            )
+            run = await prepare_and_submit_run(
+                thread_id=thread.thread_id,
+                assistant_id=claim.assistant_id,
+                payload=claim.input_json,
+                user=user,
+                metadata={"cron_id": claim.cron_id, "scheduled_for": claim.scheduled_for.isoformat()},
+            )
+            await _mark_tick_outcome(tick_id=claim.tick_id, status="queued", run_id=run.run_id)
+            return CronDispatchResult(
+                cron_id=claim.cron_id,
+                status="queued",
+                thread_id=thread.thread_id,
+                run_id=run.run_id,
+            )
+
+        if await _thread_is_busy(thread_id=claim.thread_id, user_id=claim.user_id):
+            await _mark_tick_outcome(tick_id=claim.tick_id, status="skipped", skip_reason="thread_busy")
+            return CronDispatchResult(
+                cron_id=claim.cron_id,
+                status="skipped",
+                thread_id=claim.thread_id,
+                skip_reason="thread_busy",
+            )
+
         run = await prepare_and_submit_run(
             thread_id=claim.thread_id,
             assistant_id=claim.assistant_id,
@@ -140,6 +167,14 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
             status="skipped",
             thread_id=claim.thread_id,
             skip_reason="thread_busy",
+        )
+    except Exception:
+        await _mark_tick_outcome(tick_id=claim.tick_id, status="error", skip_reason="submission_failed")
+        return CronDispatchResult(
+            cron_id=claim.cron_id,
+            status="error",
+            thread_id=claim.thread_id,
+            skip_reason="submission_failed",
         )
 
     await _mark_tick_outcome(tick_id=claim.tick_id, status="queued", run_id=run.run_id)

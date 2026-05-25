@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from agentseek_api.core.orm import CronJob
 
-DispatchStatus = Literal["queued", "skipped"]
+DispatchStatus = Literal["queued", "skipped", "error"]
 
 
 @dataclass(frozen=True, slots=True)

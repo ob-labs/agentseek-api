@@ -26,7 +26,7 @@ async def test_claim_due_crons_returns_each_due_cron_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
-    from agentseek_api.services.cron_scheduler import claim_due_crons
+    from agentseek_api.services.cron_scheduler import _mark_tick_outcome, claim_due_crons
     from agentseek_api.settings import settings
 
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/scheduler-unit.db")
@@ -54,6 +54,7 @@ async def test_claim_due_crons_returns_each_due_cron_once(
             cron_id = cron.cron_id
 
         first = await claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at)
+        await _mark_tick_outcome(tick_id=first[0].tick_id, status="queued", run_id="run-1")
         second = await claim_due_crons(limit=10, scheduler_id="scheduler-b", now=due_at)
 
         assert [item.cron_id for item in first] == [cron_id]
@@ -65,8 +66,58 @@ async def test_claim_due_crons_returns_each_due_cron_once(
             assert persisted is not None
             assert _as_utc(persisted.next_run_at) > due_at
             assert len(ticks) == 1
-            assert ticks[0].status == "started"
+            assert ticks[0].status == "queued"
             assert ticks[0].scheduler_id == "scheduler-a"
             assert _as_utc(ticks[0].scheduled_for) == due_at
+    finally:
+        await db_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_due_crons_reclaims_started_tick_without_creating_duplicate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from agentseek_api.services.cron_scheduler import claim_due_crons
+    from agentseek_api.settings import settings
+
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/scheduler-reclaim.db")
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", _FakeCheckpointer)
+    await db_manager.close()
+    await db_manager.initialize()
+    try:
+        session_factory = db_manager.get_session_factory()
+        due_at = datetime.now(UTC) - timedelta(minutes=1)
+        async with session_factory() as session:
+            assistant = Assistant(name="scheduler-reclaim", graph_id="default")
+            session.add(assistant)
+            await session.flush()
+            cron = CronJob(
+                assistant_id=assistant.assistant_id,
+                thread_id=None,
+                user_id="u1",
+                schedule="FREQ=MINUTELY;INTERVAL=1",
+                enabled=True,
+                input_json={"kind": "unit"},
+                next_run_at=due_at,
+            )
+            session.add(cron)
+            await session.commit()
+            cron_id = cron.cron_id
+
+        first = await claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at)
+        second = await claim_due_crons(limit=10, scheduler_id="scheduler-b", now=due_at + timedelta(seconds=10))
+
+        assert [item.tick_id for item in first] == [first[0].tick_id]
+        assert [item.tick_id for item in second] == [first[0].tick_id]
+
+        async with session_factory() as session:
+            persisted = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+            ticks = list((await session.scalars(select(CronTick).where(CronTick.cron_id == cron_id))).all())
+            assert persisted is not None
+            assert _as_utc(persisted.next_run_at) > due_at
+            assert len(ticks) == 1
+            assert ticks[0].status == "started"
+            assert ticks[0].scheduler_id == "scheduler-a"
     finally:
         await db_manager.close()
