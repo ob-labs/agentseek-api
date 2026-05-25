@@ -69,6 +69,8 @@ class CronJob(Base):
     schedule: Mapped[str] = mapped_column(String(255), nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     input_json: Mapped[dict] = mapped_column("input", JSON, default=dict, nullable=False)
+    webhook: Mapped[str | None] = mapped_column(Text, nullable=True)
+    max_webhook_attempts: Mapped[int] = mapped_column(nullable=False, default=3)
     next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
@@ -85,8 +87,25 @@ class CronTick(Base):
     scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="started")
     skip_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    webhook_delivery_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    webhook_attempt_count: Mapped[int] = mapped_column(nullable=False, default=0)
+    webhook_last_status_code: Mapped[int | None] = mapped_column(nullable=True)
+    webhook_last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    webhook_delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
+
+
+class CronWebhookAttempt(Base):
+    __tablename__ = "cron_webhook_attempts"
+    __table_args__ = (UniqueConstraint("tick_id", "attempt_number", name="uq_cron_webhook_attempt_tick_attempt"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    tick_id: Mapped[int] = mapped_column(Integer, nullable=False, index=True)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    status_code: Mapped[int | None] = mapped_column(nullable=True)
+    error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
 
 
 class StoreItem(Base):

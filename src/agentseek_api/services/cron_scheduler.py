@@ -1,21 +1,30 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import CronJob, CronTick, Thread
+from agentseek_api.core.orm import CronJob, CronTick, Run, Thread
 from agentseek_api.models.api import ThreadCreate
 from agentseek_api.models.auth import User
 from agentseek_api.services.cron_models import ClaimedCron, CronDispatchResult
 from agentseek_api.services.cron_rrule import compute_next_run_at
+from agentseek_api.services.cron_webhooks import (
+    build_webhook_payload,
+    deliver_webhook_with_retries,
+    get_webhook_http_client,
+)
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
 )
 from agentseek_api.services.thread_service import create_thread_for_user
 from agentseek_api.settings import settings
+
+TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
+TERMINAL_TICK_STATUSES = {"success", "error", "interrupted", "skipped"}
 
 
 def _cron_user(user_id: str) -> User:
@@ -54,6 +63,61 @@ async def _mark_tick_outcome(
         tick.run_id = run_id
         tick.skip_reason = skip_reason
         await session.commit()
+
+
+async def _reconcile_terminal_ticks(
+    *,
+    http_client=None,
+    sleep=asyncio.sleep,
+) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        ticks = list(
+            (
+                await session.scalars(
+                    select(CronTick)
+                    .where(
+                        (CronTick.status == "queued")
+                        | (
+                            (CronTick.status.in_(TERMINAL_TICK_STATUSES))
+                            & (CronTick.webhook_delivery_status.is_(None))
+                        )
+                    )
+                    .order_by(CronTick.id.asc())
+                )
+            ).all()
+        )
+
+        deliveries: list[tuple[int, str, int, dict[str, object]]] = []
+        for tick in ticks:
+            cron = await session.scalar(select(CronJob).where(CronJob.cron_id == tick.cron_id))
+            if cron is None:
+                continue
+            if tick.status == "queued" and tick.run_id is not None:
+                run = await session.scalar(select(Run).where(Run.run_id == tick.run_id))
+                if run is not None and run.status in TERMINAL_RUN_STATUSES:
+                    tick.status = run.status
+            if cron.webhook and tick.status in TERMINAL_TICK_STATUSES and tick.webhook_delivery_status is None:
+                deliveries.append(
+                    (
+                        tick.id,
+                        cron.webhook,
+                        cron.max_webhook_attempts,
+                        build_webhook_payload(cron=cron, tick=tick),
+                    )
+                )
+        await session.commit()
+
+    webhook_client = http_client or get_webhook_http_client()
+    for tick_id, webhook_url, max_attempts, payload in deliveries:
+        await deliver_webhook_with_retries(
+            webhook_url=webhook_url,
+            payload=payload,
+            tick_id=tick_id,
+            max_attempts=max_attempts,
+            http_client=webhook_client,
+            sleep=sleep,
+        )
 
 
 async def claim_due_crons(
@@ -201,9 +265,12 @@ async def dispatch_due_crons(
     limit: int,
     scheduler_id: str,
     now: datetime | None = None,
+    webhook_sleep=asyncio.sleep,
 ) -> list[CronDispatchResult]:
+    await _reconcile_terminal_ticks(sleep=webhook_sleep)
     claimed = await claim_due_crons(limit=limit, scheduler_id=scheduler_id, now=now)
     results: list[CronDispatchResult] = []
     for item in claimed:
         results.append(await dispatch_claimed_cron(item))
+    await _reconcile_terminal_ticks(sleep=webhook_sleep)
     return results

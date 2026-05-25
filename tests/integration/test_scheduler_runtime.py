@@ -7,7 +7,7 @@ from sqlalchemy import select
 from fastapi.testclient import TestClient
 
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import CronJob, CronTick, Run, Thread
+from agentseek_api.core.orm import CronJob, CronTick, CronWebhookAttempt, Run, Thread
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -24,6 +24,20 @@ async def _list_ticks_for_cron(cron_id: str) -> list[CronTick]:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         return list((await session.scalars(select(CronTick).where(CronTick.cron_id == cron_id).order_by(CronTick.id.asc()))).all())
+
+
+async def _list_webhook_attempts_for_tick(tick_id: int) -> list[CronWebhookAttempt]:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        return list(
+            (
+                await session.scalars(
+                    select(CronWebhookAttempt)
+                    .where(CronWebhookAttempt.tick_id == tick_id)
+                    .order_by(CronWebhookAttempt.attempt_number.asc())
+                )
+            ).all()
+        )
 
 
 async def _mark_cron_due(cron_id: str, *, when: datetime) -> None:
@@ -54,6 +68,16 @@ async def _list_runs_for_thread(thread_id: str) -> list[Run]:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         return list((await session.scalars(select(Run).where(Run.thread_id == thread_id))).all())
+
+
+async def _set_cron_webhook(cron_id: str, *, webhook: str, max_attempts: int = 3) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        cron = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+        assert cron is not None
+        cron.webhook = webhook
+        cron.max_webhook_attempts = max_attempts
+        await session.commit()
 
 
 def _create_assistant(client: TestClient) -> str:
@@ -131,7 +155,7 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
     assert _as_utc(persisted_stateless.next_run_at) > due_at
     assert _as_utc(persisted_thread_bound.next_run_at) > due_at
     assert len(stateless_ticks) == 1
-    assert stateless_ticks[0].status == "queued"
+    assert stateless_ticks[0].status == "success"
     assert stateless_ticks[0].run_id == created_runs[0].run_id
     assert stateless_ticks[0].skip_reason is None
     assert len(thread_bound_ticks) == 1
@@ -197,4 +221,96 @@ def test_dispatch_due_crons_persists_submission_error_and_continues(client: Test
     assert failing_ticks[0].run_id is None
     assert failing_ticks[0].skip_reason == "submission_failed"
     assert len(passing_ticks) == 1
-    assert passing_ticks[0].status == "queued"
+    assert passing_ticks[0].status == "success"
+
+
+def test_dispatch_due_crons_reconciles_terminal_ticks_and_persists_webhook_attempts(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    class _FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    class FakeWebhookClient:
+        def __init__(self) -> None:
+            self.calls_by_url: dict[str, int] = {}
+
+        async def post(self, url: str, json: dict[str, object]) -> _FakeResponse:
+            attempt = self.calls_by_url.get(url, 0) + 1
+            self.calls_by_url[url] = attempt
+            if url.endswith("/success") and attempt < 3:
+                return _FakeResponse(500)
+            return _FakeResponse(200)
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+
+    stateless = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "stateless"},
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert stateless.status_code == 200
+
+    thread_bound = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "thread-bound"},
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert thread_bound.status_code == 200
+
+    asyncio.run(_set_cron_webhook(stateless.json()["cron_id"], webhook="https://example.com/success", max_attempts=3))
+    asyncio.run(_set_cron_webhook(thread_bound.json()["cron_id"], webhook="https://example.com/skipped", max_attempts=2))
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(stateless.json()["cron_id"], when=due_at))
+    asyncio.run(_mark_cron_due(thread_bound.json()["cron_id"], when=due_at))
+    asyncio.run(_mark_thread_busy(thread_id))
+
+    fake_http_client = FakeWebhookClient()
+    monkeypatch.setattr(cron_scheduler_module, "get_webhook_http_client", lambda: fake_http_client)
+
+    results = asyncio.run(
+        cron_scheduler_module.dispatch_due_crons(
+            limit=10,
+            scheduler_id="scheduler-1",
+            now=due_at,
+            webhook_sleep=_no_sleep,
+        )
+    )
+
+    assert len(results) == 2
+
+    stateless_ticks = asyncio.run(_list_ticks_for_cron(stateless.json()["cron_id"]))
+    thread_bound_ticks = asyncio.run(_list_ticks_for_cron(thread_bound.json()["cron_id"]))
+    assert len(stateless_ticks) == 1
+    assert stateless_ticks[0].status == "success"
+    assert stateless_ticks[0].webhook_delivery_status == "delivered"
+    assert stateless_ticks[0].webhook_attempt_count == 3
+    assert stateless_ticks[0].webhook_last_status_code == 200
+    assert len(thread_bound_ticks) == 1
+    assert thread_bound_ticks[0].status == "skipped"
+    assert thread_bound_ticks[0].webhook_delivery_status == "delivered"
+    assert thread_bound_ticks[0].webhook_attempt_count == 1
+    assert thread_bound_ticks[0].webhook_last_status_code == 200
+
+    stateless_attempts = asyncio.run(_list_webhook_attempts_for_tick(stateless_ticks[0].id))
+    skipped_attempts = asyncio.run(_list_webhook_attempts_for_tick(thread_bound_ticks[0].id))
+    assert [attempt.attempt_number for attempt in stateless_attempts] == [1, 2, 3]
+    assert [attempt.status_code for attempt in stateless_attempts] == [500, 500, 200]
+    assert [attempt.attempt_number for attempt in skipped_attempts] == [1]
+    assert [attempt.status_code for attempt in skipped_attempts] == [200]
