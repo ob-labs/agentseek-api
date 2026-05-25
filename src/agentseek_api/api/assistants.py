@@ -161,14 +161,22 @@ async def get_assistant_schemas(assistant_id: str) -> dict[str, object]:
     }
 
 
-@router.get("/{assistant_id}/subgraphs")
-async def get_assistant_subgraphs(assistant_id: str) -> list[dict[str, object]]:
+@router.get(
+    "/{assistant_id}/subgraphs",
+    response_model=None,
+    responses={501: {"description": ASSISTANT_SUBGRAPHS_UNSUPPORTED}},
+)
+async def get_assistant_subgraphs(assistant_id: str) -> None:
     _ = await get_assistant(assistant_id)
     raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
 
 
-@router.get("/{assistant_id}/subgraphs/{namespace}")
-async def get_assistant_subgraphs_by_namespace(assistant_id: str, namespace: str) -> list[dict[str, object]]:
+@router.get(
+    "/{assistant_id}/subgraphs/{namespace}",
+    response_model=None,
+    responses={501: {"description": ASSISTANT_SUBGRAPHS_UNSUPPORTED}},
+)
+async def get_assistant_subgraphs_by_namespace(assistant_id: str, namespace: str) -> None:
     _ = (await get_assistant(assistant_id), namespace)
     raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
 
@@ -185,7 +193,11 @@ async def get_assistant_versions(assistant_id: str) -> dict[str, object]:
     }
 
 
-@router.post("/{assistant_id}/latest", response_model=AssistantRead)
-async def set_latest_assistant_version(assistant_id: str) -> AssistantRead:
+@router.post(
+    "/{assistant_id}/latest",
+    response_model=None,
+    responses={409: {"description": ASSISTANT_VERSION_PROMOTION_UNSUPPORTED}},
+)
+async def set_latest_assistant_version(assistant_id: str) -> None:
     _ = await get_assistant(assistant_id)
     raise HTTPException(status_code=409, detail=ASSISTANT_VERSION_PROMOTION_UNSUPPORTED)
