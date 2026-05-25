@@ -31,6 +31,10 @@ def _cron_user(user_id: str) -> User:
     return User(identity=user_id, is_authenticated=True)
 
 
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
 def _started_tick_stale_after_seconds() -> int:
     configured = settings.SCHEDULER_STARTED_TICK_STALE_AFTER_SECONDS
     if configured is not None:
@@ -69,11 +73,17 @@ def _tick_stale_before(*, current_time: datetime) -> datetime:
     return current_time - timedelta(seconds=_started_tick_stale_after_seconds())
 
 
+def _webhook_delivery_stale_before(*, current_time: datetime) -> datetime:
+    return current_time - timedelta(seconds=_started_tick_stale_after_seconds())
+
+
 async def _reconcile_terminal_ticks(
     *,
     http_client=None,
     sleep=asyncio.sleep,
 ) -> None:
+    current_time = datetime.now(UTC)
+    stale_before = _webhook_delivery_stale_before(current_time=current_time)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         ticks = list(
@@ -84,7 +94,13 @@ async def _reconcile_terminal_ticks(
                         (CronTick.status == "queued")
                         | (
                             (CronTick.status.in_(TERMINAL_TICK_STATUSES))
-                            & (CronTick.webhook_delivery_status.is_(None))
+                            & (
+                                (CronTick.webhook_delivery_status.is_(None))
+                                | (
+                                    (CronTick.webhook_delivery_status == "delivering")
+                                    & (CronTick.updated_at <= stale_before)
+                                )
+                            )
                         )
                     )
                     .order_by(CronTick.id.asc())
@@ -102,7 +118,10 @@ async def _reconcile_terminal_ticks(
                 run = await session.scalar(select(Run).where(Run.run_id == tick.run_id))
                 if run is not None and run.status in TERMINAL_RUN_STATUSES:
                     tick.status = run.status
-            if cron.webhook and tick.status in TERMINAL_TICK_STATUSES and tick.webhook_delivery_status is None:
+            delivery_is_available = tick.webhook_delivery_status is None or (
+                tick.webhook_delivery_status == "delivering" and _as_utc(tick.updated_at) <= stale_before
+            )
+            if cron.webhook and tick.status in TERMINAL_TICK_STATUSES and delivery_is_available:
                 tick.webhook_delivery_status = "delivering"
                 deliveries.append(
                     (
