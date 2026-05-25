@@ -42,6 +42,13 @@ def test_info_endpoint(client: TestClient) -> None:
     assert body["flags"]["mcp"] is True
     assert body["flags"]["protocol_v2"] is True
     assert isinstance(body["metadata"], dict)
+    assert body["metadata"]["compatibility_tier"] == "oss-core"
+    assert body["metadata"]["unsupported_features"] == [
+        "crons",
+        "distributed_runtime",
+        "assistant_subgraph_inspection",
+        "assistant_version_promotion",
+    ]
 
 
 def test_info_endpoint_reports_mcp_runtime_state_from_startup(monkeypatch, tmp_path: Path) -> None:

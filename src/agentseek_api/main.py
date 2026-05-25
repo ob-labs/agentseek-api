@@ -72,12 +72,19 @@ def _feature_flags(*, a2a_enabled: bool, mcp_enabled: bool) -> dict[str, bool]:
     }
 
 
-def _server_metadata() -> dict[str, str]:
+def _server_metadata() -> dict[str, object]:
     return {
         "app_name": settings.APP_NAME,
         "auth_type": settings.AUTH_TYPE,
         "checkpoint_backend": "langchain-oceanbase",
         "checkpoint_backend_version": _langchain_oceanbase_version(),
+        "compatibility_tier": "oss-core",
+        "unsupported_features": [
+            "crons",
+            "distributed_runtime",
+            "assistant_subgraph_inspection",
+            "assistant_version_promotion",
+        ],
     }
 
 
