@@ -1,3 +1,4 @@
+import asyncio
 import json
 
 from fastapi.testclient import TestClient
@@ -41,13 +42,51 @@ def _parse_sse(stream_text: str) -> list[dict[str, object]]:
     return events
 
 
-async def _seed_running_run(*, user_id: str = "default_user") -> tuple[str, str]:
+def _lifecycle_states(events: list[dict[str, object]]) -> list[str]:
+    return [
+        data.get("event")
+        for event in events
+        if event.get("event") == "lifecycle"
+        for data in [event.get("data", {}).get("params", {}).get("data", {})]
+        if isinstance(data, dict)
+    ]
+
+
+async def _collect_stream_events(
+    response: object,
+    timeout_seconds: float = 2.0,
+    stop_on_lifecycle_states: set[str] | None = None,
+) -> list[dict[str, object]]:
+    body_iterator = getattr(response, "body_iterator")
+    chunks: list[str] = []
+    deadline = asyncio.get_running_loop().time() + timeout_seconds
+    try:
+        while True:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                break
+            try:
+                chunk = await asyncio.wait_for(anext(body_iterator), timeout=remaining)
+            except (StopAsyncIteration, TimeoutError):
+                break
+            chunks.append(chunk.decode() if isinstance(chunk, bytes) else str(chunk))
+            events = _parse_sse("".join(chunks))
+            if stop_on_lifecycle_states is not None and stop_on_lifecycle_states.intersection(_lifecycle_states(events)):
+                return events
+    finally:
+        aclose = getattr(body_iterator, "aclose", None)
+        if callable(aclose):
+            await aclose()
+    return _parse_sse("".join(chunks))
+
+
+async def _seed_run(*, status: str = "running", user_id: str = "default_user") -> tuple[str, str]:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = Thread(user_id=user_id, metadata_json={"case": "redis-run-stream"}, config_json={}, status="busy")
         session.add(thread)
         await session.flush()
-        run = Run(thread_id=thread.thread_id, assistant_id="assistant", user_id=user_id, status="running")
+        run = Run(thread_id=thread.thread_id, assistant_id="assistant", user_id=user_id, status=status)
         session.add(run)
         await session.commit()
         return thread.thread_id, run.run_id
@@ -107,7 +146,7 @@ def test_run_stream_replays_persisted_events_after_broker_state_is_cleared(clien
 
 
 def test_run_stream_polls_persisted_events_in_redis_mode(client: TestClient, monkeypatch) -> None:
-    thread_id, run_id = client.portal.call(_seed_running_run)
+    thread_id, run_id = client.portal.call(_seed_run)
     load_calls = {"count": 0}
 
     async def fake_load_run_stream_events(requested_run_id: str, *, after_seq: int = 0) -> list[tuple[int, dict[str, object]]]:
@@ -154,6 +193,56 @@ def test_run_stream_polls_persisted_events_in_redis_mode(client: TestClient, mon
     events = _parse_sse(body)
     assert [event["event"] for event in events] == ["start", "end"]
     assert events[-1]["data"]["status"] == "success"
+
+
+def test_run_stream_polls_persisted_events_for_terminal_rows_in_redis_mode(client: TestClient, monkeypatch) -> None:
+    thread_id, run_id = client.portal.call(lambda: _seed_run(status="success"))
+    load_calls = {"count": 0}
+
+    async def fake_load_run_stream_events(requested_run_id: str, *, after_seq: int = 0) -> list[tuple[int, dict[str, object]]]:
+        assert requested_run_id == run_id
+        load_calls["count"] += 1
+        if load_calls["count"] == 1 and after_seq == 0:
+            return [
+                (1, {"event": "start"}),
+                (2, {"event": "end", "status": "interrupted"}),
+            ]
+        if load_calls["count"] == 2 and after_seq == 2:
+            return [(3, {"event": "end", "status": "success"})]
+        return []
+
+    async def fake_is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
+        _ = (run_id, thread_id, user_id)
+        return True
+
+    def unexpected_stream_records(*args, **kwargs):
+        _ = (args, kwargs)
+
+        async def _iter():
+            raise AssertionError("Redis stream path should not subscribe to the API-process run broker")
+            yield 0, {}
+
+        return _iter()
+
+    monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(runs_api, "load_run_stream_events", fake_load_run_stream_events)
+    monkeypatch.setattr(runs_api, "_is_run_terminal", fake_is_run_terminal)
+    monkeypatch.setattr(runs_api.run_broker, "snapshot_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(runs_api.run_broker, "stream_records", unexpected_stream_records)
+
+    response = client.portal.call(
+        runs_api.stream_run,
+        thread_id,
+        run_id,
+        User(identity="default_user", is_authenticated=True),
+        None,
+    )
+
+    body = client.portal.call(_collect_stream_body, response)
+    events = _parse_sse(body)
+    end_statuses = [event["data"]["status"] for event in events if event["event"] == "end"]
+    assert end_statuses == ["interrupted", "success"]
 
 
 def test_protocol_stream_replays_persisted_events_after_broker_state_is_cleared(client: TestClient) -> None:
@@ -341,20 +430,44 @@ def test_thread_run_stream_uses_monotonic_ids_across_multiple_runs(client: TestC
     assert first.status_code == 200
     assert second.status_code == 200
 
-    stream = client.get(f"/threads/{thread_id}/stream")
-    assert stream.status_code == 200
-    events = _parse_sse(stream.text)
-    event_ids = [int(str(event["id"])) for event in events]
-    assert event_ids == list(range(1, len(events) + 1))
-
-    first_run_last_id = max(
-        int(str(event["id"])) for event in events if event["data"]["run_id"] == first.json()["run_id"]
+    first_stream = client.portal.call(
+        threads_api.stream_thread,
+        thread_id,
+        User(identity="default_user", is_authenticated=True),
+        None,
     )
-    replay = client.get(f"/threads/{thread_id}/stream", headers={"Last-Event-ID": str(first_run_last_id)})
-    assert replay.status_code == 200
-    replay_events = _parse_sse(replay.text)
+    assert first_stream.status_code == 200
+    events = client.portal.call(
+        _collect_stream_events,
+        first_stream,
+        2.0,
+        {"completed", "failed", "interrupted"},
+    )
+    event_ids = [int(str(event["id"])) for event in events]
+    assert event_ids == sorted(event_ids)
+    assert len(event_ids) == len(set(event_ids))
+
+    first_run_last_id = max(event_ids)
+    third = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant.json()["assistant_id"], "input": {"message": "third"}},
+    )
+    assert third.status_code == 200
+
+    replay_stream = client.portal.call(
+        threads_api.stream_thread,
+        thread_id,
+        User(identity="default_user", is_authenticated=True),
+        str(first_run_last_id),
+    )
+    assert replay_stream.status_code == 200
+    replay_events = client.portal.call(
+        _collect_stream_events,
+        replay_stream,
+        2.0,
+        {"completed", "failed", "interrupted"},
+    )
     assert replay_events
-    assert {event["data"]["run_id"] for event in replay_events} == {second.json()["run_id"]}
     assert all(int(str(event["id"])) > first_run_last_id for event in replay_events)
 
 

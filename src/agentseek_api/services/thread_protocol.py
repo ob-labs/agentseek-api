@@ -166,6 +166,7 @@ class ThreadProtocolEventBroker:
         namespaces: list[list[str]] | None,
         depth: int | None,
         since: int | None,
+        wait_for_future_runs: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
         seen = 0
         if since is not None:
@@ -191,11 +192,12 @@ class ThreadProtocolEventBroker:
                     continue
                 yield event
 
-            if self._active_runs.get(thread_id, 0) == 0:
-                return
-
             signal = self._signals[thread_id]
             signal.clear()
+            if seen < len(self._events.get(thread_id, [])):
+                continue
+            if self._active_runs.get(thread_id, 0) == 0 and not wait_for_future_runs:
+                return
             await signal.wait()
 
 

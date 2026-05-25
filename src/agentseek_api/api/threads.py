@@ -16,12 +16,14 @@ from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import ThreadCreate, ThreadPatch, ThreadPruneRequest, ThreadRead, ThreadSearchRequest
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolCommandRequest, ProtocolEventStreamRequest
-from agentseek_api.services.run_preparation import prepare_and_submit_run, resume_run
-from agentseek_api.services.run_state import run_broker
+from agentseek_api.services.run_preparation import (
+    ActiveThreadRunConflictError,
+    prepare_and_submit_run,
+    resume_run,
+)
 from agentseek_api.services.stream_persistence import (
     delete_run_stream_events,
     delete_thread_stream_events,
-    load_run_stream_events,
     load_thread_stream_events,
     parse_last_event_id,
 )
@@ -40,6 +42,7 @@ router = APIRouter(prefix="/threads", tags=["Threads"])
 TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
 REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
+THREAD_STREAM_CHANNELS = ["input", "lifecycle", "messages", "tools", "values"]
 
 
 async def _best_effort_checkpointer_call(method_name: str, *args: object, **kwargs: object) -> None:
@@ -96,6 +99,7 @@ async def _iter_persisted_thread_events(
     payload: ProtocolEventStreamRequest,
     user_id: str,
     after_seq: int,
+    wait_for_future_runs: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
     current_seq = after_seq
     terminal_idle_polls = 0
@@ -115,6 +119,9 @@ async def _iter_persisted_thread_events(
             continue
 
         if not await _thread_has_active_runs(thread_id=thread_id, user_id=user_id):
+            if wait_for_future_runs:
+                await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
+                continue
             terminal_idle_polls += 1
             if terminal_idle_polls >= REDIS_STREAM_TERMINAL_IDLE_POLLS:
                 return
@@ -560,27 +567,50 @@ async def stream_thread(
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
-        run_ids = (
-            await session.scalars(
-                select(Run.run_id).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
-            )
-        ).all()
 
     async def _event_iter() -> AsyncIterator[str]:
-        thread_event_id = 0
-        for run_id in run_ids:
-            records_by_seq: dict[int, dict[str, object]] = {
-                seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=0)
-            }
-            records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=0)})
-            for seq in sorted(records_by_seq):
-                thread_event_id += 1
-                if thread_event_id <= after_seq:
-                    continue
-                event = records_by_seq[seq]
-                event_name = str(event.get("event", "message"))
-                event_payload: dict[str, object] = {"run_id": run_id, **event}
-                yield f"id: {thread_event_id}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
+        payload = ProtocolEventStreamRequest(channels=THREAD_STREAM_CHANNELS)
+        current_seq = after_seq
+        yield ": stream-open\n\n"
+
+        for event in await load_thread_stream_events(
+            thread_id,
+            channels=payload.channels,
+            namespaces=payload.namespaces,
+            depth=payload.depth,
+            after_seq=after_seq,
+        ):
+            seq = int(event.get("seq", 0))
+            current_seq = max(current_seq, seq)
+            event_name = str(event.get("method", "event"))
+            yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
+
+        if _uses_redis_executor():
+            async for event in _iter_persisted_thread_events(
+                thread_id=thread_id,
+                payload=payload,
+                user_id=user.identity,
+                after_seq=current_seq,
+                wait_for_future_runs=True,
+            ):
+                seq = int(event.get("seq", 0))
+                current_seq = max(current_seq, seq)
+                event_name = str(event.get("method", "event"))
+                yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
+            return
+
+        async for event in thread_protocol_broker.stream(
+            thread_id,
+            channels=payload.channels,
+            namespaces=payload.namespaces,
+            depth=payload.depth,
+            since=current_seq,
+            wait_for_future_runs=True,
+        ):
+            seq = int(event.get("seq", 0))
+            current_seq = max(current_seq, seq)
+            event_name = str(event.get("method", "event"))
+            yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")
 
@@ -632,6 +662,8 @@ async def handle_protocol_command(
             )
         except ValueError as exc:
             return _protocol_error(request_id=payload.id, code="invalid_argument", message=str(exc), status_code=404)
+        except ActiveThreadRunConflictError as exc:
+            return _protocol_error(request_id=payload.id, code="thread_busy", message=str(exc), status_code=409)
 
         return JSONResponse(
             content={
@@ -683,6 +715,8 @@ async def handle_protocol_command(
                 resume=payload.params.get("response"),
                 user=user,
             )
+        except ActiveThreadRunConflictError as exc:
+            return _protocol_error(request_id=payload.id, code="thread_busy", message=str(exc), status_code=409)
         except (ValueError, RuntimeError) as exc:
             return _protocol_error(request_id=payload.id, code="unknown_error", message=str(exc), status_code=409)
 

@@ -606,23 +606,51 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         assert len(pruned_history.json()) == 1
         assert pruned_history.json()[0]["values"]["manual"] == "second"
 
-        thread_stream = await client.get(f"/threads/{alpha_thread['thread_id']}/stream", headers=_user_headers(user_id))
-        assert thread_stream.status_code == 200
-        assert thread_stream.headers["content-type"].startswith("text/event-stream")
+        async with client.stream("GET", f"/threads/{alpha_thread['thread_id']}/stream", headers=_user_headers(user_id)) as thread_stream:
+            assert thread_stream.status_code == 200
+            assert thread_stream.headers["content-type"].startswith("text/event-stream")
 
-        command = await client.post(
-            f"/threads/{alpha_thread['thread_id']}/commands",
-            json={
-                "id": 21,
-                "method": "run.start",
-                "params": {"assistant_id": assistant["assistant_id"], "input": {"message": "command"}},
-            },
-            headers=_user_headers(user_id),
-        )
-        assert command.status_code == 200
-        assert command.json()["type"] == "success"
-        assert command.json()["id"] == 21
-        assert command.json()["result"]["run_id"]
+            async def collect_lifecycle_states() -> list[str]:
+                lifecycle_states: list[str] = []
+                event_name: str | None = None
+                event_data: dict[str, object] | None = None
+                async for line in thread_stream.aiter_lines():
+                    if line.startswith("event: "):
+                        event_name = line.removeprefix("event: ")
+                    elif line.startswith("data: "):
+                        event_data = json.loads(line.removeprefix("data: "))
+                    elif not line:
+                        if event_name == "lifecycle" and isinstance(event_data, dict):
+                            data = event_data.get("params", {}).get("data", {})
+                            if isinstance(data, dict):
+                                state = data.get("event")
+                                if isinstance(state, str):
+                                    lifecycle_states.append(state)
+                                    if {"started", "completed"} <= set(lifecycle_states):
+                                        return lifecycle_states
+                        event_name = None
+                        event_data = None
+                return lifecycle_states
+
+            stream_task = asyncio.create_task(collect_lifecycle_states())
+
+            command = await client.post(
+                f"/threads/{alpha_thread['thread_id']}/commands",
+                json={
+                    "id": 21,
+                    "method": "run.start",
+                    "params": {"assistant_id": assistant["assistant_id"], "input": {"message": "command"}},
+                },
+                headers=_user_headers(user_id),
+            )
+            assert command.status_code == 200
+            assert command.json()["type"] == "success"
+            assert command.json()["id"] == 21
+            assert command.json()["result"]["run_id"]
+
+            lifecycle_states = await asyncio.wait_for(stream_task, timeout=15.0)
+            assert "started" in lifecycle_states
+            assert "completed" in lifecycle_states
 
         unsupported_command = await client.post(
             f"/threads/{alpha_thread['thread_id']}/commands",

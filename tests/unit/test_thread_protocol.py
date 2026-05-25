@@ -92,6 +92,47 @@ async def test_thread_protocol_stream_filters_channels_namespaces_depth_and_sinc
     assert [event["seq"] for event in replay] == [2]
 
 
+@pytest.mark.asyncio
+async def test_thread_protocol_stream_does_not_lose_events_published_during_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = ThreadProtocolEventBroker()
+    broker.run_started("thread-1")
+    broker.publish(
+        "thread-1",
+        {"method": "values", "params": {"namespace": [], "timestamp": 1, "data": {"step": 1}}},
+    )
+
+    signal = broker._signals["thread-1"]
+    original_clear = signal.clear
+    injected = {"done": False}
+
+    def clear_with_injected_event() -> None:
+        if not injected["done"]:
+            injected["done"] = True
+            broker.publish(
+                "thread-1",
+                {"method": "values", "params": {"namespace": [], "timestamp": 2, "data": {"step": 2}}},
+            )
+            broker.run_finished("thread-1")
+        original_clear()
+
+    monkeypatch.setattr(signal, "clear", clear_with_injected_event)
+
+    events = [
+        event
+        async for event in broker.stream(
+            "thread-1",
+            channels=["values"],
+            namespaces=None,
+            depth=None,
+            since=0,
+        )
+    ]
+
+    assert [event["seq"] for event in events] == [1, 2]
+
+
 def test_publish_helpers_emit_expected_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
     broker = ThreadProtocolEventBroker()
     monkeypatch.setattr(protocol, "thread_protocol_broker", broker)
