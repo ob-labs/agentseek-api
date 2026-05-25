@@ -210,20 +210,26 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         assert "input_schema" in schemas.json()
 
         subgraphs = await client.get(f"/assistants/{default_assistant['assistant_id']}/subgraphs")
-        assert subgraphs.status_code == 200
-        assert isinstance(subgraphs.json(), list)
+        assert subgraphs.status_code == 501
+        assert subgraphs.json()["detail"] == "Assistant subgraph inspection is not supported"
 
         namespaced = await client.get(f"/assistants/{default_assistant['assistant_id']}/subgraphs/root")
-        assert namespaced.status_code == 200
-        assert isinstance(namespaced.json(), list)
+        assert namespaced.status_code == 501
+        assert namespaced.json()["detail"] == "Assistant subgraph inspection is not supported"
 
         versions = await client.post(f"/assistants/{default_assistant['assistant_id']}/versions")
         assert versions.status_code == 200
-        assert versions.json()["version"] >= 1
+        assert versions.json() == {
+            "assistant_id": default_assistant["assistant_id"],
+            "current_version": 1,
+            "latest_version": 1,
+            "available_versions": [1],
+            "supports_version_history": False,
+        }
 
         latest = await client.post(f"/assistants/{default_assistant['assistant_id']}/latest")
-        assert latest.status_code == 200
-        assert latest.json()["assistant_id"] == default_assistant["assistant_id"]
+        assert latest.status_code == 409
+        assert latest.json()["detail"] == "Assistant version promotion is not supported"
 
         unsupported_delete = await client.delete(
             f"/assistants/{default_assistant['assistant_id']}?delete_threads=true",

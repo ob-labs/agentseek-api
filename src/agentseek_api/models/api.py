@@ -47,6 +47,18 @@ class AssistantRead(BaseModel):
     description: str | None = None
 
 
+class AssistantVersionInfo(BaseModel):
+    assistant_id: str
+    current_version: int
+    latest_version: int
+    available_versions: list[int]
+    supports_version_history: bool
+
+
+class ErrorDetailResponse(BaseModel):
+    detail: str
+
+
 class ThreadCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

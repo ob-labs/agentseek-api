@@ -64,5 +64,5 @@ def test_agents_alias_exposes_graph_schema_and_version_helpers(client: TestClien
     assert schemas.json()["input_schema"] == {"type": "object"}
 
     latest = client.post(f"/agents/{assistant_id}/latest")
-    assert latest.status_code == 200
-    assert latest.json()["assistant_id"] == assistant_id
+    assert latest.status_code == 409
+    assert latest.json()["detail"] == "Assistant version promotion is not supported"

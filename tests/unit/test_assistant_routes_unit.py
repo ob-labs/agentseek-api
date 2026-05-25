@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from agentseek_api.api import assistants as assistants_module
+from agentseek_api.main import create_app
 from agentseek_api.core.orm import Assistant
 from agentseek_api.models.api import AssistantCreate, AssistantPatch, AssistantSearchRequest
 
@@ -180,6 +181,94 @@ async def test_delete_assistant_rejects_delete_threads_until_supported(monkeypat
     with pytest.raises(HTTPException, match="delete_threads=true is not supported") as error:
         await assistants_module.delete_assistant("assistant-1", delete_threads=True)
     assert error.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_assistant_helper_routes_are_truthful_about_missing_version_and_subgraph_support(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assistant = _assistant(assistant_id="assistant-1")
+    session_factory = FakeSessionFactory(
+        [
+            FakeSession(scalar_rows=[assistant]),
+            FakeSession(scalar_rows=[assistant]),
+            FakeSession(scalar_rows=[assistant]),
+            FakeSession(scalar_rows=[assistant]),
+        ]
+    )
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.db_manager.get_session_factory",
+        lambda: session_factory,
+    )
+
+    versions = await assistants_module.get_assistant_versions("assistant-1")
+    assert versions.model_dump() == {
+        "assistant_id": "assistant-1",
+        "current_version": 1,
+        "latest_version": 1,
+        "available_versions": [1],
+        "supports_version_history": False,
+    }
+
+    with pytest.raises(HTTPException, match="Assistant version promotion is not supported") as latest_error:
+        await assistants_module.set_latest_assistant_version("assistant-1")
+    assert latest_error.value.status_code == 409
+
+    with pytest.raises(HTTPException, match="Assistant subgraph inspection is not supported") as subgraph_error:
+        await assistants_module.get_assistant_subgraphs("assistant-1")
+    assert subgraph_error.value.status_code == 501
+
+    with pytest.raises(HTTPException, match="Assistant subgraph inspection is not supported") as namespaced_error:
+        await assistants_module.get_assistant_subgraphs_by_namespace("assistant-1", "root")
+    assert namespaced_error.value.status_code == 501
+
+
+def test_assistant_helper_openapi_matches_limited_contract() -> None:
+    schema = create_app().openapi()
+    error_schema_ref = "#/components/schemas/ErrorDetailResponse"
+
+    delete_responses = schema["paths"]["/assistants/{assistant_id}"]["delete"]["responses"]
+    assert delete_responses["400"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert delete_responses["400"]["content"]["application/json"]["example"] == {
+        "detail": "delete_threads=true is not supported"
+    }
+    assert delete_responses["404"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    delete_parameters = schema["paths"]["/assistants/{assistant_id}"]["delete"]["parameters"]
+    assert any(
+        parameter["name"] == "delete_threads"
+        and parameter["schema"]["type"] == "boolean"
+        for parameter in delete_parameters
+    )
+
+    subgraphs_responses = schema["paths"]["/assistants/{assistant_id}/subgraphs"]["get"]["responses"]
+    assert "200" not in subgraphs_responses
+    assert "501" in subgraphs_responses
+    assert subgraphs_responses["501"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert subgraphs_responses["501"]["content"]["application/json"]["example"] == {
+        "detail": "Assistant subgraph inspection is not supported"
+    }
+
+    namespaced_responses = schema["paths"]["/assistants/{assistant_id}/subgraphs/{namespace}"]["get"]["responses"]
+    assert "200" not in namespaced_responses
+    assert "501" in namespaced_responses
+    assert namespaced_responses["501"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+
+    latest_responses = schema["paths"]["/assistants/{assistant_id}/latest"]["post"]["responses"]
+    assert "200" not in latest_responses
+    assert "409" in latest_responses
+    assert latest_responses["409"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert latest_responses["409"]["content"]["application/json"]["example"] == {
+        "detail": "Assistant version promotion is not supported"
+    }
+
+    versions_responses = schema["paths"]["/assistants/{assistant_id}/versions"]["post"]["responses"]
+    assert versions_responses["200"]["content"]["application/json"]["schema"]["$ref"] == (
+        "#/components/schemas/AssistantVersionInfo"
+    )
+    assert versions_responses["404"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert versions_responses["404"]["content"]["application/json"]["example"] == {
+        "detail": "Assistant not found"
+    }
 
 
 @pytest.mark.asyncio
