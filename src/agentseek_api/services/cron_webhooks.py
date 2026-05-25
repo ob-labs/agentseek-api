@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any, Protocol
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import CronJob, CronTick, CronWebhookAttempt
@@ -101,6 +101,15 @@ async def _persist_webhook_result(
         await session.commit()
 
 
+async def _load_existing_attempt_count(*, tick_id: int) -> int:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        count = await session.scalar(
+            select(func.max(CronWebhookAttempt.attempt_number)).where(CronWebhookAttempt.tick_id == tick_id)
+        )
+    return int(count or 0)
+
+
 async def deliver_webhook_with_retries(
     *,
     webhook_url: str,
@@ -113,7 +122,24 @@ async def deliver_webhook_with_retries(
     final_status_code: int | None = None
     final_error: str | None = None
     bounded_attempts = max(1, max_attempts)
-    for attempt_number in range(1, bounded_attempts + 1):
+    existing_attempts = await _load_existing_attempt_count(tick_id=tick_id)
+    next_attempt_number = existing_attempts + 1
+    if next_attempt_number > bounded_attempts:
+        await _persist_webhook_result(
+            tick_id=tick_id,
+            delivered=False,
+            status_code=None,
+            error="Webhook delivery attempts exhausted",
+            attempt_count=existing_attempts,
+        )
+        return WebhookDeliveryResult(
+            delivered=False,
+            attempt_count=existing_attempts,
+            status_code=None,
+            error="Webhook delivery attempts exhausted",
+        )
+
+    for attempt_number in range(next_attempt_number, bounded_attempts + 1):
         try:
             response = await http_client.post(webhook_url, json=payload)
             final_status_code = int(response.status_code)

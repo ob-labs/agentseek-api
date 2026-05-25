@@ -39,6 +39,33 @@ async def _no_sleep(_: float) -> None:
     return None
 
 
+async def _seed_attempt(
+    *,
+    tick_id: int,
+    attempt_number: int,
+    status_code: int | None,
+    error: str | None,
+    delivery_status: str = "delivering",
+) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        session.add(
+            CronWebhookAttempt(
+                tick_id=tick_id,
+                attempt_number=attempt_number,
+                status_code=status_code,
+                error=error,
+            )
+        )
+        tick = await session.scalar(select(CronTick).where(CronTick.id == tick_id))
+        assert tick is not None
+        tick.webhook_delivery_status = delivery_status
+        tick.webhook_attempt_count = attempt_number
+        tick.webhook_last_status_code = status_code
+        tick.webhook_last_error = error
+        await session.commit()
+
+
 @pytest.fixture
 async def persisted_tick(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from agentseek_api.settings import settings
@@ -169,3 +196,53 @@ async def test_deliver_webhook_with_retries_persists_terminal_failure_metadata(
     assert tick.webhook_attempt_count == 3
     assert tick.webhook_last_status_code == 500
     assert tick.webhook_last_error == "HTTP 500"
+
+
+@pytest.mark.asyncio
+async def test_deliver_webhook_with_retries_resumes_after_persisted_failed_attempt(
+    persisted_tick: CronTick,
+) -> None:
+    from agentseek_api.services.cron_webhooks import deliver_webhook_with_retries
+
+    await _seed_attempt(
+        tick_id=persisted_tick.id,
+        attempt_number=1,
+        status_code=500,
+        error="HTTP 500",
+    )
+
+    fake_http_client = FakeWebhookClient()
+    fake_http_client.failures_before_success = 1
+
+    result = await deliver_webhook_with_retries(
+        webhook_url="https://example.com/hook",
+        payload={"cron_id": "c1", "status": "success"},
+        tick_id=persisted_tick.id,
+        max_attempts=3,
+        http_client=fake_http_client,
+        sleep=_no_sleep,
+    )
+
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        attempts = list(
+            (
+                await session.scalars(
+                    select(CronWebhookAttempt)
+                    .where(CronWebhookAttempt.tick_id == persisted_tick.id)
+                    .order_by(CronWebhookAttempt.attempt_number.asc())
+                )
+            ).all()
+        )
+        tick = await session.scalar(select(CronTick).where(CronTick.id == persisted_tick.id))
+
+    assert result.delivered is True
+    assert result.attempt_count == 3
+    assert result.status_code == 200
+    assert len(fake_http_client.calls) == 2
+    assert [attempt.attempt_number for attempt in attempts] == [1, 2, 3]
+    assert [attempt.status_code for attempt in attempts] == [500, 500, 200]
+    assert tick is not None
+    assert tick.webhook_delivery_status == "delivered"
+    assert tick.webhook_attempt_count == 3
+    assert tick.webhook_last_status_code == 200
