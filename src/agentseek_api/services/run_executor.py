@@ -697,6 +697,7 @@ async def execute_run(
     thread_id: str,
     run_id: str,
     payload: dict[str, Any],
+    kwargs: dict[str, Any] | None = None,
     user_id: str,
     graph_id: str | None = None,
     resume: Any = UNSET,
@@ -710,14 +711,21 @@ async def execute_run(
         store=runtime_store,
     )
 
-    config = {
-        CONF: {
+    run_kwargs = kwargs or {}
+    user_config = dict(run_kwargs.get("config", {})) if isinstance(run_kwargs.get("config"), dict) else {}
+    config = dict(user_config)
+    configurable = dict(config.get(CONF, {})) if isinstance(config.get(CONF), dict) else {}
+    configurable.update(
+        {
             "thread_id": thread_id,
             "checkpoint_ns": run_id,
             CONFIG_KEY_CHECKPOINTER: db_manager.get_langgraph_checkpointer(),
             "store": runtime_store,
         }
-    }
+    )
+    if "context" in run_kwargs:
+        configurable["context"] = run_kwargs["context"]
+    config[CONF] = configurable
     if resume is UNSET:
         invocation = entry.prepare_input(payload)
     else:

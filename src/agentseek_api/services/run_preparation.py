@@ -203,6 +203,7 @@ async def prepare_and_submit_run(
                 user_id=run.user_id,
                 payload=run.input_json,
                 graph_id=graph_id,
+                kwargs=getattr(run, "kwargs_json", {}) or {},
             )
         )
     except Exception as exc:
@@ -275,6 +276,7 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
                 user_id=run.user_id,
                 payload=payload,
                 graph_id=graph_id,
+                kwargs=getattr(run, "kwargs_json", {}) or {},
                 resume=resume,
                 is_resume=True,
             )

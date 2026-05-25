@@ -228,7 +228,7 @@ async def claim_due_crons(
             await session.flush()
             claimed.append(ClaimedCron.from_row(row, tick_id=tick.id, scheduled_for=scheduled_for))
             try:
-                row.next_run_at = compute_next_run_at(row.schedule, timezone_name="UTC", now=current_time)
+                row.next_run_at = compute_next_run_at(row.schedule, timezone_name=row.timezone, now=current_time)
             except ValueError:
                 row.enabled = False
         await session.commit()
@@ -293,13 +293,14 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
             thread_id=claim.thread_id,
             skip_reason="thread_busy",
         )
-    except Exception:
-        await _mark_tick_outcome(tick_id=claim.tick_id, status="error", skip_reason="submission_failed")
+    except Exception as exc:
+        error_detail = str(exc) or type(exc).__name__
+        await _mark_tick_outcome(tick_id=claim.tick_id, status="error", skip_reason=error_detail)
         return CronDispatchResult(
             cron_id=claim.cron_id,
             status="error",
             thread_id=claim.thread_id,
-            skip_reason="submission_failed",
+            skip_reason=error_detail,
         )
 
     await _mark_tick_outcome(tick_id=claim.tick_id, status="queued", run_id=run.run_id)

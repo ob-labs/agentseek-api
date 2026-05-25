@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant, CronJob, CronTick
+from agentseek_api.services.cron_rrule import compute_next_run_at
 
 
 class _FakeCheckpointer:
@@ -134,5 +135,54 @@ async def test_claim_due_crons_only_reclaims_abandoned_started_ticks(
             assert len(ticks) == 1
             assert ticks[0].status == "started"
             assert ticks[0].scheduler_id == "scheduler-c"
+    finally:
+        await db_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_due_crons_advances_next_run_at_using_cron_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from agentseek_api.services.cron_scheduler import claim_due_crons
+    from agentseek_api.settings import settings
+
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/scheduler-timezone.db")
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", _FakeCheckpointer)
+    await db_manager.close()
+    await db_manager.initialize()
+    try:
+        session_factory = db_manager.get_session_factory()
+        due_at = datetime(2026, 5, 25, 1, 0, tzinfo=UTC)
+        schedule = "FREQ=DAILY;INTERVAL=1;BYHOUR=9;BYMINUTE=0"
+        timezone_name = "Asia/Shanghai"
+        async with session_factory() as session:
+            assistant = Assistant(name="scheduler-timezone", graph_id="default")
+            session.add(assistant)
+            await session.flush()
+            cron = CronJob(
+                assistant_id=assistant.assistant_id,
+                thread_id=None,
+                user_id="u1",
+                schedule=schedule,
+                timezone=timezone_name,
+                enabled=True,
+                input_json={"kind": "tz"},
+                next_run_at=due_at,
+            )
+            session.add(cron)
+            await session.commit()
+            cron_id = cron.cron_id
+
+        await claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at)
+
+        async with session_factory() as session:
+            persisted = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+            assert persisted is not None
+            assert _as_utc(persisted.next_run_at) == compute_next_run_at(
+                schedule,
+                timezone_name=timezone_name,
+                now=due_at,
+            )
     finally:
         await db_manager.close()

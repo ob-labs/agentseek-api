@@ -259,7 +259,10 @@ def test_dispatch_due_crons_persists_submission_error_and_continues(client: Test
     assert len(failing_ticks) == 1
     assert failing_ticks[0].status == "error"
     assert failing_ticks[0].run_id is None
-    assert failing_ticks[0].skip_reason == "submission_failed"
+    assert failing_ticks[0].skip_reason == "submit boom"
+    persisted_failing = asyncio.run(_fetch_cron(failing.json()["cron_id"]))
+    assert persisted_failing is not None
+    assert persisted_failing.last_error == "submit boom"
     assert len(passing_ticks) == 1
     assert passing_ticks[0].status == "success"
 
