@@ -11,12 +11,26 @@ from agentseek_api.models.api import (
     AssistantRead,
     AssistantSearchRequest,
     AssistantVersionInfo,
+    ErrorDetailResponse,
 )
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
 ASSISTANT_SUBGRAPHS_UNSUPPORTED = "Assistant subgraph inspection is not supported"
 ASSISTANT_VERSION_PROMOTION_UNSUPPORTED = "Assistant version promotion is not supported"
+DELETE_THREADS_UNSUPPORTED = "delete_threads=true is not supported"
+
+
+def _detail_response(*, description: str, detail: str) -> dict[str, object]:
+    return {
+        "description": description,
+        "model": ErrorDetailResponse,
+        "content": {
+            "application/json": {
+                "example": {"detail": detail},
+            }
+        },
+    }
 
 
 def _to_read_model(row: Assistant) -> AssistantRead:
@@ -129,10 +143,17 @@ async def patch_assistant(assistant_id: str, payload: AssistantPatch) -> Assista
         return _to_read_model(row)
 
 
-@router.delete("/{assistant_id}", status_code=204)
+@router.delete(
+    "/{assistant_id}",
+    status_code=204,
+    responses={
+        400: _detail_response(description="Unsupported delete option", detail=DELETE_THREADS_UNSUPPORTED),
+        404: _detail_response(description="Assistant not found", detail="Assistant not found"),
+    },
+)
 async def delete_assistant(assistant_id: str, delete_threads: bool = False) -> Response:
     if delete_threads:
-        raise HTTPException(status_code=400, detail="delete_threads=true is not supported")
+        raise HTTPException(status_code=400, detail=DELETE_THREADS_UNSUPPORTED)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
@@ -171,7 +192,10 @@ async def get_assistant_schemas(assistant_id: str) -> dict[str, object]:
     "/{assistant_id}/subgraphs",
     status_code=501,
     response_model=None,
-    responses={404: {"description": "Assistant not found"}},
+    responses={
+        404: _detail_response(description="Assistant not found", detail="Assistant not found"),
+        501: _detail_response(description="Unsupported helper endpoint", detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED),
+    },
 )
 async def get_assistant_subgraphs(assistant_id: str) -> None:
     _ = await get_assistant(assistant_id)
@@ -182,7 +206,10 @@ async def get_assistant_subgraphs(assistant_id: str) -> None:
     "/{assistant_id}/subgraphs/{namespace}",
     status_code=501,
     response_model=None,
-    responses={404: {"description": "Assistant not found"}},
+    responses={
+        404: _detail_response(description="Assistant not found", detail="Assistant not found"),
+        501: _detail_response(description="Unsupported helper endpoint", detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED),
+    },
 )
 async def get_assistant_subgraphs_by_namespace(assistant_id: str, namespace: str) -> None:
     _ = (await get_assistant(assistant_id), namespace)
@@ -205,7 +232,13 @@ async def get_assistant_versions(assistant_id: str) -> AssistantVersionInfo:
     "/{assistant_id}/latest",
     status_code=409,
     response_model=None,
-    responses={404: {"description": "Assistant not found"}},
+    responses={
+        404: _detail_response(description="Assistant not found", detail="Assistant not found"),
+        409: _detail_response(
+            description="Unsupported helper endpoint",
+            detail=ASSISTANT_VERSION_PROMOTION_UNSUPPORTED,
+        ),
+    },
 )
 async def set_latest_assistant_version(assistant_id: str) -> None:
     _ = await get_assistant(assistant_id)

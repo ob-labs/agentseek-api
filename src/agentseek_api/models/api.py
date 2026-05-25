@@ -55,6 +55,10 @@ class AssistantVersionInfo(BaseModel):
     supports_version_history: bool
 
 
+class ErrorDetailResponse(BaseModel):
+    detail: str
+
+
 class ThreadCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
