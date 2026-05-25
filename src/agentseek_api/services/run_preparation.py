@@ -19,6 +19,8 @@ publish_lifecycle_event = run_jobs_module.publish_lifecycle_event
 thread_protocol_broker = run_jobs_module.thread_protocol_broker
 RunExecutionResult = run_jobs_module.RunExecutionResult
 UNSET = run_jobs_module.UNSET
+TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
+ACTIVE_THREAD_RUN_CONFLICT = "Another run is already active for this thread"
 
 
 async def _publish_lifecycle(
@@ -53,6 +55,18 @@ async def _persist_submission_failure(
             thread.state_updated_at = datetime.now(UTC)
 
         await session.commit()
+
+
+async def _assert_thread_accepts_new_run(*, session, thread_id: str, user_id: str) -> None:
+    active_run_id = await session.scalar(
+        select(Run.run_id).where(
+            Run.thread_id == thread_id,
+            Run.user_id == user_id,
+            Run.status.not_in(TERMINAL_RUN_STATUSES),
+        )
+    )
+    if active_run_id is not None:
+        raise RuntimeError(ACTIVE_THREAD_RUN_CONFLICT)
 
 
 async def _execute_and_persist(
@@ -106,6 +120,11 @@ async def prepare_and_submit_run(
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
         if thread is None:
             raise ValueError("Thread not found")
+        await _assert_thread_accepts_new_run(
+            session=session,
+            thread_id=thread_id,
+            user_id=user.identity,
+        )
         assistant = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
         if assistant is None:
             raise ValueError("Assistant not found")
