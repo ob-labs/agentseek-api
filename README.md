@@ -10,7 +10,14 @@ Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
 > thread, run, streaming, and protocol-v2 event flows. Some protocol surfaces
 > are still pending, and agent resources are exposed through `/assistants`,
 > direct `/agents` aliases, Streamable HTTP MCP, and LangSmith-style A2A
-> endpoints.
+> endpoints. This is workable OSS parity for the core agent-server surfaces,
+> not full LangSmith Agent Server parity.
+
+Current release boundary:
+
+- Implemented: assistants, threads, runs, streaming, Store API, MCP, and A2A
+- Explicitly not implemented: crons, distributed runtime parity, assistant
+  subgraph inspection, and assistant version-promotion workflows
 
 ## 🚀 Quickstart
 
@@ -149,6 +156,20 @@ rejected when their runtime behavior is not implemented yet.
 - 🐳 Dockerfile generation, image build, and local Docker runtime helpers
 - 🧪 Real backend CI coverage across MySQL, SeekDB, OceanBase, and Redis runtime paths
 - 🧪 Manual provider-backed streaming checks for live SSE proof
+
+## 🎯 Compatibility Scope
+
+Treat AgentSeek API as a practical OSS-compatible core for Agent Server-style
+apps.
+
+- Shipped: assistant CRUD, thread/run lifecycle APIs, resumable SSE streams,
+  Store API, MCP, A2A, Redis-backed durable execution, and Docker/runtime
+  helpers
+- Intentionally missing: crons, distributed runtime orchestration parity, full
+  assistant version management, and assistant subgraph inspection
+- Helper endpoints are explicit about limits: unsupported helper actions return
+  `409` or `501`, and `/assistants/{assistant_id}/versions` reports only the
+  single stored version
 
 ## 🗂️ Config
 
@@ -489,4 +510,6 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 1. [x] Add Redis-backed task queue and worker handoff for durable run execution
 2. [ ] Deepen Agent Protocol schema parity beyond the current alias coverage
 3. [ ] Add crons and scheduler support
-4. [x] Add MCP and A2A endpoint parity
+4. [ ] Add distributed runtime parity beyond the current single-worker Redis flow
+5. [ ] Add assistant version history and subgraph inspection support
+6. [x] Add MCP and A2A endpoint parity
