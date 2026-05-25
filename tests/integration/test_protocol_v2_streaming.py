@@ -6,6 +6,7 @@ from collections.abc import Awaitable, Callable
 from fastapi.testclient import TestClient
 
 from agentseek_api.services.run_jobs import RunExecutionJob
+from agentseek_api.services.run_preparation import ActiveThreadRunConflictError
 
 
 def _parse_sse_events(stream_text: str) -> list[dict[str, object]]:
@@ -214,6 +215,60 @@ def test_protocol_input_respond_resumes_interrupted_run(client: TestClient) -> N
     waited = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
     assert waited.status_code == 200
     assert waited.json()["status"] == "success"
+
+
+def test_protocol_input_respond_maps_resume_conflict_to_thread_busy(client: TestClient, monkeypatch) -> None:
+    assistant = client.post("/assistants", json={"name": "protocol-hitl-busy", "graph_id": "subgraph_hitl_agent"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "protocol-hitl-busy"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    command = client.post(
+        f"/threads/{thread_id}/commands",
+        json={
+            "id": 40,
+            "method": "run.start",
+            "params": {
+                "assistant_id": assistant_id,
+                "input": {"foo": "hello "},
+            },
+        },
+    )
+    assert command.status_code == 200
+
+    interrupted_stream = client.post(
+        f"/threads/{thread_id}/stream",
+        json={"channels": ["input"]},
+    )
+    assert interrupted_stream.status_code == 200
+    interrupted_events = _parse_sse_events(interrupted_stream.text)
+    interrupt_payload = next(event for event in interrupted_events if event["event"] == "input.requested")["data"]["params"]["data"]
+    interrupt_id = interrupt_payload["interrupt_id"]
+
+    async def fail_resume(**_kwargs) -> None:
+        raise ActiveThreadRunConflictError("Another run is already active for this thread")
+
+    monkeypatch.setattr("agentseek_api.api.threads.resume_run", fail_resume)
+
+    response = client.post(
+        f"/threads/{thread_id}/commands",
+        json={
+            "id": 41,
+            "method": "input.respond",
+            "params": {
+                "namespace": [],
+                "interrupt_id": interrupt_id,
+                "response": "world",
+            },
+        },
+    )
+    assert response.status_code == 409
+    assert response.json()["type"] == "error"
+    assert response.json()["error"] == "thread_busy"
+    assert response.json()["message"] == "Another run is already active for this thread"
 
 
 def test_protocol_stream_filters_subgraph_namespace_events(client: TestClient) -> None:

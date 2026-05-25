@@ -187,6 +187,18 @@ async def prepare_and_submit_run(
 async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) -> Run:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
+        thread = await session.scalar(
+            select(Thread)
+            .where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
+            .with_for_update()
+        )
+        if thread is None:
+            raise ValueError("Thread not found")
+        await _assert_thread_accepts_new_run(
+            session=session,
+            thread_id=thread_id,
+            user_id=user.identity,
+        )
         run = await session.scalar(
             select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
         )
@@ -201,10 +213,8 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
         payload = run.input_json
         run.status = "pending"
         run.last_error = None
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
-        if thread is not None:
-            thread.status = "busy"
-            thread.state_updated_at = datetime.now(UTC)
+        thread.status = "busy"
+        thread.state_updated_at = datetime.now(UTC)
         await session.commit()
 
     thread_protocol_broker.run_started(thread_id)

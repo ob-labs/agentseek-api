@@ -1,4 +1,8 @@
+from collections.abc import Awaitable, Callable
+
 from fastapi.testclient import TestClient
+
+from agentseek_api.services.run_jobs import RunExecutionJob
 
 
 def _create_assistant(client: TestClient, *, graph_id: str) -> str:
@@ -55,3 +59,41 @@ def test_resume_rejects_non_interrupted_runs(client: TestClient) -> None:
 
     resumed = client.post(f"/threads/{thread_id}/runs/{run_id}/resume", json={"resume": "ignored"})
     assert resumed.status_code == 409
+
+
+def test_resume_rejects_second_request_while_first_resume_is_pending(client: TestClient, monkeypatch) -> None:
+    class DeferredExecutor:
+        def __init__(self) -> None:
+            self.submitted: list[Callable[[], Awaitable[None]] | RunExecutionJob] = []
+
+        async def submit(self, job: Callable[[], Awaitable[None]] | RunExecutionJob) -> None:
+            self.submitted.append(job)
+
+    assistant_id = _create_assistant(client, graph_id="subgraph_hitl_agent")
+    thread_id = _create_thread(client)
+
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"foo": "hello "}},
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+    assert created.json()["status"] == "interrupted"
+
+    deferred_executor = DeferredExecutor()
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: deferred_executor)
+
+    first = client.post(
+        f"/threads/{thread_id}/runs/{run_id}/resume",
+        json={"resume": "world"},
+    )
+    assert first.status_code == 200
+    assert first.json()["status"] == "pending"
+    assert len(deferred_executor.submitted) == 1
+
+    second = client.post(
+        f"/threads/{thread_id}/runs/{run_id}/resume",
+        json={"resume": "again"},
+    )
+    assert second.status_code == 409
+    assert second.json()["detail"] == "Another run is already active for this thread"

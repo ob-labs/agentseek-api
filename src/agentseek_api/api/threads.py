@@ -715,6 +715,8 @@ async def handle_protocol_command(
                 resume=payload.params.get("response"),
                 user=user,
             )
+        except ActiveThreadRunConflictError as exc:
+            return _protocol_error(request_id=payload.id, code="thread_busy", message=str(exc), status_code=409)
         except (ValueError, RuntimeError) as exc:
             return _protocol_error(request_id=payload.id, code="unknown_error", message=str(exc), status_code=409)
 

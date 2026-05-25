@@ -394,7 +394,7 @@ async def test_resume_run_marks_row_pending_before_background_execution(monkeypa
             "last_error": None,
         },
     )()
-    load_session = FakeSession([db_run, fake_assistant, fake_thread])
+    load_session = FakeSession([fake_thread, None, db_run, fake_assistant])
     reload_session = FakeSession([db_run])
     session_factory = FakeSessionFactory([load_session, reload_session])
     executor = DeferredExecutor()
@@ -442,7 +442,7 @@ async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypat
             "last_error": None,
         },
     )()
-    load_session = FakeSession([db_run, fake_assistant, fake_thread])
+    load_session = FakeSession([fake_thread, None, db_run, fake_assistant])
     persist_session = CallbackSession([db_run, fake_thread])
     session_factory = FakeSessionFactory([load_session, persist_session])
     protocol_broker = ThreadProtocolEventBroker()
@@ -479,3 +479,20 @@ async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypat
             "seq": None,
         },
     ]
+
+
+@pytest.mark.asyncio
+async def test_resume_run_rejects_when_thread_already_has_active_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "busy", "state_updated_at": None})()
+    active_run_id = "r1"
+    session_factory = FakeSessionFactory([FakeSession([fake_thread, active_run_id])])
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+
+    with pytest.raises(run_prep_module.ActiveThreadRunConflictError, match=run_prep_module.ACTIVE_THREAD_RUN_CONFLICT):
+        await run_prep_module.resume_run(
+            thread_id="t1",
+            run_id="r1",
+            resume="world",
+            user=User(identity="u1", is_authenticated=True),
+        )
