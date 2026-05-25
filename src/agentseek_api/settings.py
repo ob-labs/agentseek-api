@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     REDIS_WORKER_POLL_TIMEOUT_SECONDS: int = 1
     REDIS_WORKER_LOCK_KEY: str = "agentseek:worker:active"
     REDIS_WORKER_LOCK_TTL_SECONDS: int = 30
+    REDIS_SCHEDULER_LOCK_KEY: str = "agentseek:scheduler:active"
+    REDIS_SCHEDULER_LOCK_TTL_SECONDS: int = 30
+    SCHEDULER_STARTED_TICK_STALE_AFTER_SECONDS: int | None = None
+    SCHEDULER_POLL_INTERVAL_SECONDS: float = 1.0
+    SCHEDULER_CLAIM_LIMIT: int = 10
     AGENTSEEK_GRAPHS: str | None = None
     AUTH_TYPE: str = "noop"
     AUTH_MODULE_PATH: str | None = None

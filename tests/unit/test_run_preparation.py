@@ -33,6 +33,9 @@ class FakeSession:
     async def refresh(self, _obj: object) -> None:
         return None
 
+    async def flush(self) -> None:
+        return None
+
 
 class TrackingSession(FakeSession):
     def __init__(self, scalar_values: list[object | None], operations: list[str]) -> None:
@@ -81,6 +84,7 @@ class InlineExecutor:
             user_id=job.user_id,
             payload=job.payload,
             graph_id=job.graph_id,
+            kwargs=job.kwargs,
             resume=job.resume,
             is_resume=job.is_resume,
         )

@@ -279,6 +279,10 @@ def build_worker_command() -> list[str]:
     return [sys.executable, "-m", "agentseek_api.worker"]
 
 
+def build_scheduler_command() -> list[str]:
+    return [sys.executable, "-m", "agentseek_api.scheduler"]
+
+
 def _default_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
     completed = subprocess.run(command, env=env, cwd=cwd, check=False)
     return completed.returncode
@@ -313,6 +317,26 @@ def _execute_worker_command(args: argparse.Namespace, *, runner: Callable[..., i
             os.environ.clear()
             os.environ.update(previous_env)
     return runner(build_worker_command(), env=env, cwd=str(cwd))
+
+
+def _execute_scheduler_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
+    config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
+    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    if runner is _default_runner:
+        from agentseek_api import scheduler as scheduler_module
+
+        previous_env = os.environ.copy()
+        previous_cwd = Path.cwd()
+        try:
+            os.environ.clear()
+            os.environ.update(env)
+            os.chdir(cwd)
+            return scheduler_module.main()
+        finally:
+            os.chdir(previous_cwd)
+            os.environ.clear()
+            os.environ.update(previous_env)
+    return runner(build_scheduler_command(), env=env, cwd=str(cwd))
 
 
 def _load_config_payload(config_path: Path) -> dict[str, object]:
@@ -693,6 +717,7 @@ def _add_command_parsers(
     serve_parser.add_argument("--port", default=DEFAULT_API_PORT, type=int)
 
     subparsers.add_parser("worker", parents=[runtime_parent])
+    subparsers.add_parser("scheduler", parents=[runtime_parent])
 
     subparsers.add_parser("version")
 
@@ -788,6 +813,8 @@ def run_namespace(
             return _execute_runtime_command(args, runner=run, cwd=workdir)
         if command == "worker":
             return _execute_worker_command(args, runner=run, cwd=workdir)
+        if command == "scheduler":
+            return _execute_scheduler_command(args, runner=run, cwd=workdir)
         if command == "dockerfile":
             return _execute_dockerfile_command(args, stdout=out, cwd=workdir)
         if command == "build":

@@ -35,6 +35,7 @@ class InlineExecutor:
             user_id=job.user_id,
             payload=job.payload,
             graph_id=job.graph_id,
+            kwargs=job.kwargs,
             resume=job.resume,
             is_resume=job.is_resume,
         )

@@ -4,7 +4,7 @@ from typing import Any
 from sqlalchemy import select, update
 
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import Assistant, Run, Thread
+from agentseek_api.core.orm import Assistant, CronTick, Run, Thread
 from agentseek_api.models.auth import User
 from agentseek_api.services.executor import get_executor
 from agentseek_api.services import run_jobs as run_jobs_module
@@ -117,8 +117,9 @@ async def _execute_and_persist(
     run_id: str,
     thread_id: str,
     user_id: str,
-    payload: dict[str, Any],
+    payload: Any,
     graph_id: str,
+    kwargs: dict[str, Any] | None = None,
     resume: Any | None = None,
     is_resume: bool = False,
 ) -> None:
@@ -136,6 +137,7 @@ async def _execute_and_persist(
             user_id=user_id,
             payload=payload,
             graph_id=graph_id,
+            kwargs=kwargs or {},
             resume=resume,
             is_resume=is_resume,
         )
@@ -148,16 +150,29 @@ async def _load_run(run_id: str) -> Run | None:
         return await session.scalar(select(Run).where(Run.run_id == run_id))
 
 
-async def prepare_and_submit_run(
+async def _load_run_with_graph(run_id: str) -> tuple[Run, str]:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        run = await session.scalar(select(Run).where(Run.run_id == run_id))
+        if run is None:
+            raise ValueError("Run not found")
+        assistant = await session.scalar(select(Assistant).where(Assistant.assistant_id == run.assistant_id))
+        if assistant is None:
+            raise ValueError("Assistant not found")
+        return run, assistant.graph_id
+
+
+async def _prepare_run(
     *,
     thread_id: str,
     assistant_id: str,
-    payload: dict,
+    payload: Any,
     user: User,
     metadata: dict | None = None,
     kwargs: dict | None = None,
     multitask_strategy: str = "enqueue",
-) -> Run:
+    tick_id: int | None = None,
+) -> tuple[Run, str]:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(
@@ -190,28 +205,55 @@ async def prepare_and_submit_run(
             multitask_strategy=multitask_strategy,
         )
         session.add(run)
+        await session.flush()
+        if tick_id is not None:
+            tick = await session.scalar(select(CronTick).where(CronTick.id == tick_id))
+            if tick is None:
+                raise RuntimeError(f"Cron tick {tick_id} not found")
+            tick.run_id = run.run_id
+            tick.thread_id = thread_id
+            tick.status = "queued"
+            tick.skip_reason = None
         await session.commit()
         await session.refresh(run)
+    return run, graph_id
 
+
+async def _submit_prepared_run(
+    *,
+    run_id: str,
+    thread_id: str,
+    user_id: str,
+    payload: Any,
+    graph_id: str,
+    kwargs: dict[str, Any] | None = None,
+    resume: Any = UNSET,
+    is_resume: bool = False,
+    failure_run_status: str,
+    failure_thread_status: str,
+) -> Run:
     thread_protocol_broker.run_started(thread_id)
     await _publish_lifecycle(thread_id, event="started", graph_name=graph_id)
     try:
         await get_executor().submit(
             RunExecutionJob(
-                run_id=run.run_id,
-                thread_id=run.thread_id,
-                user_id=run.user_id,
-                payload=run.input_json,
+                run_id=run_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                payload=payload,
                 graph_id=graph_id,
+                kwargs=kwargs or {},
+                resume=resume,
+                is_resume=is_resume,
             )
         )
     except Exception as exc:
         await _persist_submission_failure(
             thread_id=thread_id,
-            run_id=run.run_id,
+            run_id=run_id,
             error=str(exc),
-            run_status="error",
-            thread_status="error",
+            run_status=failure_run_status,
+            thread_status=failure_thread_status,
         )
         await _publish_lifecycle(
             thread_id,
@@ -221,7 +263,83 @@ async def prepare_and_submit_run(
         )
         thread_protocol_broker.run_finished(thread_id)
         raise
-    return await _load_run(run.run_id) or run
+    loaded = await _load_run(run_id)
+    if loaded is None:
+        raise ValueError("Run not found")
+    return loaded
+
+
+async def prepare_run(
+    *,
+    thread_id: str,
+    assistant_id: str,
+    payload: Any,
+    user: User,
+    metadata: dict | None = None,
+    kwargs: dict | None = None,
+    multitask_strategy: str = "enqueue",
+    tick_id: int | None = None,
+) -> tuple[Run, str]:
+    return await _prepare_run(
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        payload=payload,
+        user=user,
+        metadata=metadata,
+        kwargs=kwargs,
+        multitask_strategy=multitask_strategy,
+        tick_id=tick_id,
+    )
+
+
+async def submit_existing_run(
+    *,
+    run_id: str,
+    failure_run_status: str = "error",
+    failure_thread_status: str = "error",
+) -> Run:
+    run, graph_id = await _load_run_with_graph(run_id)
+    return await _submit_prepared_run(
+        run_id=run.run_id,
+        thread_id=run.thread_id,
+        user_id=run.user_id,
+        payload=run.input_json,
+        graph_id=graph_id,
+        kwargs=getattr(run, "kwargs_json", {}) or {},
+        failure_run_status=failure_run_status,
+        failure_thread_status=failure_thread_status,
+    )
+
+
+async def prepare_and_submit_run(
+    *,
+    thread_id: str,
+    assistant_id: str,
+    payload: Any,
+    user: User,
+    metadata: dict | None = None,
+    kwargs: dict | None = None,
+    multitask_strategy: str = "enqueue",
+) -> Run:
+    run, graph_id = await _prepare_run(
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        payload=payload,
+        user=user,
+        metadata=metadata,
+        kwargs=kwargs,
+        multitask_strategy=multitask_strategy,
+    )
+    return await _submit_prepared_run(
+        run_id=run.run_id,
+        thread_id=run.thread_id,
+        user_id=run.user_id,
+        payload=run.input_json,
+        graph_id=graph_id,
+        kwargs=getattr(run, "kwargs_json", {}) or {},
+        failure_run_status="error",
+        failure_thread_status="error",
+    )
 
 
 async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) -> Run:
@@ -265,34 +383,15 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
         thread.state_updated_at = claimed_at
         await session.commit()
 
-    thread_protocol_broker.run_started(thread_id)
-    await _publish_lifecycle(thread_id, event="started", graph_name=graph_id)
-    try:
-        await get_executor().submit(
-            RunExecutionJob(
-                run_id=run_id,
-                thread_id=thread_id,
-                user_id=run.user_id,
-                payload=payload,
-                graph_id=graph_id,
-                resume=resume,
-                is_resume=True,
-            )
-        )
-    except Exception as exc:
-        await _persist_submission_failure(
-            thread_id=thread_id,
-            run_id=run_id,
-            error=str(exc),
-            run_status="interrupted",
-            thread_status="interrupted",
-        )
-        await _publish_lifecycle(
-            thread_id,
-            event="failed",
-            graph_name=graph_id,
-            error=str(exc),
-        )
-        thread_protocol_broker.run_finished(thread_id)
-        raise
-    return await _load_run(run_id) or run
+    return await _submit_prepared_run(
+        run_id=run_id,
+        thread_id=thread_id,
+        user_id=run.user_id,
+        payload=payload,
+        graph_id=graph_id,
+        kwargs=getattr(run, "kwargs_json", {}) or {},
+        resume=resume,
+        is_resume=True,
+        failure_run_status="interrupted",
+        failure_thread_status="interrupted",
+    )

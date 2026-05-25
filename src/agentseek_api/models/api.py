@@ -132,6 +132,75 @@ class RunRead(BaseModel):
     multitask_strategy: str = "enqueue"
 
 
+class CronCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assistant_id: str
+    schedule: str
+    timezone: str | None = None
+    input: Any
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    webhook: str | None = None
+    enabled: bool = True
+
+
+class CronSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assistant_id: str | None = None
+    enabled: bool | None = None
+    thread_id: str | None = None
+    limit: int = Field(default=10, ge=0)
+    offset: int = Field(default=0, ge=0)
+
+
+class CronCountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assistant_id: str | None = None
+    enabled: bool | None = None
+    thread_id: str | None = None
+
+
+class CronPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schedule: str | None = None
+    timezone: str | None = None
+    input: Any | None = None
+    metadata: dict[str, Any] | None = None
+    config: dict[str, Any] | None = None
+    context: dict[str, Any] | None = None
+    webhook: str | None = None
+    enabled: bool | None = None
+
+
+class CronRead(BaseModel):
+    cron_id: str
+    assistant_id: str
+    thread_id: str | None
+    enabled: bool
+    schedule: str
+    timezone: str
+    webhook: str | None = None
+    next_run_at: datetime
+    last_run_at: datetime | None = None
+    last_tick_status: str | None = None
+    last_error: str | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+
+
+class CronSearchResponse(BaseModel):
+    items: list[CronRead]
+
+
+class CronCountResponse(BaseModel):
+    count: int
+
+
 class StorePutRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

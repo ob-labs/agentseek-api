@@ -129,6 +129,27 @@ async def test_execute_run_passes_runtime_checkpointer_in_config(monkeypatch: py
     assert FakeEntry.last_store._store is fake_db.store
 
 
+@pytest.mark.asyncio
+async def test_execute_run_merges_user_config_and_context_into_graph_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeEntry.graph = FakeGraph()
+    monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeLangGraphService())
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"a": 1},
+        user_id="scoped-user",
+        kwargs={"config": {"recursion_limit": 7}, "context": {"tenant": "acme"}},
+    )
+
+    config = FakeEntry.graph.configs[0]
+    assert config["recursion_limit"] == 7
+    assert config[CONF]["context"] == {"tenant": "acme"}
+    assert config[CONF]["thread_id"] == "t1"
+
+
 class FakeInterruptGraph(FakeGraph):
     async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
         self.configs.append(config)

@@ -39,16 +39,24 @@ def test_info_endpoint(client: TestClient) -> None:
     assert body["langgraph_py_version"]
     assert body["flags"]["agents"] is True
     assert body["flags"]["assistants"] is True
+    assert body["flags"]["crons"] is True
     assert body["flags"]["mcp"] is True
     assert body["flags"]["protocol_v2"] is True
     assert isinstance(body["metadata"], dict)
     assert body["metadata"]["compatibility_tier"] == "oss-core"
     assert body["metadata"]["unsupported_features"] == [
-        "crons",
         "distributed_runtime",
         "assistant_subgraph_inspection",
         "assistant_version_promotion",
     ]
+
+
+def test_info_endpoint_reports_crons_supported(client: TestClient) -> None:
+    response = client.get("/info")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["flags"]["crons"] is True
+    assert "crons" not in body["metadata"]["unsupported_features"]
 
 
 def test_info_endpoint_reports_mcp_runtime_state_from_startup(monkeypatch, tmp_path: Path) -> None:

@@ -38,6 +38,7 @@ class InlineExecutor:
             user_id=job.user_id,
             payload=job.payload,
             graph_id=job.graph_id,
+            kwargs=job.kwargs,
             resume=job.resume,
             is_resume=job.is_resume,
         )
@@ -48,11 +49,12 @@ async def fake_execute_run(
     thread_id: str,
     run_id: str,
     payload: dict[str, Any],
+    kwargs: dict[str, Any] | None = None,
     user_id: str,
     graph_id: str | None = None,
     resume: Any = None,
 ) -> RunExecutionResult:
-    _ = (resume, user_id)
+    _ = (kwargs, resume, user_id)
     return RunExecutionResult(
         output={"echo": payload, "thread_id": thread_id, "run_id": run_id, "graph_id": graph_id},
         interrupted=False,

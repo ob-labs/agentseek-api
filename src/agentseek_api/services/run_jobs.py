@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from sqlalchemy import select
@@ -29,8 +29,9 @@ class RunExecutionJob:
     run_id: str
     thread_id: str
     user_id: str
-    payload: dict[str, Any]
+    payload: Any
     graph_id: str
+    kwargs: dict[str, Any] = field(default_factory=dict)
     resume: Any | None = None
     is_resume: bool = False
     kind: str = RUN_EXECUTION_JOB_KIND
@@ -42,8 +43,9 @@ class RunExecutionJob:
             "thread_id": self.thread_id,
             "user_id": self.user_id,
             "payload": self.payload,
+            "kwargs": self.kwargs,
             "graph_id": self.graph_id,
-            "resume": self.resume,
+            "resume": self.resume if self.is_resume else None,
             "is_resume": self.is_resume,
         }
 
@@ -56,7 +58,8 @@ class RunExecutionJob:
             run_id=str(payload["run_id"]),
             thread_id=str(payload["thread_id"]),
             user_id=str(payload["user_id"]),
-            payload=dict(payload["payload"]),
+            payload=payload["payload"],
+            kwargs=dict(payload.get("kwargs", {})),
             graph_id=str(payload["graph_id"]),
             resume=payload.get("resume"),
             is_resume=bool(payload.get("is_resume", False)),
@@ -156,14 +159,17 @@ async def execute_run_job(job: RunExecutionJob) -> None:
             await _publish_run_event(job.run_id, "start")
 
             try:
-                result = await execute_run(
-                    thread_id=job.thread_id,
-                    run_id=job.run_id,
-                    payload=job.payload,
-                    user_id=job.user_id,
-                    graph_id=job.graph_id,
-                    resume=job.resume if job.is_resume else UNSET,
-                )
+                execute_kwargs = {
+                    "thread_id": job.thread_id,
+                    "run_id": job.run_id,
+                    "payload": job.payload,
+                    "user_id": job.user_id,
+                    "graph_id": job.graph_id,
+                    "resume": job.resume if job.is_resume else UNSET,
+                }
+                if job.kwargs:
+                    execute_kwargs["kwargs"] = job.kwargs
+                result = await execute_run(**execute_kwargs)
                 await _persist_thread_snapshot(job.thread_id)
                 await execution_session.refresh(db_run)
                 if not _is_cancelled_run(db_run):
