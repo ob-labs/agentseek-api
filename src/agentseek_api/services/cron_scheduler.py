@@ -65,6 +65,10 @@ async def _mark_tick_outcome(
         await session.commit()
 
 
+def _tick_stale_before(*, current_time: datetime) -> datetime:
+    return current_time - timedelta(seconds=_started_tick_stale_after_seconds())
+
+
 async def _reconcile_terminal_ticks(
     *,
     http_client=None,
@@ -84,6 +88,7 @@ async def _reconcile_terminal_ticks(
                         )
                     )
                     .order_by(CronTick.id.asc())
+                    .with_for_update()
                 )
             ).all()
         )
@@ -98,6 +103,7 @@ async def _reconcile_terminal_ticks(
                 if run is not None and run.status in TERMINAL_RUN_STATUSES:
                     tick.status = run.status
             if cron.webhook and tick.status in TERMINAL_TICK_STATUSES and tick.webhook_delivery_status is None:
+                tick.webhook_delivery_status = "delivering"
                 deliveries.append(
                     (
                         tick.id,
@@ -127,7 +133,7 @@ async def claim_due_crons(
     now: datetime | None = None,
 ) -> list[ClaimedCron]:
     current_time = now or datetime.now(UTC)
-    stale_before = current_time - timedelta(seconds=_started_tick_stale_after_seconds())
+    stale_before = _tick_stale_before(current_time=current_time)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         reclaimed_ticks = list(
@@ -136,7 +142,7 @@ async def claim_due_crons(
                     select(CronTick)
                     .where(
                         CronTick.status == "started",
-                        CronTick.created_at <= stale_before,
+                        CronTick.updated_at <= stale_before,
                     )
                     .order_by(CronTick.scheduled_for.asc(), CronTick.id.asc())
                     .limit(limit)
@@ -151,11 +157,14 @@ async def claim_due_crons(
             row = await session.scalar(select(CronJob).where(CronJob.cron_id == tick.cron_id))
             if row is None:
                 continue
+            tick.scheduler_id = scheduler_id
+            tick.updated_at = current_time
             claimed.append(ClaimedCron.from_row(row, tick_id=tick.id, scheduled_for=tick.scheduled_for))
             seen_cron_ids.add(row.cron_id)
 
         remaining = max(0, limit - len(claimed))
         if remaining == 0:
+            await session.commit()
             return claimed
 
         rows = list(

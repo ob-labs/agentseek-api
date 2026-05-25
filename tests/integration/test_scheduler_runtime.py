@@ -49,6 +49,16 @@ async def _mark_cron_due(cron_id: str, *, when: datetime) -> None:
         await session.commit()
 
 
+async def _age_tick(*, cron_id: str, stale_at: datetime) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        tick = await session.scalar(select(CronTick).where(CronTick.cron_id == cron_id))
+        assert tick is not None
+        tick.created_at = stale_at
+        tick.updated_at = stale_at
+        await session.commit()
+
+
 async def _mark_thread_busy(thread_id: str) -> None:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -314,3 +324,120 @@ def test_dispatch_due_crons_reconciles_terminal_ticks_and_persists_webhook_attem
     assert [attempt.status_code for attempt in stateless_attempts] == [500, 500, 200]
     assert [attempt.attempt_number for attempt in skipped_attempts] == [1]
     assert [attempt.status_code for attempt in skipped_attempts] == [200]
+
+
+def test_claim_due_crons_reowned_tick_cannot_be_immediately_reclaimed_again(
+    client: TestClient,
+) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "reclaim"},
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+
+    due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(created.json()["cron_id"], when=due_at))
+
+    first = asyncio.run(
+        cron_scheduler_module.claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at)
+    )
+    assert len(first) == 1
+
+    stale_at = due_at - timedelta(seconds=31)
+    asyncio.run(_age_tick(cron_id=created.json()["cron_id"], stale_at=stale_at))
+
+    reclaimed_at = due_at + timedelta(seconds=31)
+    second = asyncio.run(
+        cron_scheduler_module.claim_due_crons(limit=10, scheduler_id="scheduler-b", now=reclaimed_at)
+    )
+    third = asyncio.run(
+        cron_scheduler_module.claim_due_crons(limit=10, scheduler_id="scheduler-c", now=reclaimed_at)
+    )
+
+    assert [item.tick_id for item in second] == [first[0].tick_id]
+    assert third == []
+
+    ticks = asyncio.run(_list_ticks_for_cron(created.json()["cron_id"]))
+    assert len(ticks) == 1
+    assert ticks[0].scheduler_id == "scheduler-b"
+    assert _as_utc(ticks[0].updated_at) >= reclaimed_at
+
+
+def test_reconcile_terminal_ticks_reserves_webhook_delivery_before_retry_loop(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    class _FakeResponse:
+        def __init__(self, status_code: int) -> None:
+            self.status_code = status_code
+
+    class FakeWebhookClient:
+        def __init__(self) -> None:
+            self.post_calls = 0
+
+        async def post(self, url: str, json: dict[str, object]) -> _FakeResponse:
+            self.post_calls += 1
+            return _FakeResponse(200)
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "idempotent-webhook"},
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(created.json()["cron_id"], when=due_at))
+    asyncio.run(
+        cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at)
+    )
+    asyncio.run(_set_cron_webhook(created.json()["cron_id"], webhook="https://example.com/once", max_attempts=2))
+
+    fake_http_client = FakeWebhookClient()
+    real_deliver = cron_scheduler_module.deliver_webhook_with_retries
+    delivery_calls: list[int] = []
+
+    async def wrapped_deliver(**kwargs):
+        delivery_calls.append(kwargs["tick_id"])
+        if len(delivery_calls) == 1:
+            await cron_scheduler_module._reconcile_terminal_ticks(
+                http_client=kwargs["http_client"],
+                sleep=_no_sleep,
+            )
+        return await real_deliver(**kwargs)
+
+    monkeypatch.setattr(cron_scheduler_module, "get_webhook_http_client", lambda: fake_http_client)
+    monkeypatch.setattr(cron_scheduler_module, "deliver_webhook_with_retries", wrapped_deliver)
+
+    asyncio.run(
+        cron_scheduler_module._reconcile_terminal_ticks(
+            http_client=fake_http_client,
+            sleep=_no_sleep,
+        )
+    )
+
+    ticks = asyncio.run(_list_ticks_for_cron(created.json()["cron_id"]))
+    attempts = asyncio.run(_list_webhook_attempts_for_tick(ticks[0].id))
+    assert delivery_calls == [ticks[0].id]
+    assert fake_http_client.post_calls == 1
+    assert len(attempts) == 1
+    assert attempts[0].attempt_number == 1
+    assert attempts[0].status_code == 200
