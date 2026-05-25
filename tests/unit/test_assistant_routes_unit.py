@@ -261,8 +261,14 @@ def test_assistant_helper_openapi_matches_limited_contract() -> None:
         "detail": "Assistant version promotion is not supported"
     }
 
-    versions_response = schema["paths"]["/assistants/{assistant_id}/versions"]["post"]["responses"]["200"]
-    assert versions_response["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/AssistantVersionInfo"
+    versions_responses = schema["paths"]["/assistants/{assistant_id}/versions"]["post"]["responses"]
+    assert versions_responses["200"]["content"]["application/json"]["schema"]["$ref"] == (
+        "#/components/schemas/AssistantVersionInfo"
+    )
+    assert versions_responses["404"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert versions_responses["404"]["content"]["application/json"]["example"] == {
+        "detail": "Assistant not found"
+    }
 
 
 @pytest.mark.asyncio

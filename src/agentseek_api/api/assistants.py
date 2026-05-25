@@ -216,7 +216,13 @@ async def get_assistant_subgraphs_by_namespace(assistant_id: str, namespace: str
     raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
 
 
-@router.post("/{assistant_id}/versions", response_model=AssistantVersionInfo)
+@router.post(
+    "/{assistant_id}/versions",
+    response_model=AssistantVersionInfo,
+    responses={
+        404: _detail_response(description="Assistant not found", detail="Assistant not found"),
+    },
+)
 async def get_assistant_versions(assistant_id: str) -> AssistantVersionInfo:
     assistant = await get_assistant(assistant_id)
     return AssistantVersionInfo(
