@@ -117,12 +117,12 @@ async def deliver_webhook_with_retries(
         try:
             response = await http_client.post(webhook_url, json=payload)
             final_status_code = int(response.status_code)
-            final_error = None
+            final_error = None if 200 <= final_status_code < 300 else f"HTTP {final_status_code}"
             await _persist_webhook_attempt(
                 tick_id=tick_id,
                 attempt_number=attempt_number,
                 status_code=final_status_code,
-                error=None,
+                error=final_error,
             )
             if 200 <= final_status_code < 300:
                 await _persist_webhook_result(
