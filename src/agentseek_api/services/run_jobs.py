@@ -45,7 +45,7 @@ class RunExecutionJob:
             "payload": self.payload,
             "kwargs": self.kwargs,
             "graph_id": self.graph_id,
-            "resume": self.resume,
+            "resume": self.resume if self.is_resume else None,
             "is_resume": self.is_resume,
         }
 
