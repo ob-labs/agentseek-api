@@ -1,5 +1,6 @@
 from collections.abc import Awaitable, Callable
 
+import pytest
 from fastapi.testclient import TestClient
 
 from agentseek_api.services.run_jobs import RunExecutionJob
@@ -59,3 +60,21 @@ def test_create_run_on_busy_thread_returns_409(client: TestClient, monkeypatch) 
     )
     assert second.status_code == 409
     assert second.json()["detail"] == "Another run is already active for this thread"
+
+
+def test_create_run_does_not_map_generic_runtime_error_to_409(client: TestClient, monkeypatch) -> None:
+    assistant = client.post("/assistants", json={"name": "runtime-error-check", "graph_id": "default"})
+    thread = client.post("/threads", json={"metadata": {}})
+    assert assistant.status_code == 200
+    assert thread.status_code == 200
+
+    async def fail_prepare_and_submit_run(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr("agentseek_api.api.runs.prepare_and_submit_run", fail_prepare_and_submit_run)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        client.post(
+            f"/threads/{thread.json()['thread_id']}/runs",
+            json={"assistant_id": assistant.json()["assistant_id"], "input": {"m": "x"}},
+        )

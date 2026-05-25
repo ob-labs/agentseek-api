@@ -23,6 +23,10 @@ TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
 ACTIVE_THREAD_RUN_CONFLICT = "Another run is already active for this thread"
 
 
+class ActiveThreadRunConflictError(RuntimeError):
+    pass
+
+
 async def _publish_lifecycle(
     thread_id: str,
     *,
@@ -66,7 +70,7 @@ async def _assert_thread_accepts_new_run(*, session, thread_id: str, user_id: st
         )
     )
     if active_run_id is not None:
-        raise RuntimeError(ACTIVE_THREAD_RUN_CONFLICT)
+        raise ActiveThreadRunConflictError(ACTIVE_THREAD_RUN_CONFLICT)
 
 
 async def _execute_and_persist(
@@ -117,7 +121,11 @@ async def prepare_and_submit_run(
 ) -> Run:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        thread = await session.scalar(
+            select(Thread)
+            .where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
+            .with_for_update()
+        )
         if thread is None:
             raise ValueError("Thread not found")
         await _assert_thread_accepts_new_run(

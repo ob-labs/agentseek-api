@@ -13,7 +13,11 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreate, RunRead, RunResume
 from agentseek_api.models.auth import User
-from agentseek_api.services.run_preparation import prepare_and_submit_run, resume_run
+from agentseek_api.services.run_preparation import (
+    ActiveThreadRunConflictError,
+    prepare_and_submit_run,
+    resume_run,
+)
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import (
     delete_run_stream_events,
@@ -113,7 +117,7 @@ async def create_run(thread_id: str, payload: RunCreate, user: User = Depends(ge
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except RuntimeError as exc:
+    except ActiveThreadRunConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     return _to_read_model(row)
 
