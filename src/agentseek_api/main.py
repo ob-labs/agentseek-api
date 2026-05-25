@@ -17,6 +17,7 @@ from agentseek_api.a2a_server import (
     load_assistant,
 )
 from agentseek_api.api.assistants import router as assistants_api_router
+from agentseek_api.api.crons import router as crons_router
 from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
 from agentseek_api.api.store import router as store_router
@@ -239,6 +240,7 @@ def create_app() -> FastAPI:
     app.include_router(assistants_api_router, prefix="/assistants", tags=["Assistants"])
     app.include_router(assistants_api_router, prefix="/agents", tags=["Agents"])
     app.include_router(threads_router)
+    app.include_router(crons_router)
     app.include_router(runs_router)
     app.include_router(stateless_runs_router)
     app.include_router(store_router)

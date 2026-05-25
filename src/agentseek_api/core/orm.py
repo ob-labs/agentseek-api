@@ -1,8 +1,9 @@
 from collections.abc import AsyncIterator
+from typing import Any
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -48,12 +49,27 @@ class Run(Base):
     assistant_id: Mapped[str] = mapped_column(String(36), nullable=False)
     user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="pending")
-    input_json: Mapped[dict] = mapped_column("input", JSON, default=dict, nullable=False)
+    input_json: Mapped[Any] = mapped_column("input", JSON, nullable=False)
     output_json: Mapped[dict | None] = mapped_column("output", JSON, nullable=True)
     metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
     kwargs_json: Mapped[dict] = mapped_column("kwargs", JSON, default=dict, nullable=False)
     multitask_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="enqueue")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
+
+
+class CronJob(Base):
+    __tablename__ = "cron_jobs"
+
+    cron_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
+    assistant_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    thread_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    user_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    schedule: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    input_json: Mapped[dict] = mapped_column("input", JSON, default=dict, nullable=False)
+    next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
 

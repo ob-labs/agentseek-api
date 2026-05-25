@@ -132,6 +132,24 @@ class RunRead(BaseModel):
     multitask_strategy: str = "enqueue"
 
 
+class CronCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assistant_id: str
+    schedule: str
+    input: Any
+    enabled: bool = True
+
+
+class CronRead(BaseModel):
+    cron_id: str
+    assistant_id: str
+    thread_id: str | None
+    enabled: bool
+    schedule: str
+    next_run_at: datetime
+
+
 class StorePutRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
