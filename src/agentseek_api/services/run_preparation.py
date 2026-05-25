@@ -1,7 +1,7 @@
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant, Run, Thread
@@ -61,16 +61,55 @@ async def _persist_submission_failure(
         await session.commit()
 
 
-async def _assert_thread_accepts_new_run(*, session, thread_id: str, user_id: str) -> None:
-    active_run_id = await session.scalar(
-        select(Run.run_id).where(
-            Run.thread_id == thread_id,
-            Run.user_id == user_id,
-            Run.status.not_in(TERMINAL_RUN_STATUSES),
-        )
+def _active_run_exists_query(*, thread_id: str, user_id: str, exclude_run_id: str | None = None):
+    query = select(Run.run_id).where(
+        Run.thread_id == thread_id,
+        Run.user_id == user_id,
+        Run.status.not_in(TERMINAL_RUN_STATUSES),
     )
-    if active_run_id is not None:
-        raise ActiveThreadRunConflictError(ACTIVE_THREAD_RUN_CONFLICT)
+    if exclude_run_id is not None:
+        query = query.where(Run.run_id != exclude_run_id)
+    return query.exists()
+
+
+async def _claim_thread_for_run(*, session, thread_id: str, user_id: str, claimed_at: datetime) -> bool:
+    result = await session.execute(
+        update(Thread)
+        .where(
+            Thread.thread_id == thread_id,
+            Thread.user_id == user_id,
+            ~_active_run_exists_query(thread_id=thread_id, user_id=user_id),
+        )
+        .values(status="busy", state_updated_at=claimed_at)
+    )
+    return result.rowcount == 1
+
+
+async def _claim_thread_for_resume(
+    *,
+    session,
+    thread_id: str,
+    run_id: str,
+    user_id: str,
+    claimed_at: datetime,
+) -> bool:
+    resumable_run_exists = select(Run.run_id).where(
+        Run.run_id == run_id,
+        Run.thread_id == thread_id,
+        Run.user_id == user_id,
+        Run.status == "interrupted",
+    ).exists()
+    result = await session.execute(
+        update(Thread)
+        .where(
+            Thread.thread_id == thread_id,
+            Thread.user_id == user_id,
+            resumable_run_exists,
+            ~_active_run_exists_query(thread_id=thread_id, user_id=user_id),
+        )
+        .values(status="busy", state_updated_at=claimed_at)
+    )
+    return result.rowcount == 1
 
 
 async def _execute_and_persist(
@@ -122,23 +161,24 @@ async def prepare_and_submit_run(
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(
-            select(Thread)
-            .where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
-            .with_for_update()
+            select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
         )
         if thread is None:
             raise ValueError("Thread not found")
-        await _assert_thread_accepts_new_run(
-            session=session,
-            thread_id=thread_id,
-            user_id=user.identity,
-        )
         assistant = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
         if assistant is None:
             raise ValueError("Assistant not found")
         graph_id = assistant.graph_id
+        claimed_at = datetime.now(UTC)
+        if not await _claim_thread_for_run(
+            session=session,
+            thread_id=thread_id,
+            user_id=user.identity,
+            claimed_at=claimed_at,
+        ):
+            raise ActiveThreadRunConflictError(ACTIVE_THREAD_RUN_CONFLICT)
         thread.status = "busy"
-        thread.state_updated_at = datetime.now(UTC)
+        thread.state_updated_at = claimed_at
         run = Run(
             thread_id=thread_id,
             assistant_id=assistant_id,
@@ -188,33 +228,41 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(
-            select(Thread)
-            .where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
-            .with_for_update()
+            select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
         )
         if thread is None:
             raise ValueError("Thread not found")
-        await _assert_thread_accepts_new_run(
-            session=session,
-            thread_id=thread_id,
-            user_id=user.identity,
-        )
         run = await session.scalar(
             select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
         )
         if run is None:
             raise ValueError("Run not found")
-        if run.status != "interrupted":
-            raise RuntimeError("Run is not interrupted")
         assistant = await session.scalar(select(Assistant).where(Assistant.assistant_id == run.assistant_id))
         if assistant is None:
             raise ValueError("Assistant not found")
+        claimed_at = datetime.now(UTC)
+        if not await _claim_thread_for_resume(
+            session=session,
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id=user.identity,
+            claimed_at=claimed_at,
+        ):
+            if await session.scalar(
+                select(Run.run_id).where(
+                    Run.thread_id == thread_id,
+                    Run.user_id == user.identity,
+                    Run.status.not_in(TERMINAL_RUN_STATUSES),
+                )
+            ):
+                raise ActiveThreadRunConflictError(ACTIVE_THREAD_RUN_CONFLICT)
+            raise RuntimeError("Run is not interrupted")
         graph_id = assistant.graph_id
         payload = run.input_json
         run.status = "pending"
         run.last_error = None
         thread.status = "busy"
-        thread.state_updated_at = datetime.now(UTC)
+        thread.state_updated_at = claimed_at
         await session.commit()
 
     thread_protocol_broker.run_started(thread_id)
