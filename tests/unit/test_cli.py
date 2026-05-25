@@ -178,6 +178,51 @@ def test_worker_command_runs_in_process_with_default_runner(
     assert cli_module.os.environ.get(sentinel_key) == "before"
 
 
+def test_scheduler_command_uses_runtime_env_and_scheduler_module(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    capture = _RunCapture()
+
+    exit_code = main(["scheduler", "--config", str(config_path)], runner=capture, cwd=tmp_path)
+
+    assert exit_code == 0
+    assert capture.command is not None
+    assert capture.command[1:] == ["-m", "agentseek_api.scheduler"]
+    assert capture.env is not None
+    assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
+
+
+def test_scheduler_command_runs_in_process_with_default_runner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    observed: dict[str, object] = {}
+    previous_cwd = Path.cwd()
+    sentinel_key = "AGENTSEEK_SCHEDULER_TEST_SENTINEL"
+
+    def fake_scheduler_main() -> int:
+        observed["graphs"] = cli_module.os.environ["AGENTSEEK_GRAPHS"]
+        observed["cwd"] = str(Path.cwd())
+        return 11
+
+    monkeypatch.setattr("agentseek_api.scheduler.main", fake_scheduler_main)
+    monkeypatch.setenv(sentinel_key, "before")
+
+    exit_code = cli_module.main(["scheduler", "--config", str(config_path)], cwd=tmp_path)
+
+    assert exit_code == 11
+    assert observed == {
+        "graphs": str(config_path.resolve()),
+        "cwd": str(tmp_path.resolve()),
+    }
+    assert Path.cwd() == previous_cwd
+    assert cli_module.os.environ.get(sentinel_key) == "before"
+
+
 def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
