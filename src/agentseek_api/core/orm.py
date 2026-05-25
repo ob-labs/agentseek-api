@@ -74,6 +74,21 @@ class CronJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
 
 
+class CronTick(Base):
+    __tablename__ = "cron_ticks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    cron_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    thread_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    run_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    scheduler_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="started")
+    skip_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
+
+
 class StoreItem(Base):
     __tablename__ = "store_items"
     __table_args__ = (UniqueConstraint("identity_hash", name="uq_store_items_identity_hash"),)

@@ -7,7 +7,7 @@ from sqlalchemy import select
 from fastapi.testclient import TestClient
 
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import CronJob, Run, Thread
+from agentseek_api.core.orm import CronJob, CronTick, Run, Thread
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -18,6 +18,12 @@ async def _fetch_cron(cron_id: str) -> CronJob | None:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         return await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+
+
+async def _list_ticks_for_cron(cron_id: str) -> list[CronTick]:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        return list((await session.scalars(select(CronTick).where(CronTick.cron_id == cron_id).order_by(CronTick.id.asc()))).all())
 
 
 async def _mark_cron_due(cron_id: str, *, when: datetime) -> None:
@@ -118,7 +124,17 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
 
     persisted_stateless = asyncio.run(_fetch_cron(stateless.json()["cron_id"]))
     persisted_thread_bound = asyncio.run(_fetch_cron(thread_bound.json()["cron_id"]))
+    stateless_ticks = asyncio.run(_list_ticks_for_cron(stateless.json()["cron_id"]))
+    thread_bound_ticks = asyncio.run(_list_ticks_for_cron(thread_bound.json()["cron_id"]))
     assert persisted_stateless is not None
     assert persisted_thread_bound is not None
     assert _as_utc(persisted_stateless.next_run_at) > due_at
     assert _as_utc(persisted_thread_bound.next_run_at) > due_at
+    assert len(stateless_ticks) == 1
+    assert stateless_ticks[0].status == "queued"
+    assert stateless_ticks[0].run_id == created_runs[0].run_id
+    assert stateless_ticks[0].skip_reason is None
+    assert len(thread_bound_ticks) == 1
+    assert thread_bound_ticks[0].status == "skipped"
+    assert thread_bound_ticks[0].run_id is None
+    assert thread_bound_ticks[0].skip_reason == "thread_busy"

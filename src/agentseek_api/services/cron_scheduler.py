@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from sqlalchemy import select
 
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import CronJob, Thread
+from agentseek_api.core.orm import CronJob, CronTick, Thread
 from agentseek_api.models.api import ThreadCreate
 from agentseek_api.models.auth import User
 from agentseek_api.services.cron_models import ClaimedCron, CronDispatchResult
@@ -28,6 +28,24 @@ async def _thread_is_busy(*, thread_id: str, user_id: str) -> bool:
             select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user_id)
         )
     return thread is not None and thread.status == "busy"
+
+
+async def _mark_tick_outcome(
+    *,
+    tick_id: int,
+    status: str,
+    run_id: str | None = None,
+    skip_reason: str | None = None,
+) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        tick = await session.scalar(select(CronTick).where(CronTick.id == tick_id))
+        if tick is None:
+            raise RuntimeError(f"Cron tick {tick_id} not found")
+        tick.status = status
+        tick.run_id = run_id
+        tick.skip_reason = skip_reason
+        await session.commit()
 
 
 async def claim_due_crons(
@@ -58,7 +76,16 @@ async def claim_due_crons(
         claimed: list[ClaimedCron] = []
         for row in rows:
             scheduled_for = row.next_run_at
-            claimed.append(ClaimedCron.from_row(row, scheduled_for=scheduled_for))
+            tick = CronTick(
+                cron_id=row.cron_id,
+                thread_id=row.thread_id,
+                scheduler_id=scheduler_id,
+                scheduled_for=scheduled_for,
+                status="started",
+            )
+            session.add(tick)
+            await session.flush()
+            claimed.append(ClaimedCron.from_row(row, tick_id=tick.id, scheduled_for=scheduled_for))
             try:
                 row.next_run_at = compute_next_run_at(row.schedule, timezone_name="UTC", now=current_time)
             except ValueError:
@@ -81,6 +108,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
             user=user,
             metadata={"cron_id": claim.cron_id, "scheduled_for": claim.scheduled_for.isoformat()},
         )
+        await _mark_tick_outcome(tick_id=claim.tick_id, status="queued", run_id=run.run_id)
         return CronDispatchResult(
             cron_id=claim.cron_id,
             status="queued",
@@ -89,6 +117,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
         )
 
     if await _thread_is_busy(thread_id=claim.thread_id, user_id=claim.user_id):
+        await _mark_tick_outcome(tick_id=claim.tick_id, status="skipped", skip_reason="thread_busy")
         return CronDispatchResult(
             cron_id=claim.cron_id,
             status="skipped",
@@ -105,6 +134,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
             metadata={"cron_id": claim.cron_id, "scheduled_for": claim.scheduled_for.isoformat()},
         )
     except ActiveThreadRunConflictError:
+        await _mark_tick_outcome(tick_id=claim.tick_id, status="skipped", skip_reason="thread_busy")
         return CronDispatchResult(
             cron_id=claim.cron_id,
             status="skipped",
@@ -112,6 +142,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
             skip_reason="thread_busy",
         )
 
+    await _mark_tick_outcome(tick_id=claim.tick_id, status="queued", run_id=run.run_id)
     return CronDispatchResult(
         cron_id=claim.cron_id,
         status="queued",

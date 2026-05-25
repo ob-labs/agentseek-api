@@ -6,7 +6,7 @@ import pytest
 from sqlalchemy import select
 
 from agentseek_api.core.database import db_manager
-from agentseek_api.core.orm import Assistant, CronJob
+from agentseek_api.core.orm import Assistant, CronJob, CronTick
 
 
 class _FakeCheckpointer:
@@ -61,7 +61,12 @@ async def test_claim_due_crons_returns_each_due_cron_once(
 
         async with session_factory() as session:
             persisted = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+            ticks = list((await session.scalars(select(CronTick).where(CronTick.cron_id == cron_id))).all())
             assert persisted is not None
             assert _as_utc(persisted.next_run_at) > due_at
+            assert len(ticks) == 1
+            assert ticks[0].status == "started"
+            assert ticks[0].scheduler_id == "scheduler-a"
+            assert _as_utc(ticks[0].scheduled_for) == due_at
     finally:
         await db_manager.close()

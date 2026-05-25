@@ -11,6 +11,7 @@ DispatchStatus = Literal["queued", "skipped"]
 
 @dataclass(frozen=True, slots=True)
 class ClaimedCron:
+    tick_id: int
     cron_id: str
     assistant_id: str
     thread_id: str | None
@@ -20,8 +21,9 @@ class ClaimedCron:
     scheduled_for: datetime
 
     @classmethod
-    def from_row(cls, row: CronJob, *, scheduled_for: datetime) -> "ClaimedCron":
+    def from_row(cls, row: CronJob, *, tick_id: int, scheduled_for: datetime) -> "ClaimedCron":
         return cls(
+            tick_id=tick_id,
             cron_id=row.cron_id,
             assistant_id=row.assistant_id,
             thread_id=row.thread_id,
