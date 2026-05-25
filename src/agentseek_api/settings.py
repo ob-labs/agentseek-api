@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     REDIS_WORKER_LOCK_TTL_SECONDS: int = 30
     REDIS_SCHEDULER_LOCK_KEY: str = "agentseek:scheduler:active"
     REDIS_SCHEDULER_LOCK_TTL_SECONDS: int = 30
+    SCHEDULER_STARTED_TICK_STALE_AFTER_SECONDS: int | None = None
     SCHEDULER_POLL_INTERVAL_SECONDS: float = 1.0
     SCHEDULER_CLAIM_LIMIT: int = 10
     AGENTSEEK_GRAPHS: str | None = None

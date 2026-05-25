@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -15,10 +15,18 @@ from agentseek_api.services.run_preparation import (
     prepare_and_submit_run,
 )
 from agentseek_api.services.thread_service import create_thread_for_user
+from agentseek_api.settings import settings
 
 
 def _cron_user(user_id: str) -> User:
     return User(identity=user_id, is_authenticated=True)
+
+
+def _started_tick_stale_after_seconds() -> int:
+    configured = settings.SCHEDULER_STARTED_TICK_STALE_AFTER_SECONDS
+    if configured is not None:
+        return max(1, configured)
+    return max(1, settings.REDIS_SCHEDULER_LOCK_TTL_SECONDS)
 
 
 async def _thread_is_busy(*, thread_id: str, user_id: str) -> bool:
@@ -55,6 +63,7 @@ async def claim_due_crons(
     now: datetime | None = None,
 ) -> list[ClaimedCron]:
     current_time = now or datetime.now(UTC)
+    stale_before = current_time - timedelta(seconds=_started_tick_stale_after_seconds())
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         reclaimed_ticks = list(
@@ -63,6 +72,7 @@ async def claim_due_crons(
                     select(CronTick)
                     .where(
                         CronTick.status == "started",
+                        CronTick.created_at <= stale_before,
                     )
                     .order_by(CronTick.scheduled_for.asc(), CronTick.id.asc())
                     .limit(limit)
