@@ -7,7 +7,7 @@ Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
 > AgentSeek API uses
 > [Agent Protocol](https://github.com/langchain-ai/agent-protocol) as the main
 > external compatibility reference. The current runtime already covers the core
-> thread, run, streaming, and protocol-v2 event flows. Some protocol surfaces
+> thread, run, cron, streaming, and protocol-v2 event flows. Some protocol surfaces
 > are still pending, and agent resources are exposed through `/assistants`,
 > direct `/agents` aliases, Streamable HTTP MCP, and LangSmith-style A2A
 > endpoints. This is workable OSS parity for the core agent-server surfaces,
@@ -15,8 +15,9 @@ Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
 
 Current release boundary:
 
-- Implemented: assistants, threads, runs, streaming, Store API, MCP, and A2A
-- Explicitly not implemented: crons, distributed runtime parity, assistant
+- Implemented: assistants, threads, runs, crons, streaming, Store API, MCP,
+  and A2A
+- Explicitly not implemented: distributed runtime parity, assistant
   subgraph inspection, and assistant version-promotion workflows
 
 ## 🚀 Quickstart
@@ -126,6 +127,9 @@ uv run agentseek-api version
   - Uses `REDIS_URL` plus the queue keys below
   - Redis durable execution currently uses a single active worker lease at a time
   - Run and thread stream replay continues from persisted state after worker restarts
+- `scheduler`
+  - Triggers persisted cron jobs that are due for execution
+  - Run alongside the API server and worker when cron support is enabled
 - `build`
   - Use `-t, --tag` to set the image tag
   - Supports `--platform`, `--pull`, and `--no-pull`
@@ -145,6 +149,7 @@ rejected when their runtime behavior is not implemented yet.
 - 🧰 MCP tool exposure for registered graphs over Streamable HTTP
 - 🤝 A2A assistant endpoints with agent-card discovery, streaming, and task lookup/cancel
 - 🧵 Thread, run, wait, cancel, history, state, and protocol-v2 stream flows
+- ⏰ Persisted cron APIs plus scheduler dispatch for stateless and thread-bound runs
 - 🤖 Agent resources exposed through both `/assistants` and `/agents`
 - 🧑‍💻 Human-in-the-loop resume through
   `POST /threads/{thread_id}/runs/{run_id}/resume`
@@ -163,11 +168,23 @@ Treat AgentSeek API as a practical OSS-compatible core for Agent Server-style
 apps.
 
 - Shipped: assistant CRUD, thread/run lifecycle APIs, resumable SSE streams,
-  Store API, MCP, A2A, Redis-backed durable execution, and Docker/runtime
-  helpers
-- Intentionally missing: crons, distributed runtime orchestration parity, full
+  cron APIs and scheduler dispatch, Store API, MCP, A2A, Redis-backed durable
+  execution, and Docker/runtime helpers
+- Intentionally missing: distributed runtime orchestration parity, full
   assistant version management, assistant subgraph inspection, and full
   assistant helper parity beyond the core CRUD and schema flows
+
+## 🚚 Deployment Roles
+
+Cron-enabled deployments run three long-lived roles:
+
+- API: serves `/assistants`, `/threads`, `/runs`, `/runs/crons`, `/info`, and the other HTTP surfaces
+- Worker: executes Redis-backed queued runs and resumes persisted stream state after restarts
+- Scheduler: claims due cron jobs and submits their runs into the runtime
+
+For local development you can keep using `uv run agentseek-api dev`. For
+durable cron execution, run the API server, worker, and scheduler together
+against the same database and Redis instance.
 
 ## 🗂️ Config
 
@@ -507,7 +524,7 @@ check for real SSE `message_chunk` events from provider-backed graphs.
 
 1. [x] Add Redis-backed task queue and worker handoff for durable run execution
 2. [ ] Deepen Agent Protocol schema parity beyond the current alias coverage
-3. [ ] Add crons and scheduler support
+3. [x] Add crons and scheduler support
 4. [ ] Add distributed runtime parity beyond the current single-worker Redis flow
 5. [ ] Add assistant version history and subgraph inspection support
 6. [x] Add MCP and A2A endpoint parity

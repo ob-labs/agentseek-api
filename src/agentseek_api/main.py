@@ -65,7 +65,7 @@ def _feature_flags(*, a2a_enabled: bool, mcp_enabled: bool) -> dict[str, bool]:
         "assistants": True,
         "threads": True,
         "runs": True,
-        "crons": False,
+        "crons": True,
         "store": True,
         "a2a": a2a_enabled,
         "mcp": mcp_enabled,
@@ -81,7 +81,6 @@ def _server_metadata() -> dict[str, object]:
         "checkpoint_backend_version": _langchain_oceanbase_version(),
         "compatibility_tier": "oss-core",
         "unsupported_features": [
-            "crons",
             "distributed_runtime",
             "assistant_subgraph_inspection",
             "assistant_version_promotion",
