@@ -5,7 +5,13 @@ from fastapi import APIRouter, Depends, HTTPException, Response
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant
-from agentseek_api.models.api import AssistantCreate, AssistantPatch, AssistantRead, AssistantSearchRequest
+from agentseek_api.models.api import (
+    AssistantCreate,
+    AssistantPatch,
+    AssistantRead,
+    AssistantSearchRequest,
+    AssistantVersionInfo,
+)
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -163,8 +169,9 @@ async def get_assistant_schemas(assistant_id: str) -> dict[str, object]:
 
 @router.get(
     "/{assistant_id}/subgraphs",
+    status_code=501,
     response_model=None,
-    responses={501: {"description": ASSISTANT_SUBGRAPHS_UNSUPPORTED}},
+    responses={404: {"description": "Assistant not found"}},
 )
 async def get_assistant_subgraphs(assistant_id: str) -> None:
     _ = await get_assistant(assistant_id)
@@ -173,30 +180,32 @@ async def get_assistant_subgraphs(assistant_id: str) -> None:
 
 @router.get(
     "/{assistant_id}/subgraphs/{namespace}",
+    status_code=501,
     response_model=None,
-    responses={501: {"description": ASSISTANT_SUBGRAPHS_UNSUPPORTED}},
+    responses={404: {"description": "Assistant not found"}},
 )
 async def get_assistant_subgraphs_by_namespace(assistant_id: str, namespace: str) -> None:
     _ = (await get_assistant(assistant_id), namespace)
     raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
 
 
-@router.post("/{assistant_id}/versions")
-async def get_assistant_versions(assistant_id: str) -> dict[str, object]:
+@router.post("/{assistant_id}/versions", response_model=AssistantVersionInfo)
+async def get_assistant_versions(assistant_id: str) -> AssistantVersionInfo:
     assistant = await get_assistant(assistant_id)
-    return {
-        "assistant_id": assistant.assistant_id,
-        "current_version": assistant.version,
-        "latest_version": assistant.version,
-        "available_versions": [assistant.version],
-        "supports_version_history": False,
-    }
+    return AssistantVersionInfo(
+        assistant_id=assistant.assistant_id,
+        current_version=assistant.version,
+        latest_version=assistant.version,
+        available_versions=[assistant.version],
+        supports_version_history=False,
+    )
 
 
 @router.post(
     "/{assistant_id}/latest",
+    status_code=409,
     response_model=None,
-    responses={409: {"description": ASSISTANT_VERSION_PROMOTION_UNSUPPORTED}},
+    responses={404: {"description": "Assistant not found"}},
 )
 async def set_latest_assistant_version(assistant_id: str) -> None:
     _ = await get_assistant(assistant_id)

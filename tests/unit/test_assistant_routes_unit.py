@@ -4,6 +4,7 @@ import pytest
 from fastapi import HTTPException
 
 from agentseek_api.api import assistants as assistants_module
+from agentseek_api.main import create_app
 from agentseek_api.core.orm import Assistant
 from agentseek_api.models.api import AssistantCreate, AssistantPatch, AssistantSearchRequest
 
@@ -201,7 +202,7 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
     )
 
     versions = await assistants_module.get_assistant_versions("assistant-1")
-    assert versions == {
+    assert versions.model_dump() == {
         "assistant_id": "assistant-1",
         "current_version": 1,
         "latest_version": 1,
@@ -220,6 +221,25 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
     with pytest.raises(HTTPException, match="Assistant subgraph inspection is not supported") as namespaced_error:
         await assistants_module.get_assistant_subgraphs_by_namespace("assistant-1", "root")
     assert namespaced_error.value.status_code == 501
+
+
+def test_assistant_helper_openapi_matches_limited_contract() -> None:
+    schema = create_app().openapi()
+
+    subgraphs_responses = schema["paths"]["/assistants/{assistant_id}/subgraphs"]["get"]["responses"]
+    assert "200" not in subgraphs_responses
+    assert "501" in subgraphs_responses
+
+    namespaced_responses = schema["paths"]["/assistants/{assistant_id}/subgraphs/{namespace}"]["get"]["responses"]
+    assert "200" not in namespaced_responses
+    assert "501" in namespaced_responses
+
+    latest_responses = schema["paths"]["/assistants/{assistant_id}/latest"]["post"]["responses"]
+    assert "200" not in latest_responses
+    assert "409" in latest_responses
+
+    versions_response = schema["paths"]["/assistants/{assistant_id}/versions"]["post"]["responses"]["200"]
+    assert versions_response["content"]["application/json"]["schema"]["$ref"] == "#/components/schemas/AssistantVersionInfo"
 
 
 @pytest.mark.asyncio
