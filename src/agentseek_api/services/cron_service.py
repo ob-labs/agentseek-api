@@ -111,6 +111,7 @@ async def patch_cron(*, cron_id: str, payload: CronPatch, user: User) -> CronRea
         if "timezone" in payload.model_fields_set:
             row.timezone = _normalize_timezone(payload.timezone)
             current_timezone = row.timezone
+            validate_schedule(row.schedule, timezone_name=current_timezone)
         if "webhook" in payload.model_fields_set:
             row.webhook = _validate_webhook(payload.webhook)
         if payload.schedule is not None:

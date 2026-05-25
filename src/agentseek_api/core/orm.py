@@ -3,7 +3,7 @@ from typing import Any
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -61,6 +61,7 @@ class Run(Base):
 
 class CronJob(Base):
     __tablename__ = "cron_jobs"
+    __table_args__ = (Index("ix_cron_jobs_enabled_next_run_at", "enabled", "next_run_at"),)
 
     cron_id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     assistant_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
@@ -69,7 +70,7 @@ class CronJob(Base):
     schedule: Mapped[str] = mapped_column(String(255), nullable=False)
     timezone: Mapped[str] = mapped_column(String(128), nullable=False, default="UTC")
     enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    input_json: Mapped[dict] = mapped_column("input", JSON, default=dict, nullable=False)
+    input_json: Mapped[Any] = mapped_column("input", JSON, default=dict, nullable=False)
     metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
     kwargs_json: Mapped[dict] = mapped_column("kwargs", JSON, default=dict, nullable=False)
     webhook: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -84,6 +85,15 @@ class CronJob(Base):
 
 class CronTick(Base):
     __tablename__ = "cron_ticks"
+    __table_args__ = (
+        Index("ix_cron_ticks_status_updated_at_scheduled_for", "status", "updated_at", "scheduled_for"),
+        Index(
+            "ix_cron_ticks_status_webhook_delivery_status_updated_at",
+            "status",
+            "webhook_delivery_status",
+            "updated_at",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     cron_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)

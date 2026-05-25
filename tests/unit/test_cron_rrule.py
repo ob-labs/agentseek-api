@@ -68,7 +68,7 @@ def test_compute_next_run_at_supports_hourly_daily_weekly_and_monthly_rules() ->
     assert hourly == datetime(2026, 5, 25, 10, 30, tzinfo=UTC)
     assert daily == datetime(2026, 5, 26, 9, 15, tzinfo=UTC)
     assert weekly == datetime(2026, 5, 27, 8, 0, tzinfo=UTC)
-    assert monthly == datetime(2026, 4, 30, 12, 0, tzinfo=UTC)
+    assert monthly == datetime(2026, 5, 31, 12, 0, tzinfo=UTC)
 
 
 def test_compute_next_run_at_respects_timezone_conversion() -> None:

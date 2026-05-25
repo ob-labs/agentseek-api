@@ -186,3 +186,12 @@ async def test_claim_due_crons_advances_next_run_at_using_cron_timezone(
             )
     finally:
         await db_manager.close()
+
+
+def test_cron_scheduler_tables_define_hot_path_indexes() -> None:
+    cron_job_indexes = {index.name for index in CronJob.__table__.indexes}
+    cron_tick_indexes = {index.name for index in CronTick.__table__.indexes}
+
+    assert "ix_cron_jobs_enabled_next_run_at" in cron_job_indexes
+    assert "ix_cron_ticks_status_updated_at_scheduled_for" in cron_tick_indexes
+    assert "ix_cron_ticks_status_webhook_delivery_status_updated_at" in cron_tick_indexes

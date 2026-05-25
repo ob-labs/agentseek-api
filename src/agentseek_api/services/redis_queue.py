@@ -51,6 +51,18 @@ class RedisRunQueue:
     async def ack(self, token: str) -> None:
         await self.client.lrem(self.processing_key, 1, token)
 
+    async def contains_run(self, *, run_id: str) -> bool:
+        for key in (self.queue_key, self.processing_key):
+            items = await self.client.lrange(key, 0, -1)
+            for raw in items:
+                try:
+                    payload = json.loads(raw)
+                except Exception:  # noqa: BLE001
+                    continue
+                if str(payload.get("run_id", "")) == run_id:
+                    return True
+        return False
+
     async def requeue_inflight(self) -> int:
         moved = 0
         while True:

@@ -696,7 +696,7 @@ async def execute_run(
     *,
     thread_id: str,
     run_id: str,
-    payload: dict[str, Any],
+    payload: Any,
     kwargs: dict[str, Any] | None = None,
     user_id: str,
     graph_id: str | None = None,

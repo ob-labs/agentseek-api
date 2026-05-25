@@ -29,7 +29,7 @@ class RunExecutionJob:
     run_id: str
     thread_id: str
     user_id: str
-    payload: dict[str, Any]
+    payload: Any
     graph_id: str
     kwargs: dict[str, Any] = field(default_factory=dict)
     resume: Any | None = None
@@ -58,7 +58,7 @@ class RunExecutionJob:
             run_id=str(payload["run_id"]),
             thread_id=str(payload["thread_id"]),
             user_id=str(payload["user_id"]),
-            payload=dict(payload["payload"]),
+            payload=payload["payload"],
             kwargs=dict(payload.get("kwargs", {})),
             graph_id=str(payload["graph_id"]),
             resume=payload.get("resume"),

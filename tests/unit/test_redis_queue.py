@@ -49,6 +49,11 @@ class FakeRedis:
         self.lists[key] = remaining
         return removed
 
+    async def lrange(self, key: str, start: int, end: int) -> list[str]:
+        items = self.lists.setdefault(key, [])
+        normalized_end = None if end == -1 else end + 1
+        return items[start:normalized_end]
+
     async def set(self, key: str, value: str, *, ex: int, nx: bool) -> bool:
         if nx and key in self.values:
             return False
@@ -127,3 +132,38 @@ async def test_redis_queue_releases_worker_lock_only_for_current_owner() -> None
     await queue.release_worker_lock("worker-a")
 
     assert client.values["worker"] == "worker-b"
+
+
+@pytest.mark.asyncio
+async def test_redis_queue_round_trips_non_dict_payloads() -> None:
+    queue = RedisRunQueue(client=FakeRedis(), queue_key="pending", processing_key="processing")
+    job = RunExecutionJob(
+        run_id="run-list",
+        thread_id="thread-1",
+        user_id="user-1",
+        payload=["cron", {"kind": "list-payload"}],
+        graph_id="default",
+    )
+
+    await queue.enqueue(job)
+    reserved = await queue.reserve(timeout_seconds=0)
+
+    assert reserved is not None
+    assert reserved[0].payload == ["cron", {"kind": "list-payload"}]
+
+
+@pytest.mark.asyncio
+async def test_redis_queue_contains_run_checks_pending_and_processing_lists() -> None:
+    client = FakeRedis()
+    queue = RedisRunQueue(client=client, queue_key="pending", processing_key="processing")
+    first = _job("run-1")
+    second = _job("run-2")
+
+    await queue.enqueue(first)
+    await queue.enqueue(second)
+    reserved = await queue.reserve(timeout_seconds=0)
+
+    assert reserved is not None
+    assert await queue.contains_run(run_id="run-1") is True
+    assert await queue.contains_run(run_id="run-2") is True
+    assert await queue.contains_run(run_id="missing") is False

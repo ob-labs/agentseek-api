@@ -161,6 +161,8 @@ def _aligned_month(now: datetime, interval: int, hour: int, minute: int, month_d
         if offset % interval != 0:
             continue
         last_day = monthrange(candidate_year, normalized_month)[1]
+        if month_day is not None and target_day > last_day:
+            continue
         candidate = datetime(
             candidate_year,
             normalized_month,

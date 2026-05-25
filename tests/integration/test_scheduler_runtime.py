@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import CronJob, CronTick, CronWebhookAttempt, Run, Thread
+from agentseek_api.models.auth import User
 
 
 def _as_utc(value: datetime) -> datetime:
@@ -191,6 +192,7 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
     assert persisted_stateless.last_tick_status == "success"
     assert persisted_stateless.last_run_at is not None
     assert persisted_stateless.last_error is None
+    assert _as_utc(persisted_stateless.last_run_at) >= _as_utc(stateless_ticks[0].updated_at)
     assert persisted_thread_bound.last_tick_status == "skipped"
     assert persisted_thread_bound.last_run_at is None
     assert persisted_thread_bound.last_error is None
@@ -236,14 +238,18 @@ def test_dispatch_due_crons_persists_submission_error_and_continues(client: Test
     asyncio.run(_mark_cron_due(failing.json()["cron_id"], when=due_at))
     asyncio.run(_mark_cron_due(stateless.json()["cron_id"], when=due_at))
 
-    original_prepare = cron_scheduler_module.prepare_and_submit_run
+    original_submit = cron_scheduler_module.submit_existing_run
 
-    async def flaky_prepare_and_submit_run(*args, **kwargs):
-        if kwargs.get("thread_id") == failing_thread_id:
+    async def flaky_submit_existing_run(*, run_id: str, **kwargs):
+        session_factory = db_manager.get_session_factory()
+        async with session_factory() as session:
+            run = await session.scalar(select(Run).where(Run.run_id == run_id))
+        assert run is not None
+        if run.thread_id == failing_thread_id:
             raise RuntimeError("submit boom")
-        return await original_prepare(*args, **kwargs)
+        return await original_submit(run_id=run_id, **kwargs)
 
-    monkeypatch.setattr(cron_scheduler_module, "prepare_and_submit_run", flaky_prepare_and_submit_run)
+    monkeypatch.setattr(cron_scheduler_module, "submit_existing_run", flaky_submit_existing_run)
 
     results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
 
@@ -258,7 +264,7 @@ def test_dispatch_due_crons_persists_submission_error_and_continues(client: Test
     passing_ticks = asyncio.run(_list_ticks_for_cron(stateless.json()["cron_id"]))
     assert len(failing_ticks) == 1
     assert failing_ticks[0].status == "error"
-    assert failing_ticks[0].run_id is None
+    assert failing_ticks[0].run_id is not None
     assert failing_ticks[0].skip_reason == "submit boom"
     persisted_failing = asyncio.run(_fetch_cron(failing.json()["cron_id"]))
     assert persisted_failing is not None
@@ -402,6 +408,69 @@ def test_claim_due_crons_reowned_tick_cannot_be_immediately_reclaimed_again(
     assert len(ticks) == 1
     assert ticks[0].scheduler_id == "scheduler-b"
     assert _as_utc(ticks[0].updated_at) >= reclaimed_at
+
+
+def test_dispatch_due_crons_reclaims_stale_queued_tick_without_creating_duplicate_run(
+    client: TestClient,
+) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+    from agentseek_api.services.run_preparation import prepare_run
+
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+    created = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "reclaim-queued"},
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+
+    due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(created.json()["cron_id"], when=due_at))
+    claim = asyncio.run(cron_scheduler_module.claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at))[0]
+
+    run, _graph_id = asyncio.run(
+        prepare_run(
+            thread_id=thread_id,
+            assistant_id=assistant_id,
+            payload=claim.input_json,
+            user=User(identity="owner", is_authenticated=True),
+            metadata={
+                **claim.metadata_json,
+                "cron_id": claim.cron_id,
+                "scheduled_for": due_at.isoformat(),
+            },
+            kwargs=claim.kwargs_json,
+            tick_id=claim.tick_id,
+        )
+    )
+
+    stale_at = due_at - timedelta(seconds=31)
+    asyncio.run(_age_tick(cron_id=created.json()["cron_id"], stale_at=stale_at))
+
+    results = asyncio.run(
+        cron_scheduler_module.dispatch_due_crons(
+            limit=10,
+            scheduler_id="scheduler-b",
+            now=due_at + timedelta(seconds=31),
+        )
+    )
+
+    assert len(results) == 1
+    assert results[0].status == "queued"
+    assert results[0].run_id == run.run_id
+
+    ticks = asyncio.run(_list_ticks_for_cron(created.json()["cron_id"]))
+    runs = asyncio.run(_list_runs_for_thread(thread_id))
+    assert len(ticks) == 1
+    assert ticks[0].run_id == run.run_id
+    assert ticks[0].status == "success"
+    assert len(runs) == 1
+    assert runs[0].run_id == run.run_id
 
 
 def test_reconcile_terminal_ticks_reserves_webhook_delivery_before_retry_loop(

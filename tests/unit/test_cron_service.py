@@ -285,3 +285,44 @@ async def test_patch_cron_reenabling_recomputes_next_run_at(monkeypatch: pytest.
         assert reenabled.next_run_at > stale_next_run_at
     finally:
         await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_patch_cron_rejects_invalid_timezone_even_while_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "SEEKDB_URL", "sqlite+aiosqlite:///:memory:")
+
+    class FakeCheckpointer:
+        def __init__(self, connection_args: dict[str, str]) -> None:
+            self.connection_args = connection_args
+
+        def setup(self) -> None:
+            return None
+
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+
+    manager = DatabaseManager()
+    await manager.initialize()
+    try:
+        monkeypatch.setattr("agentseek_api.services.cron_service.db_manager", manager)
+        user = User(identity="user-1", is_authenticated=True)
+
+        created = await create_cron(
+            assistant_id="assistant-1",
+            thread_id=None,
+            payload=CronCreate(
+                assistant_id="assistant-1",
+                schedule="FREQ=MINUTELY;INTERVAL=1",
+                input={"kind": "original"},
+                enabled=False,
+            ),
+            user=user,
+        )
+
+        with pytest.raises(ValueError, match="Invalid timezone: Mars/Olympus"):
+            await patch_cron(
+                cron_id=created.cron_id,
+                payload=CronPatch(timezone="Mars/Olympus"),
+                user=user,
+            )
+    finally:
+        await manager.close()
