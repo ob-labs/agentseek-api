@@ -32,7 +32,7 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
         "/runs/crons",
         json={
             "assistant_id": assistant_id,
-            "schedule": "0 * * * *",
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
             "input": ["stateless-cron", {"kind": "list-payload"}],
         },
     )
@@ -42,7 +42,7 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
     assert body["assistant_id"] == assistant_id
     assert body["thread_id"] is None
     assert body["enabled"] is True
-    assert body["schedule"] == "0 * * * *"
+    assert body["schedule"] == "FREQ=MINUTELY;INTERVAL=5"
     assert body["next_run_at"] is not None
     assert body["cron_id"]
 
@@ -50,7 +50,7 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
     assert persisted is not None
     assert persisted.assistant_id == assistant_id
     assert persisted.thread_id is None
-    assert persisted.schedule == "0 * * * *"
+    assert persisted.schedule == "FREQ=MINUTELY;INTERVAL=5"
     assert persisted.input_json == ["stateless-cron", {"kind": "list-payload"}]
     assert persisted.next_run_at is not None
     assert persisted.next_run_at.isoformat() == body["next_run_at"]
@@ -64,7 +64,7 @@ def test_create_thread_cron_persists_thread_and_user_binding(client: TestClient)
         f"/threads/{thread_id}/runs/crons",
         json={
             "assistant_id": assistant_id,
-            "schedule": "0 * * * *",
+            "schedule": "FREQ=HOURLY;INTERVAL=1",
             "input": {"kind": "thread-cron"},
         },
         headers={"x-user-id": "owner"},
@@ -89,10 +89,71 @@ def test_create_thread_cron_missing_thread_returns_not_found(client: TestClient)
         "/threads/does-not-exist/runs/crons",
         json={
             "assistant_id": assistant_id,
-            "schedule": "0 * * * *",
+            "schedule": "FREQ=DAILY;INTERVAL=1",
             "input": {"kind": "thread-cron"},
         },
     )
 
     assert response.status_code == 404
     assert response.json() == {"detail": "Thread not found"}
+
+
+def test_search_count_get_patch_and_delete_crons(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+
+    first = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "search-match"},
+            "enabled": True,
+        },
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=HOURLY;INTERVAL=1",
+            "input": {"kind": "search-disabled"},
+            "enabled": False,
+        },
+    )
+    assert second.status_code == 200
+
+    search_response = client.post(
+        "/runs/crons/search",
+        json={"assistant_id": assistant_id, "enabled": True, "limit": 10, "offset": 0},
+    )
+    assert search_response.status_code == 200
+    search_body = search_response.json()
+    assert [item["cron_id"] for item in search_body["items"]] == [first_body["cron_id"]]
+
+    count_response = client.post(
+        "/runs/crons/count",
+        json={"assistant_id": assistant_id, "enabled": True},
+    )
+    assert count_response.status_code == 200
+    assert count_response.json() == {"count": 1}
+
+    get_response = client.get(f"/runs/crons/{first_body['cron_id']}")
+    assert get_response.status_code == 200
+    assert get_response.json()["cron_id"] == first_body["cron_id"]
+
+    patch_response = client.patch(
+        f"/runs/crons/{first_body['cron_id']}",
+        json={"schedule": "FREQ=MINUTELY;INTERVAL=1", "enabled": False, "input": {"kind": "patched"}},
+    )
+    assert patch_response.status_code == 200
+    patch_body = patch_response.json()
+    assert patch_body["schedule"] == "FREQ=MINUTELY;INTERVAL=1"
+    assert patch_body["enabled"] is False
+
+    delete_response = client.delete(f"/runs/crons/{first_body['cron_id']}")
+    assert delete_response.status_code == 204
+
+    missing_response = client.get(f"/runs/crons/{first_body['cron_id']}")
+    assert missing_response.status_code == 404

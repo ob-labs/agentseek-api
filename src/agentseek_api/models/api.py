@@ -141,6 +141,32 @@ class CronCreate(BaseModel):
     enabled: bool = True
 
 
+class CronSearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assistant_id: str | None = None
+    enabled: bool | None = None
+    thread_id: str | None = None
+    limit: int = 10
+    offset: int = 0
+
+
+class CronCountRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    assistant_id: str | None = None
+    enabled: bool | None = None
+    thread_id: str | None = None
+
+
+class CronPatch(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schedule: str | None = None
+    input: Any | None = None
+    enabled: bool | None = None
+
+
 class CronRead(BaseModel):
     cron_id: str
     assistant_id: str
@@ -148,6 +174,14 @@ class CronRead(BaseModel):
     enabled: bool
     schedule: str
     next_run_at: datetime
+
+
+class CronSearchResponse(BaseModel):
+    items: list[CronRead]
+
+
+class CronCountResponse(BaseModel):
+    count: int
 
 
 class StorePutRequest(BaseModel):
