@@ -166,10 +166,8 @@ apps.
   Store API, MCP, A2A, Redis-backed durable execution, and Docker/runtime
   helpers
 - Intentionally missing: crons, distributed runtime orchestration parity, full
-  assistant version management, and assistant subgraph inspection
-- Helper endpoints are explicit about limits: unsupported helper actions return
-  `409` or `501`, and `/assistants/{assistant_id}/versions` reports only the
-  single stored version
+  assistant version management, assistant subgraph inspection, and full
+  assistant helper parity beyond the core CRUD and schema flows
 
 ## 🗂️ Config
 
