@@ -1,3 +1,6 @@
+import threading
+import time
+
 from fastapi.testclient import TestClient
 
 
@@ -159,3 +162,40 @@ def test_empty_thread_state_returns_empty_payload(client: TestClient) -> None:
     )
     assert checkpoint_post.status_code == 200
     assert checkpoint_post.json()["checkpoint"]["checkpoint_id"] == thread_id
+
+
+def test_thread_stream_stays_live_for_future_runs(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    captured: dict[str, object] = {}
+
+    def consume_stream() -> None:
+        with client.stream("GET", f"/threads/{thread_id}/stream") as response:
+            captured["status_code"] = response.status_code
+            lines: list[str] = []
+            deadline = time.time() + 5
+            for line in response.iter_lines():
+                if line is not None:
+                    lines.append(line)
+                if any("event: end" in item for item in lines):
+                    break
+                if time.time() > deadline:
+                    break
+            captured["lines"] = lines
+
+    thread = threading.Thread(target=consume_stream, daemon=True)
+    thread.start()
+    time.sleep(0.2)
+
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "after stream opens"}},
+    )
+    assert created.status_code == 200
+
+    thread.join(timeout=10)
+
+    assert captured["status_code"] == 200
+    lines = captured["lines"]
+    assert any("event: start" in line for line in lines)
+    assert any("event: end" in line for line in lines)
