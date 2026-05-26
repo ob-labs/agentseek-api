@@ -199,6 +199,52 @@ async def test_live_provider_store_endpoints_and_graph(live_provider_base_url: s
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+async def test_live_provider_store_ttl_expires_items_on_mysql_family_backend(live_provider_base_url: str) -> None:
+    if not provider_capability_enabled("store"):
+        pytest.skip("Live provider store coverage is disabled for this backend tier.")
+
+    user_id = f"provider-store-ttl-{uuid4().hex}"
+    namespace = ["live-provider", "ttl", uuid4().hex]
+
+    async with httpx.AsyncClient(base_url=live_provider_base_url, timeout=30.0, trust_env=False) as client:
+        created = await client.put(
+            "/store/items",
+            json={
+                "namespace": namespace,
+                "key": "ephemeral",
+                "value": {"kind": "note", "name": "expires-from-live-provider-suite"},
+            },
+            headers=user_headers(user_id),
+        )
+        assert created.status_code == 200
+
+        immediate = await client.get(
+            "/store/items",
+            params=[("key", "ephemeral"), *(("namespace", part) for part in namespace)],
+            headers=user_headers(user_id),
+        )
+        assert immediate.status_code == 200
+
+        await asyncio.sleep(4.0)
+
+        expired = await client.get(
+            "/store/items",
+            params=[("key", "ephemeral"), *(("namespace", part) for part in namespace)],
+            headers=user_headers(user_id),
+        )
+        assert expired.status_code == 404
+
+        searched = await client.post(
+            "/store/items/search",
+            json={"namespace_prefix": namespace[:2], "limit": 10, "offset": 0},
+            headers=user_headers(user_id),
+        )
+        assert searched.status_code == 200
+        assert searched.json() == {"items": []}
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_url: str) -> None:
     if not provider_capability_enabled("hitl"):
         pytest.skip("Live provider HITL coverage is disabled for this backend tier.")

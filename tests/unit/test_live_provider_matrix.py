@@ -59,3 +59,18 @@ def test_workflow_dispatch_requires_at_least_one_provider() -> None:
             run_anthropic_compatible=False,
             backend_tier="all",
         )
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "expected"),
+    [
+        ("seekdb", "streaming,store,mcp,hitl"),
+        ("oceanbase", "streaming,store,mcp,hitl"),
+        ("mysql", "streaming,hitl"),
+        ("postgresql-metadata", "streaming,mcp"),
+    ],
+)
+def test_backend_capabilities_match_tier_contract(backend_name: str, expected: str) -> None:
+    module = _load_module()
+
+    assert module.capability_set_for_backend(backend_name) == expected

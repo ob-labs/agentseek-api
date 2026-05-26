@@ -3,12 +3,26 @@ from __future__ import annotations
 import json
 import os
 import sys
+
 PROVIDERS = [
     {"provider_kind": "openai", "provider_label": "OpenAI-Compatible"},
     {"provider_kind": "anthropic", "provider_label": "Anthropic-Compatible"},
 ]
 
 BACKENDS = ["seekdb", "oceanbase", "mysql", "postgresql-metadata"]
+BACKEND_CAPABILITIES = {
+    "seekdb": "streaming,store,mcp,hitl",
+    "oceanbase": "streaming,store,mcp,hitl",
+    "mysql": "streaming,hitl",
+    "postgresql-metadata": "streaming,mcp",
+}
+
+
+def capability_set_for_backend(backend_name: str) -> str:
+    try:
+        return BACKEND_CAPABILITIES[backend_name]
+    except KeyError as exc:
+        raise ValueError(f"Unsupported backend tier: {backend_name}") from exc
 
 
 def build_matrix(
@@ -33,6 +47,8 @@ def build_matrix(
         if not enabled_providers:
             raise ValueError("At least one provider must be selected for workflow_dispatch.")
         selected_backend = backend_tier
+        if selected_backend != "all":
+            capability_set_for_backend(selected_backend)
 
     include: list[dict[str, str]] = []
     for provider in PROVIDERS:

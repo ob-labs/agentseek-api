@@ -230,6 +230,21 @@ else
   exit 1
 fi
 
+export LIVE_PROVIDER_CAPABILITIES="${LIVE_PROVIDER_CAPABILITIES:-$(python3 - <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+
+module_path = Path("scripts/build_live_provider_matrix.py").resolve()
+spec = importlib.util.spec_from_file_location("build_live_provider_matrix", module_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+backend_name = os.getenv("LIVE_PROVIDER_MATRIX_BACKEND") or os.getenv("SEEKDB_DOCKER_BACKEND") or "seekdb"
+print(module.capability_set_for_backend(backend_name))
+PY
+)}"
+
 wait_for_seekdb
 ensure_database_exists
 uv run python scripts/seekdb_checkpoint_smoke.py

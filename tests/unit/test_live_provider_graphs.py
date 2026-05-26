@@ -62,6 +62,10 @@ def test_live_provider_manifest_registers_stream_store_and_hitl_graphs() -> None
         "live_anthropic_store_memory",
         "live_anthropic_hitl",
     }
+    assert payload["store"]["ttl"] == {
+        "refresh_on_read": False,
+        "default_ttl": 0.05,
+    }
 
 
 def test_build_openai_store_and_hitl_graphs_use_compatible_streaming_defaults(monkeypatch):
