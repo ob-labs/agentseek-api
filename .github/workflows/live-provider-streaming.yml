@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       run_openai_compatible:
-        description: Run the OpenAI-compatible live streaming check
+        description: Run the OpenAI-compatible live provider suite
         required: false
         default: true
         type: boolean
@@ -17,7 +17,7 @@ on:
         required: false
         type: string
       run_anthropic_compatible:
-        description: Run the Anthropic-compatible live streaming check
+        description: Run the Anthropic-compatible live provider suite
         required: false
         default: true
         type: boolean
@@ -29,22 +29,129 @@ on:
         description: Optional override for the Anthropic-compatible base URL
         required: false
         type: string
+      backend_tier:
+        description: Backend tier to run, or all four tiers
+        required: false
+        default: all
+        type: choice
+        options:
+          - all
+          - seekdb
+          - oceanbase
+          - mysql
+          - postgresql-metadata
+  schedule:
+    - cron: "0 3 * * *"
 
 permissions:
   contents: read
 
 jobs:
-  openai-compatible:
-    name: OpenAI-Compatible Streaming
-    if: ${{ inputs.run_openai_compatible }}
+  live-provider-suite:
+    name: ${{ matrix.provider.label }} / ${{ matrix.backend.name }}
+    if: >-
+      github.event_name == 'schedule' ||
+      (
+        (inputs.backend_tier == 'all' || inputs.backend_tier == matrix.backend.name) &&
+        (
+          (matrix.provider.kind == 'openai' && inputs.run_openai_compatible) ||
+          (matrix.provider.kind == 'anthropic' && inputs.run_anthropic_compatible)
+        )
+      )
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        provider:
+          - kind: openai
+            label: OpenAI-Compatible
+          - kind: anthropic
+            label: Anthropic-Compatible
+        backend:
+          - name: seekdb
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            mode: ""
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+            url: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
+            capabilities: streaming,store,mcp,hitl
+            metadata_db_url: ""
+            metadata_db_backend: ""
+          - name: oceanbase
+            docker_backend: oceanbase
+            image: oceanbase/oceanbase-ce:latest
+            mode: slim
+            user: root@test
+            password: ""
+            port: "2881"
+            db_name: seekdb
+            url: mysql+aiomysql://root%40test:@127.0.0.1:2881/seekdb
+            capabilities: streaming,store,mcp,hitl
+            metadata_db_url: ""
+            metadata_db_backend: ""
+          - name: mysql
+            docker_backend: mysql
+            image: mysql:8.4
+            mode: ""
+            user: root
+            password: root
+            port: "3306"
+            db_name: seekdb
+            url: mysql+aiomysql://root:root@127.0.0.1:3306/seekdb
+            capabilities: streaming,hitl
+            metadata_db_url: ""
+            metadata_db_backend: ""
+          - name: postgresql-metadata
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            mode: ""
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+            url: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
+            capabilities: streaming,mcp
+            metadata_db_url: postgresql://postgres:postgres@127.0.0.1:5432/agentseek
+            metadata_db_backend: postgresql
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentseek
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentseek"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 12
     env:
-      AGENTSEEK_GRAPHS: ${{ github.workspace }}/examples/live_provider_graphs/manifest.json
-      LIVE_PROVIDER_KIND: openai
-      LIVE_OPENAI_COMPAT_MODEL: ${{ inputs.openai_model != '' && inputs.openai_model || vars.OPENAI_COMPAT_MODEL }}
-      LIVE_OPENAI_COMPAT_BASE_URL: ${{ inputs.openai_base_url != '' && inputs.openai_base_url || vars.OPENAI_COMPAT_BASE_URL }}
-      LIVE_OPENAI_COMPAT_API_KEY: ${{ secrets.OPENAI_COMPAT_API_KEY }}
+      LIVE_PROVIDER_KIND: ${{ matrix.provider.kind }}
+      LIVE_PROVIDER_CAPABILITIES: ${{ matrix.backend.capabilities }}
+      LIVE_OPENAI_COMPAT_MODEL: ${{ matrix.provider.kind == 'openai' && (inputs.openai_model != '' && inputs.openai_model || vars.OPENAI_COMPAT_MODEL) || '' }}
+      LIVE_OPENAI_COMPAT_BASE_URL: ${{ matrix.provider.kind == 'openai' && (inputs.openai_base_url != '' && inputs.openai_base_url || vars.OPENAI_COMPAT_BASE_URL) || '' }}
+      LIVE_OPENAI_COMPAT_API_KEY: ${{ matrix.provider.kind == 'openai' && secrets.OPENAI_COMPAT_API_KEY || '' }}
+      LIVE_ANTHROPIC_COMPAT_MODEL: ${{ matrix.provider.kind == 'anthropic' && (inputs.anthropic_model != '' && inputs.anthropic_model || vars.ANTHROPIC_COMPAT_MODEL) || '' }}
+      LIVE_ANTHROPIC_COMPAT_BASE_URL: ${{ matrix.provider.kind == 'anthropic' && (inputs.anthropic_base_url != '' && inputs.anthropic_base_url || vars.ANTHROPIC_COMPAT_BASE_URL) || '' }}
+      LIVE_ANTHROPIC_COMPAT_API_KEY: ${{ matrix.provider.kind == 'anthropic' && secrets.ANTHROPIC_COMPAT_API_KEY || '' }}
+      SEEKDB_MODE: docker
+      SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
+      SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+      OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode }}
+      OCEANBASE_HOST: 127.0.0.1
+      OCEANBASE_USER: ${{ matrix.backend.user }}
+      OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
+      OCEANBASE_PORT: ${{ matrix.backend.port }}
+      OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
+      SEEKDB_URL: ${{ matrix.backend.url }}
+      METADATA_DB_URL: ${{ matrix.backend.metadata_db_url }}
+      METADATA_DB_BACKEND: ${{ matrix.backend.metadata_db_backend }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -56,66 +163,41 @@ jobs:
           cache-python: true
           python-version: "3.12"
 
-      - name: Validate configuration
+      - name: Validate provider configuration
         shell: bash
         run: |
           missing=()
-          for name in LIVE_PROVIDER_KIND LIVE_OPENAI_COMPAT_MODEL LIVE_OPENAI_COMPAT_BASE_URL LIVE_OPENAI_COMPAT_API_KEY; do
-            if [[ -z "${!name:-}" ]]; then
-              missing+=("$name")
-            fi
-          done
+          if [[ "${LIVE_PROVIDER_KIND}" == "openai" ]]; then
+            for name in LIVE_PROVIDER_KIND LIVE_OPENAI_COMPAT_MODEL LIVE_OPENAI_COMPAT_BASE_URL LIVE_OPENAI_COMPAT_API_KEY; do
+              if [[ -z "${!name:-}" ]]; then
+                missing+=("$name")
+              fi
+            done
+          else
+            for name in LIVE_PROVIDER_KIND LIVE_ANTHROPIC_COMPAT_MODEL LIVE_ANTHROPIC_COMPAT_BASE_URL LIVE_ANTHROPIC_COMPAT_API_KEY; do
+              if [[ -z "${!name:-}" ]]; then
+                missing+=("$name")
+              fi
+            done
+          fi
           if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "::error::Missing OpenAI-compatible workflow config: ${missing[*]}"
-            echo "::error::Set repo variables OPENAI_COMPAT_MODEL / OPENAI_COMPAT_BASE_URL, repo secret OPENAI_COMPAT_API_KEY, or provide dispatch input overrides for model/base URL."
+            echo "::error::Missing live provider workflow config: ${missing[*]}"
             exit 1
           fi
 
       - name: Sync dependencies
         run: uv sync --dev
 
-      - name: Run live provider streaming test
-        run: uv run pytest tests/integration/test_live_provider_streaming.py -q
+      - name: Run live provider suite
+        run: bash ./scripts/test-live-provider.sh
 
-  anthropic-compatible:
-    name: Anthropic-Compatible Streaming
-    if: ${{ inputs.run_anthropic_compatible }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      AGENTSEEK_GRAPHS: ${{ github.workspace }}/examples/live_provider_graphs/manifest.json
-      LIVE_PROVIDER_KIND: anthropic
-      LIVE_ANTHROPIC_COMPAT_MODEL: ${{ inputs.anthropic_model != '' && inputs.anthropic_model || vars.ANTHROPIC_COMPAT_MODEL }}
-      LIVE_ANTHROPIC_COMPAT_BASE_URL: ${{ inputs.anthropic_base_url != '' && inputs.anthropic_base_url || vars.ANTHROPIC_COMPAT_BASE_URL }}
-      LIVE_ANTHROPIC_COMPAT_API_KEY: ${{ secrets.ANTHROPIC_COMPAT_API_KEY }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup UV
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Upload live provider logs
+        if: always()
+        uses: actions/upload-artifact@v4
         with:
-          enable-cache: true
-          cache-python: true
-          python-version: "3.12"
-
-      - name: Validate configuration
-        shell: bash
-        run: |
-          missing=()
-          for name in LIVE_PROVIDER_KIND LIVE_ANTHROPIC_COMPAT_MODEL LIVE_ANTHROPIC_COMPAT_BASE_URL LIVE_ANTHROPIC_COMPAT_API_KEY; do
-            if [[ -z "${!name:-}" ]]; then
-              missing+=("$name")
-            fi
-          done
-          if [[ ${#missing[@]} -gt 0 ]]; then
-            echo "::error::Missing Anthropic-compatible workflow config: ${missing[*]}"
-            echo "::error::Set repo variables ANTHROPIC_COMPAT_MODEL / ANTHROPIC_COMPAT_BASE_URL, repo secret ANTHROPIC_COMPAT_API_KEY, or provide dispatch input overrides for model/base URL."
-            exit 1
-          fi
-
-      - name: Sync dependencies
-        run: uv sync --dev
-
-      - name: Run live provider streaming test
-        run: uv run pytest tests/integration/test_live_provider_streaming.py -q
+          name: live-provider-logs-${{ matrix.provider.kind }}-${{ matrix.backend.name }}
+          if-no-files-found: ignore
+          path: |
+            .tmp/e2e-server.log
+            /tmp/agentseek-live-provider-docker.log
+            /tmp/agentseek-live-provider-embed.log

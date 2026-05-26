@@ -4,8 +4,28 @@
     "live_openai_stream": {
       "graph": "./graph.py:build_openai_graph"
     },
+    "live_openai_store_memory": {
+      "graph": "./graph.py:build_openai_store_graph",
+      "prepare_input": "agentseek_api.services.sample_graphs:_prepare_store_memory_payload",
+      "extract_output": "agentseek_api.services.sample_graphs:_extract_store_memory_output"
+    },
+    "live_openai_hitl": {
+      "graph": "./graph.py:build_openai_hitl_graph",
+      "prepare_input": "agentseek_api.services.sample_graphs:_prepare_subgraph_hitl_payload",
+      "extract_output": "agentseek_api.services.sample_graphs:_extract_interrupt_output"
+    },
     "live_anthropic_stream": {
       "graph": "./graph.py:build_anthropic_graph"
+    },
+    "live_anthropic_store_memory": {
+      "graph": "./graph.py:build_anthropic_store_graph",
+      "prepare_input": "agentseek_api.services.sample_graphs:_prepare_store_memory_payload",
+      "extract_output": "agentseek_api.services.sample_graphs:_extract_store_memory_output"
+    },
+    "live_anthropic_hitl": {
+      "graph": "./graph.py:build_anthropic_hitl_graph",
+      "prepare_input": "agentseek_api.services.sample_graphs:_prepare_subgraph_hitl_payload",
+      "extract_output": "agentseek_api.services.sample_graphs:_extract_interrupt_output"
     }
   }
 }

@@ -54,8 +54,26 @@ def _seekdb_url() -> str:
     return f"mysql+aiomysql://{user}:{password}@{host}:{port}/{db_name}"
 
 
-@pytest.fixture(scope="session")
-def e2e_base_url() -> Generator[str, None, None]:
+def _live_provider_missing_env() -> list[str]:
+    provider = os.getenv("LIVE_PROVIDER_KIND", "").strip().lower()
+    if provider == "openai":
+        required = [
+            "LIVE_OPENAI_COMPAT_MODEL",
+            "LIVE_OPENAI_COMPAT_BASE_URL",
+            "LIVE_OPENAI_COMPAT_API_KEY",
+        ]
+    elif provider == "anthropic":
+        required = [
+            "LIVE_ANTHROPIC_COMPAT_MODEL",
+            "LIVE_ANTHROPIC_COMPAT_BASE_URL",
+            "LIVE_ANTHROPIC_COMPAT_API_KEY",
+        ]
+    else:
+        return ["LIVE_PROVIDER_KIND"]
+    return [name for name in required if not os.getenv(name, "").strip()]
+
+
+def _start_e2e_server(*, graphs_path: str) -> Generator[str, None, None]:
     running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
     if not _seekdb_reachable():
         message = "SeekDB/OceanBase backend is not reachable for e2e tests."
@@ -69,10 +87,7 @@ def e2e_base_url() -> Generator[str, None, None]:
 
     env = os.environ.copy()
     env.setdefault("SEEKDB_URL", _seekdb_url())
-    env.setdefault(
-        "AGENTSEEK_GRAPHS",
-        str((Path(__file__).resolve().parent / "fixtures" / "langgraph.store-e2e.json").resolve()),
-    )
+    env.setdefault("AGENTSEEK_GRAPHS", graphs_path)
     env.setdefault("AUTH_TYPE", "custom")
     env.setdefault("AUTH_MODULE_PATH", "examples/auth/custom_backend.py:backend")
 
@@ -112,3 +127,23 @@ def e2e_base_url() -> Generator[str, None, None]:
             process.kill()
             process.wait(timeout=5)
         log_file.close()
+
+
+@pytest.fixture(scope="session")
+def e2e_base_url() -> Generator[str, None, None]:
+    graphs_path = str((Path(__file__).resolve().parent / "fixtures" / "langgraph.store-e2e.json").resolve())
+    yield from _start_e2e_server(graphs_path=graphs_path)
+
+
+@pytest.fixture(scope="session")
+def live_provider_base_url() -> Generator[str, None, None]:
+    running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
+    missing = _live_provider_missing_env()
+    if missing:
+        message = f"Live provider e2e requires configuration: {', '.join(missing)}"
+        if running_in_ci:
+            pytest.fail(message)
+        pytest.skip(message)
+
+    graphs_path = str((Path(__file__).resolve().parents[2] / "examples" / "live_provider_graphs" / "manifest.json").resolve())
+    yield from _start_e2e_server(graphs_path=graphs_path)

@@ -499,9 +499,20 @@ For local embedded SeekDB smoke coverage, install the optional extra first:
 uv sync --dev --extra embedded
 ```
 
-Real provider-backed streaming proof stays in the manual workflow
-`.github/workflows/live-provider-streaming.yml`. That workflow is the canonical
-check for real SSE `message_chunk` events from provider-backed graphs.
+Real provider-backed proof stays in the dedicated workflow
+`.github/workflows/live-provider-streaming.yml`. That workflow remains the
+canonical check for real SSE `message_chunk` events from provider-backed graphs
+and now also covers provider-backed Store, MCP, and HITL flows in a tiered
+backend matrix:
+
+- SeekDB: full Streaming + Store + MCP + HITL acceptance
+- OceanBase: full Streaming + Store + MCP + HITL acceptance
+- MySQL: Streaming + HITL compatibility
+- PostgreSQL metadata: Streaming + MCP compatibility while runtime
+  checkpointer/store still use a MySQL-family backend
+
+Use the workflow manually when you want to debug a single provider/backend tier,
+or rely on the nightly schedule for the full matrix.
 
 ## 🗺️ Future Work
 
