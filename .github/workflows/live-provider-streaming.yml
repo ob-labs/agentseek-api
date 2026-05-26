@@ -47,67 +47,31 @@ permissions:
   contents: read
 
 jobs:
+  prepare-matrix:
+    name: Prepare Matrix
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build selected matrix
+        id: matrix
+        env:
+          BACKEND_TIER_INPUT: ${{ inputs.backend_tier || 'all' }}
+          RUN_OPENAI_COMPATIBLE: ${{ inputs.run_openai_compatible }}
+          RUN_ANTHROPIC_COMPATIBLE: ${{ inputs.run_anthropic_compatible }}
+        run: python3 scripts/build_live_provider_matrix.py
+
   live-provider-suite:
-    name: ${{ matrix.provider.label }} / ${{ matrix.backend.name }}
+    name: ${{ matrix.provider_label }} / ${{ matrix.backend_name }}
+    needs: prepare-matrix
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
       fail-fast: false
-      matrix:
-        provider:
-          - kind: openai
-            label: OpenAI-Compatible
-          - kind: anthropic
-            label: Anthropic-Compatible
-        backend:
-          - name: seekdb
-            docker_backend: seekdb
-            image: oceanbase/seekdb:latest
-            mode: ""
-            user: root
-            password: ""
-            port: "2881"
-            db_name: seekdb
-            url: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
-            capabilities: streaming,store,mcp,hitl
-            metadata_db_url: ""
-            metadata_db_backend: ""
-          - name: oceanbase
-            docker_backend: oceanbase
-            image: oceanbase/oceanbase-ce:latest
-            mode: slim
-            user: root@test
-            password: ""
-            port: "2881"
-            db_name: seekdb
-            url: mysql+aiomysql://root%40test:@127.0.0.1:2881/seekdb
-            capabilities: streaming,store,mcp,hitl
-            metadata_db_url: ""
-            metadata_db_backend: ""
-          - name: mysql
-            docker_backend: mysql
-            image: mysql:8.4
-            mode: ""
-            user: root
-            password: root
-            port: "3306"
-            db_name: seekdb
-            url: mysql+aiomysql://root:root@127.0.0.1:3306/seekdb
-            capabilities: streaming,hitl
-            metadata_db_url: ""
-            metadata_db_backend: ""
-          - name: postgresql-metadata
-            docker_backend: seekdb
-            image: oceanbase/seekdb:latest
-            mode: ""
-            user: root
-            password: ""
-            port: "2881"
-            db_name: seekdb
-            url: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
-            capabilities: streaming,mcp
-            metadata_db_url: postgresql://postgres:postgres@127.0.0.1:5432/agentseek
-            metadata_db_backend: postgresql
+      matrix: ${{ fromJson(needs.prepare-matrix.outputs.matrix) }}
     services:
       postgres:
         image: postgres:16
@@ -123,56 +87,32 @@ jobs:
           --health-timeout 5s
           --health-retries 12
     env:
-      LIVE_PROVIDER_KIND: ${{ matrix.provider.kind }}
-      LIVE_PROVIDER_CAPABILITIES: ${{ matrix.backend.capabilities }}
+      LIVE_PROVIDER_KIND: ${{ matrix.provider_kind }}
+      LIVE_PROVIDER_CAPABILITIES: ${{ matrix.capabilities }}
       LIVE_PROVIDER_REQUIRED: "1"
-      LIVE_OPENAI_COMPAT_MODEL: ${{ matrix.provider.kind == 'openai' && (inputs.openai_model != '' && inputs.openai_model || vars.OPENAI_COMPAT_MODEL) || '' }}
-      LIVE_OPENAI_COMPAT_BASE_URL: ${{ matrix.provider.kind == 'openai' && (inputs.openai_base_url != '' && inputs.openai_base_url || vars.OPENAI_COMPAT_BASE_URL) || '' }}
-      LIVE_OPENAI_COMPAT_API_KEY: ${{ matrix.provider.kind == 'openai' && secrets.OPENAI_COMPAT_API_KEY || '' }}
-      LIVE_ANTHROPIC_COMPAT_MODEL: ${{ matrix.provider.kind == 'anthropic' && (inputs.anthropic_model != '' && inputs.anthropic_model || vars.ANTHROPIC_COMPAT_MODEL) || '' }}
-      LIVE_ANTHROPIC_COMPAT_BASE_URL: ${{ matrix.provider.kind == 'anthropic' && (inputs.anthropic_base_url != '' && inputs.anthropic_base_url || vars.ANTHROPIC_COMPAT_BASE_URL) || '' }}
-      LIVE_ANTHROPIC_COMPAT_API_KEY: ${{ matrix.provider.kind == 'anthropic' && secrets.ANTHROPIC_COMPAT_API_KEY || '' }}
+      LIVE_OPENAI_COMPAT_MODEL: ${{ matrix.provider_kind == 'openai' && (inputs.openai_model != '' && inputs.openai_model || vars.OPENAI_COMPAT_MODEL) || '' }}
+      LIVE_OPENAI_COMPAT_BASE_URL: ${{ matrix.provider_kind == 'openai' && (inputs.openai_base_url != '' && inputs.openai_base_url || vars.OPENAI_COMPAT_BASE_URL) || '' }}
+      LIVE_OPENAI_COMPAT_API_KEY: ${{ matrix.provider_kind == 'openai' && secrets.OPENAI_COMPAT_API_KEY || '' }}
+      LIVE_ANTHROPIC_COMPAT_MODEL: ${{ matrix.provider_kind == 'anthropic' && (inputs.anthropic_model != '' && inputs.anthropic_model || vars.ANTHROPIC_COMPAT_MODEL) || '' }}
+      LIVE_ANTHROPIC_COMPAT_BASE_URL: ${{ matrix.provider_kind == 'anthropic' && (inputs.anthropic_base_url != '' && inputs.anthropic_base_url || vars.ANTHROPIC_COMPAT_BASE_URL) || '' }}
+      LIVE_ANTHROPIC_COMPAT_API_KEY: ${{ matrix.provider_kind == 'anthropic' && secrets.ANTHROPIC_COMPAT_API_KEY || '' }}
       SEEKDB_MODE: docker
-      SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
-      SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
-      OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode }}
+      SEEKDB_DOCKER_BACKEND: ${{ matrix.docker_backend }}
+      SEEKDB_DOCKER_IMAGE: ${{ matrix.image }}
+      OCEANBASE_DOCKER_MODE: ${{ matrix.mode }}
       OCEANBASE_HOST: 127.0.0.1
-      OCEANBASE_USER: ${{ matrix.backend.user }}
-      OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
-      OCEANBASE_PORT: ${{ matrix.backend.port }}
-      OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
-      SEEKDB_URL: ${{ matrix.backend.url }}
-      METADATA_DB_URL: ${{ matrix.backend.metadata_db_url }}
-      METADATA_DB_BACKEND: ${{ matrix.backend.metadata_db_backend }}
+      OCEANBASE_USER: ${{ matrix.user }}
+      OCEANBASE_PASSWORD: ${{ matrix.password }}
+      OCEANBASE_PORT: ${{ matrix.port }}
+      OCEANBASE_DB_NAME: ${{ matrix.db_name }}
+      SEEKDB_URL: ${{ matrix.url }}
+      METADATA_DB_URL: ${{ matrix.metadata_db_url }}
+      METADATA_DB_BACKEND: ${{ matrix.metadata_db_backend }}
     steps:
-      - name: Select matrix lane
-        id: select
-        shell: bash
-        run: |
-          enabled=false
-          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
-            enabled=true
-          elif [[ "${BACKEND_TIER_INPUT}" != "all" && "${BACKEND_TIER_INPUT}" != "${MATRIX_BACKEND_NAME}" ]]; then
-            enabled=false
-          elif [[ "${MATRIX_PROVIDER_KIND}" == "openai" && "${RUN_OPENAI_COMPATIBLE}" == "true" ]]; then
-            enabled=true
-          elif [[ "${MATRIX_PROVIDER_KIND}" == "anthropic" && "${RUN_ANTHROPIC_COMPATIBLE}" == "true" ]]; then
-            enabled=true
-          fi
-          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
-        env:
-          BACKEND_TIER_INPUT: ${{ inputs.backend_tier || 'all' }}
-          MATRIX_BACKEND_NAME: ${{ matrix.backend.name }}
-          MATRIX_PROVIDER_KIND: ${{ matrix.provider.kind }}
-          RUN_OPENAI_COMPATIBLE: ${{ inputs.run_openai_compatible }}
-          RUN_ANTHROPIC_COMPATIBLE: ${{ inputs.run_anthropic_compatible }}
-
       - name: Checkout
-        if: steps.select.outputs.enabled == 'true'
         uses: actions/checkout@v4
 
       - name: Setup UV
-        if: steps.select.outputs.enabled == 'true'
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
@@ -180,7 +120,6 @@ jobs:
           python-version: "3.12"
 
       - name: Validate provider configuration
-        if: steps.select.outputs.enabled == 'true'
         shell: bash
         run: |
           missing=()
@@ -203,18 +142,16 @@ jobs:
           fi
 
       - name: Sync dependencies
-        if: steps.select.outputs.enabled == 'true'
         run: uv sync --dev
 
       - name: Run live provider suite
-        if: steps.select.outputs.enabled == 'true'
         run: bash ./scripts/test-live-provider.sh
 
       - name: Upload live provider logs
-        if: always() && steps.select.outputs.enabled == 'true'
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: live-provider-logs-${{ matrix.provider.kind }}-${{ matrix.backend.name }}
+          name: live-provider-logs-${{ matrix.provider_kind }}-${{ matrix.backend_name }}
           if-no-files-found: ignore
           path: |
             .tmp/e2e-server.log

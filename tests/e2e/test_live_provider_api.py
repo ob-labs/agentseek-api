@@ -245,11 +245,22 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
 
         last_seq = int(interrupted_events[-1]["id"])
         responded = await client.post(
-            f"/threads/{thread_id}/runs/{run_id}/resume",
-            json={"resume": "world"},
+            f"/threads/{thread_id}/commands",
+            json={
+                "id": 1,
+                "method": "input.respond",
+                "params": {
+                    "namespace": [],
+                    "interrupt_id": interrupt_id,
+                    "response": "world",
+                },
+            },
             headers=user_headers(user_id),
         )
         assert responded.status_code == 200
+        responded_body = responded.json()
+        assert responded_body["type"] == "success"
+        assert responded_body["id"] == 1
 
         resumed_stream = await client.post(
             f"/threads/{thread_id}/stream",
