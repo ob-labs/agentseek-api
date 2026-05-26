@@ -49,15 +49,6 @@ permissions:
 jobs:
   live-provider-suite:
     name: ${{ matrix.provider.label }} / ${{ matrix.backend.name }}
-    if: >-
-      github.event_name == 'schedule' ||
-      (
-        (inputs.backend_tier == 'all' || inputs.backend_tier == matrix.backend.name) &&
-        (
-          (matrix.provider.kind == 'openai' && inputs.run_openai_compatible) ||
-          (matrix.provider.kind == 'anthropic' && inputs.run_anthropic_compatible)
-        )
-      )
     runs-on: ubuntu-latest
     timeout-minutes: 75
     strategy:
@@ -153,10 +144,34 @@ jobs:
       METADATA_DB_URL: ${{ matrix.backend.metadata_db_url }}
       METADATA_DB_BACKEND: ${{ matrix.backend.metadata_db_backend }}
     steps:
+      - name: Select matrix lane
+        id: select
+        shell: bash
+        run: |
+          enabled=false
+          if [[ "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+            enabled=true
+          elif [[ "${BACKEND_TIER_INPUT}" != "all" && "${BACKEND_TIER_INPUT}" != "${MATRIX_BACKEND_NAME}" ]]; then
+            enabled=false
+          elif [[ "${MATRIX_PROVIDER_KIND}" == "openai" && "${RUN_OPENAI_COMPATIBLE}" == "true" ]]; then
+            enabled=true
+          elif [[ "${MATRIX_PROVIDER_KIND}" == "anthropic" && "${RUN_ANTHROPIC_COMPATIBLE}" == "true" ]]; then
+            enabled=true
+          fi
+          echo "enabled=${enabled}" >> "$GITHUB_OUTPUT"
+        env:
+          BACKEND_TIER_INPUT: ${{ inputs.backend_tier || 'all' }}
+          MATRIX_BACKEND_NAME: ${{ matrix.backend.name }}
+          MATRIX_PROVIDER_KIND: ${{ matrix.provider.kind }}
+          RUN_OPENAI_COMPATIBLE: ${{ inputs.run_openai_compatible }}
+          RUN_ANTHROPIC_COMPATIBLE: ${{ inputs.run_anthropic_compatible }}
+
       - name: Checkout
+        if: steps.select.outputs.enabled == 'true'
         uses: actions/checkout@v4
 
       - name: Setup UV
+        if: steps.select.outputs.enabled == 'true'
         uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           enable-cache: true
@@ -164,6 +179,7 @@ jobs:
           python-version: "3.12"
 
       - name: Validate provider configuration
+        if: steps.select.outputs.enabled == 'true'
         shell: bash
         run: |
           missing=()
@@ -186,13 +202,15 @@ jobs:
           fi
 
       - name: Sync dependencies
+        if: steps.select.outputs.enabled == 'true'
         run: uv sync --dev
 
       - name: Run live provider suite
+        if: steps.select.outputs.enabled == 'true'
         run: bash ./scripts/test-live-provider.sh
 
       - name: Upload live provider logs
-        if: always()
+        if: always() && steps.select.outputs.enabled == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: live-provider-logs-${{ matrix.provider.kind }}-${{ matrix.backend.name }}
