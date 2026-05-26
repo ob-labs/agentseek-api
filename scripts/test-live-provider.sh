@@ -16,6 +16,7 @@ export LIVE_PROVIDER_REQUIRED="${LIVE_PROVIDER_REQUIRED:-1}"
 
 embed_pid=""
 docker_started="false"
+embedded_available="false"
 
 cleanup() {
   if [[ -n "$embed_pid" ]] && kill -0 "$embed_pid" >/dev/null 2>&1; then
@@ -173,6 +174,36 @@ set_backend_defaults() {
 
 if [[ "$SEEKDB_MODE" == "auto" ]]; then
   if uv run python -c "import pylibseekdb" >/dev/null 2>&1; then
+    embedded_available="true"
+  fi
+fi
+
+if [[ -n "${LIVE_PROVIDER_MATRIX_BACKEND:-}" ]]; then
+  mapfile -t backend_env_lines < <(EMBEDDED_AVAILABLE="$embedded_available" python3 - <<'PY'
+import importlib.util
+import os
+from pathlib import Path
+
+module_path = Path("scripts/build_live_provider_matrix.py").resolve()
+spec = importlib.util.spec_from_file_location("build_live_provider_matrix", module_path)
+assert spec is not None and spec.loader is not None
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+backend_env = module.local_backend_env_for_tier(
+    os.environ["LIVE_PROVIDER_MATRIX_BACKEND"],
+    embedded_available=os.environ.get("EMBEDDED_AVAILABLE", "").lower() == "true",
+)
+for key, value in backend_env.items():
+    print(f"{key}={value}")
+PY
+  )
+  for env_line in "${backend_env_lines[@]}"; do
+    export "$env_line"
+  done
+fi
+
+if [[ "$SEEKDB_MODE" == "auto" ]]; then
+  if [[ "$embedded_available" == "true" ]]; then
     SEEKDB_MODE="embed"
   elif command -v docker >/dev/null 2>&1; then
     SEEKDB_MODE="docker"

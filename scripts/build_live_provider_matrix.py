@@ -16,6 +16,12 @@ BACKEND_CAPABILITIES = {
     "mysql": "streaming,hitl",
     "postgresql-metadata": "streaming,mcp",
 }
+LOCAL_RUNTIME_BACKENDS = {
+    "seekdb": "seekdb",
+    "oceanbase": "oceanbase",
+    "mysql": "mysql",
+    "postgresql-metadata": "seekdb",
+}
 
 
 def capability_set_for_backend(backend_name: str) -> str:
@@ -23,6 +29,20 @@ def capability_set_for_backend(backend_name: str) -> str:
         return BACKEND_CAPABILITIES[backend_name]
     except KeyError as exc:
         raise ValueError(f"Unsupported backend tier: {backend_name}") from exc
+
+
+def local_backend_env_for_tier(backend_name: str, *, embedded_available: bool) -> dict[str, str]:
+    capability_set_for_backend(backend_name)
+    runtime_backend = LOCAL_RUNTIME_BACKENDS[backend_name]
+    if backend_name == "seekdb" and embedded_available:
+        return {
+            "SEEKDB_MODE": "embed",
+            "SEEKDB_DOCKER_BACKEND": runtime_backend,
+        }
+    return {
+        "SEEKDB_MODE": "docker",
+        "SEEKDB_DOCKER_BACKEND": runtime_backend,
+    }
 
 
 def build_matrix(

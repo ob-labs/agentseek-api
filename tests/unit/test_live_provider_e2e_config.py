@@ -11,7 +11,7 @@ from tests.e2e.conftest import should_fail_live_provider_config
         ("true", "false", False),
         ("true", "1", True),
         ("true", "true", True),
-        ("false", "true", False),
+        ("false", "true", True),
     ],
 )
 def test_should_fail_live_provider_config(

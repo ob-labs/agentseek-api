@@ -74,3 +74,23 @@ def test_backend_capabilities_match_tier_contract(backend_name: str, expected: s
     module = _load_module()
 
     assert module.capability_set_for_backend(backend_name) == expected
+
+
+@pytest.mark.parametrize(
+    ("backend_name", "embedded_available", "expected"),
+    [
+        ("seekdb", True, {"SEEKDB_MODE": "embed", "SEEKDB_DOCKER_BACKEND": "seekdb"}),
+        ("seekdb", False, {"SEEKDB_MODE": "docker", "SEEKDB_DOCKER_BACKEND": "seekdb"}),
+        ("oceanbase", True, {"SEEKDB_MODE": "docker", "SEEKDB_DOCKER_BACKEND": "oceanbase"}),
+        ("mysql", True, {"SEEKDB_MODE": "docker", "SEEKDB_DOCKER_BACKEND": "mysql"}),
+        ("postgresql-metadata", True, {"SEEKDB_MODE": "docker", "SEEKDB_DOCKER_BACKEND": "seekdb"}),
+    ],
+)
+def test_local_backend_launcher_matches_selected_tier(
+    backend_name: str,
+    embedded_available: bool,
+    expected: dict[str, str],
+) -> None:
+    module = _load_module()
+
+    assert module.local_backend_env_for_tier(backend_name, embedded_available=embedded_available) == expected

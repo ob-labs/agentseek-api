@@ -74,9 +74,8 @@ def _live_provider_missing_env() -> list[str]:
 
 
 def should_fail_live_provider_config() -> bool:
-    running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
     live_provider_required = os.getenv("LIVE_PROVIDER_REQUIRED", "").lower() in {"1", "true", "yes"}
-    return running_in_ci and live_provider_required
+    return live_provider_required
 
 
 def _start_e2e_server(*, graphs_path: str) -> Generator[str, None, None]:
