@@ -499,11 +499,35 @@ For local embedded SeekDB smoke coverage, install the optional extra first:
 uv sync --dev --extra embedded
 ```
 
-Real provider-backed proof stays in the dedicated workflow
-`.github/workflows/live-provider-streaming.yml`. That workflow remains the
-canonical check for real SSE `message_chunk` events from provider-backed graphs
-and now also covers provider-backed Store, MCP, and HITL flows in a tiered
-backend matrix:
+This repository intentionally uses two GitHub Actions workflows for CI:
+
+- `.github/workflows/ci.yml`
+  - Always-on repository CI for pull requests and normal branch pushes
+  - Fast enough to run by default, with no external model-provider spend
+  - Covers unit and integration tests, CLI compatibility, sample graphs, Docker
+    runtime checks, MySQL-family checkpoint validation, PostgreSQL metadata
+    validation, and Redis durable execution
+  - Uses local or Docker-backed dependencies that GitHub can provision inside
+    the job
+
+- `.github/workflows/live-provider-streaming.yml`
+  - Dedicated real-model workflow for provider-backed proof
+  - Runs only on manual dispatch or the nightly schedule
+  - Uses the repo variables and secrets for OpenAI-compatible and
+    Anthropic-compatible providers
+  - Exists separately so default PR CI stays fast, deterministic, and free from
+    external provider cost/rate-limit flake
+
+The design intent is:
+
+- `ci.yml` proves the product logic, storage/runtime integrations, and backend
+  compatibility without depending on a live model provider
+- `live-provider-streaming.yml` proves that the same API surfaces still work
+  when a real provider is in the loop
+
+The live-provider workflow is the canonical proof for real SSE
+`message_chunk` events from provider-backed graphs, and it now also covers
+provider-backed Store, MCP, and HITL flows in a tiered backend matrix:
 
 - SeekDB: full Streaming + Store + MCP + HITL acceptance
 - OceanBase: full Streaming + Store + MCP + HITL acceptance
@@ -511,8 +535,19 @@ backend matrix:
 - PostgreSQL metadata: Streaming + MCP compatibility while runtime
   checkpointer/store still use a MySQL-family backend
 
-Use the workflow manually when you want to debug a single provider/backend tier,
-or rely on the nightly schedule for the full matrix.
+Workflow behavior:
+
+- Manual dispatch can target one provider, one backend tier, or the full matrix
+- The nightly schedule runs the full provider/backend matrix
+- Provider configuration is validated before the suite runs
+- Backend capabilities are gated by tier, so MySQL does not run Store/MCP and
+  PostgreSQL metadata does not pretend to replace the runtime MySQL-family
+  store/checkpointer path
+- Logs are uploaded for every lane, including failures
+
+Use `ci.yml` for the normal development signal, and use
+`live-provider-streaming.yml` when you need explicit proof that real providers
+still satisfy the intended streaming, Store, MCP, and HITL contracts.
 
 ## 🗺️ Future Work
 
