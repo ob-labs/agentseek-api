@@ -125,6 +125,7 @@ jobs:
     env:
       LIVE_PROVIDER_KIND: ${{ matrix.provider.kind }}
       LIVE_PROVIDER_CAPABILITIES: ${{ matrix.backend.capabilities }}
+      LIVE_PROVIDER_REQUIRED: "1"
       LIVE_OPENAI_COMPAT_MODEL: ${{ matrix.provider.kind == 'openai' && (inputs.openai_model != '' && inputs.openai_model || vars.OPENAI_COMPAT_MODEL) || '' }}
       LIVE_OPENAI_COMPAT_BASE_URL: ${{ matrix.provider.kind == 'openai' && (inputs.openai_base_url != '' && inputs.openai_base_url || vars.OPENAI_COMPAT_BASE_URL) || '' }}
       LIVE_OPENAI_COMPAT_API_KEY: ${{ matrix.provider.kind == 'openai' && secrets.OPENAI_COMPAT_API_KEY || '' }}

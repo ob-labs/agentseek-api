@@ -12,6 +12,7 @@ SEEKDB_CONTAINER_NAME="${SEEKDB_CONTAINER_NAME:-agentseek-live-provider-test}"
 OCEANBASE_DOCKER_MODE="${OCEANBASE_DOCKER_MODE:-mini}"
 
 export OCEANBASE_HOST="${OCEANBASE_HOST:-127.0.0.1}"
+export LIVE_PROVIDER_REQUIRED="${LIVE_PROVIDER_REQUIRED:-1}"
 
 embed_pid=""
 docker_started="false"

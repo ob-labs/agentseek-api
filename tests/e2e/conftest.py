@@ -73,6 +73,12 @@ def _live_provider_missing_env() -> list[str]:
     return [name for name in required if not os.getenv(name, "").strip()]
 
 
+def should_fail_live_provider_config() -> bool:
+    running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
+    live_provider_required = os.getenv("LIVE_PROVIDER_REQUIRED", "").lower() in {"1", "true", "yes"}
+    return running_in_ci and live_provider_required
+
+
 def _start_e2e_server(*, graphs_path: str) -> Generator[str, None, None]:
     running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
     if not _seekdb_reachable():
@@ -137,11 +143,10 @@ def e2e_base_url() -> Generator[str, None, None]:
 
 @pytest.fixture(scope="session")
 def live_provider_base_url() -> Generator[str, None, None]:
-    running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
     missing = _live_provider_missing_env()
     if missing:
         message = f"Live provider e2e requires configuration: {', '.join(missing)}"
-        if running_in_ci:
+        if should_fail_live_provider_config():
             pytest.fail(message)
         pytest.skip(message)
 
