@@ -44,17 +44,6 @@ def test_workflow_dispatch_filters_provider_and_backend() -> None:
                 "provider_kind": "openai",
                 "provider_label": "OpenAI-Compatible",
                 "backend_name": "mysql",
-                "docker_backend": "mysql",
-                "image": "mysql:8.4",
-                "mode": "",
-                "user": "root",
-                "password": "root",
-                "port": "3306",
-                "db_name": "seekdb",
-                "url": "mysql+aiomysql://root:root@127.0.0.1:3306/seekdb",
-                "capabilities": "streaming,hitl",
-                "metadata_db_url": "",
-                "metadata_db_backend": "",
             }
         ]
     }
