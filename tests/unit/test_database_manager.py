@@ -227,6 +227,15 @@ def test_resolve_metadata_db_url_prefers_explicit_backend(monkeypatch: pytest.Mo
     assert resolved_url.startswith("postgresql+asyncpg://")
 
 
+def test_resolve_metadata_db_url_treats_blank_backend_as_auto(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "METADATA_DB_URL", "mysql://root%40test:@localhost:2881/seekdb")
+    monkeypatch.setattr(settings, "METADATA_DB_BACKEND", "")
+
+    resolved_url = resolve_metadata_db_url()
+
+    assert resolved_url == "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
+
+
 def test_resolve_metadata_db_url_builds_seekdb_url_from_oceanbase_settings(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

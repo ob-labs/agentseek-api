@@ -35,7 +35,7 @@ def _resolve_metadata_backend(*, configured_backend: str, url_drivername: str) -
         return "mysql"
     if normalized_backend == "sqlite":
         return normalized_backend
-    if normalized_backend != "auto":
+    if normalized_backend not in {"", "auto"}:
         raise ValueError(f"Unsupported METADATA_DB_BACKEND: {configured_backend}")
 
     base_drivername = url_drivername.split("+", maxsplit=1)[0].lower()
