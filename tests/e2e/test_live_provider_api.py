@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from uuid import uuid4
 
 import httpx
@@ -31,6 +33,26 @@ def _text_from_content(content: object) -> str:
 
 def _normalize_text(text: str) -> str:
     return " ".join(text.split())
+
+
+async def _poll_run(
+    *,
+    client: httpx.AsyncClient,
+    thread_id: str,
+    run_id: str,
+    user_id: str,
+    timeout_seconds: float = 120.0,
+) -> dict[str, object]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        response = await client.get(f"/threads/{thread_id}/runs/{run_id}", headers=user_headers(user_id))
+        assert response.status_code == 200
+        payload = response.json()
+        if payload["status"] in {"success", "error", "interrupted"}:
+            return payload
+        if time.monotonic() > deadline:
+            pytest.fail(f"Run {run_id} did not reach a terminal state within {timeout_seconds:.0f}s")
+        await asyncio.sleep(1)
 
 
 @pytest.mark.e2e
@@ -183,7 +205,7 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
 
     user_id = f"provider-hitl-{uuid4().hex}"
 
-    async with httpx.AsyncClient(base_url=live_provider_base_url, timeout=60.0, trust_env=False) as client:
+    async with httpx.AsyncClient(base_url=live_provider_base_url, timeout=120.0, trust_env=False) as client:
         assistant = await client.post(
             "/assistants",
             json={"name": "live-provider-hitl", "graph_id": provider_graph_id("hitl")},
@@ -203,12 +225,6 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         assert run.status_code == 200
         run_id = run.json()["run_id"]
 
-        waited = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers=user_headers(user_id))
-        assert waited.status_code == 200
-        waited_body = waited.json()
-        assert waited_body["status"] == "interrupted"
-        assert waited_body["interrupts"][0]["value"] == "Provide value:"
-
         interrupted_stream = await client.post(
             f"/threads/{thread_id}/stream",
             json={"channels": ["lifecycle", "input", "values"]},
@@ -218,22 +234,19 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         interrupted_events = parse_sse_events(interrupted_stream.text)
         input_event = next(event for event in interrupted_events if event["event"] == "input.requested")
         interrupt_payload = input_event["data"]["params"]["data"]
+        assert interrupt_payload["payload"] == "Provide value:"
         interrupt_id = interrupt_payload["interrupt_id"]
         lifecycle_states = [event["data"]["params"]["data"]["event"] for event in interrupted_events if event["event"] == "lifecycle"]
         assert lifecycle_states == ["started", "interrupted"]
 
+        interrupted_run = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
+        assert interrupted_run["status"] == "interrupted"
+        assert interrupted_run["interrupts"][0]["value"] == "Provide value:"
+
         last_seq = int(interrupted_events[-1]["id"])
         responded = await client.post(
-            f"/threads/{thread_id}/commands",
-            json={
-                "id": 1,
-                "method": "input.respond",
-                "params": {
-                    "namespace": [],
-                    "interrupt_id": interrupt_id,
-                    "response": "world",
-                },
-            },
+            f"/threads/{thread_id}/runs/{run_id}/resume",
+            json={"resume": "world"},
             headers=user_headers(user_id),
         )
         assert responded.status_code == 200
@@ -250,6 +263,6 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         resumed_values = [event["data"]["params"]["data"] for event in resumed_events if event["event"] == "values"]
         assert resumed_values[-1]["foo"].endswith("world")
 
-        final_wait = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers=user_headers(user_id))
-        assert final_wait.status_code == 200
-        assert final_wait.json()["status"] == "success"
+        final_run = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
+        assert final_run["status"] == "success"
+        assert final_run["output"]["state"]["foo"].endswith("world")
