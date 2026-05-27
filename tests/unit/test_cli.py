@@ -339,6 +339,106 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
 
     assert exit_code == 2
     assert "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
+    assert "Use 'langgraph dev' for mocked or tunneled local workflows." in stderr.getvalue()
+
+
+def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
+    from agentseek_api.cli import _resolve_dev_urls
+
+    urls = _resolve_dev_urls(host="0.0.0.0", port=2024, studio_url=None)
+
+    assert urls.api_url == "http://localhost:2024"
+    assert urls.docs_url == "http://localhost:2024/docs"
+    assert urls.studio_url == "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"
+
+
+def test_resolve_dev_urls_preserve_explicit_host_and_override_studio_origin() -> None:
+    from agentseek_api.cli import _resolve_dev_urls
+
+    urls = _resolve_dev_urls(host="devbox.local", port=3030, studio_url="https://smith.example.com")
+
+    assert urls.api_url == "http://devbox.local:3030"
+    assert urls.docs_url == "http://devbox.local:3030/docs"
+    assert urls.studio_url == "https://smith.example.com/studio/?baseUrl=http://devbox.local:3030"
+
+
+def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.terminated = False
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.returncode = 0 if self.returncode is None else self.returncode
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = 0
+
+    fake_process = FakeProcess()
+    opened: list[str] = []
+    stdout = io.StringIO()
+
+    exit_code = cli_module._run_managed_dev_server(
+        command=["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"],
+        env={"A": "B"},
+        cwd=tmp_path,
+        urls=cli_module._resolve_dev_urls(host="127.0.0.1", port=2024, studio_url=None),
+        stdout=stdout,
+        process_factory=lambda command, *, env, cwd: fake_process,
+        wait_for_ready=lambda *_args, **_kwargs: None,
+        browser_opener=opened.append,
+        sleep=lambda _seconds: None,
+    )
+
+    assert exit_code == 0
+    assert "> Ready!" in stdout.getvalue()
+    assert "- API: http://localhost:2024" in stdout.getvalue()
+    assert "- Docs: http://localhost:2024/docs" in stdout.getvalue()
+    assert "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024" in stdout.getvalue()
+    assert opened == ["https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"]
+
+
+def test_run_managed_dev_server_honors_no_browser(tmp_path: Path) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.returncode = 0 if self.returncode is None else self.returncode
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.returncode = 0
+
+    opened: list[str] = []
+
+    exit_code = cli_module._run_managed_dev_server(
+        command=["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"],
+        env={},
+        cwd=tmp_path,
+        urls=cli_module._resolve_dev_urls(host="127.0.0.1", port=2024, studio_url=None),
+        stdout=io.StringIO(),
+        process_factory=lambda command, *, env, cwd: FakeProcess(),
+        wait_for_ready=lambda *_args, **_kwargs: None,
+        open_browser=False,
+        browser_opener=opened.append,
+        sleep=lambda _seconds: None,
+    )
+
+    assert exit_code == 0
+    assert opened == []
 
 
 def test_dev_command_rejects_missing_explicit_config(tmp_path: Path) -> None:

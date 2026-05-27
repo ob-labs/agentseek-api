@@ -27,6 +27,17 @@ Current release boundary:
 - Python 3.12+
 - `uv`
 
+### Choose the right local loop
+
+| Workflow | Use it when | Recommended command |
+| --- | --- | --- |
+| `langgraph dev` | You want the fastest mocked or in-memory local API loop for graph prototyping or Studio experimentation. | `langgraph dev` |
+| `agentseek-api dev` | You want the real AgentSeek API surface with your actual MySQL-family / SeekDB / OceanBase-style persistence, auth, and Docker/runtime behavior. | `uv run agentseek-api dev` |
+
+Use `langgraph dev` when you do not need real backend validation. Use
+`agentseek-api dev` when you want to exercise the actual API contract this repo
+ships.
+
 ### 1. Install dependencies
 
 ```bash
@@ -65,11 +76,24 @@ Run with an explicit config when needed:
 uv run agentseek-api dev --config ./langgraph.json
 ```
 
+When the server is ready it prints the local API, docs, and Studio URLs:
+
+```text
+> Ready!
+>
+> - API: http://localhost:2024
+>
+> - Docs: http://localhost:2024/docs
+>
+> - LangSmith Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+```
+
 ### 4. Check that it is up
 
 ```bash
 curl http://127.0.0.1:2024/health
 curl http://127.0.0.1:2024/info
+curl http://127.0.0.1:2024/openapi.json
 ```
 
 ## 🧰 CLI
@@ -120,6 +144,8 @@ uv run agentseek-api version
   - Default host: `127.0.0.1`
   - Default port: `2024`
   - Use `--no-reload` to disable reload
+  - Use `--no-browser` to suppress automatic Studio launch
+  - Use `--studio-url` to point at a different LangSmith / Studio origin
 - `serve`
   - Same host and port options as `dev`
 - `worker`
@@ -138,7 +164,8 @@ uv run agentseek-api version
     `--recreate`, and `--no-recreate`
 
 Some LangGraph CLI-shaped flags are parsed for command compatibility but
-rejected when their runtime behavior is not implemented yet.
+rejected when their runtime behavior is not implemented yet. For mocked,
+in-memory, or tunneled local workflows, prefer `langgraph dev`.
 
 ## ✨ Features
 
@@ -182,7 +209,8 @@ Cron-enabled deployments run three long-lived roles:
 - Worker: executes Redis-backed queued runs and resumes persisted stream state after restarts
 - Scheduler: claims due cron jobs and submits their runs into the runtime
 
-For local development you can keep using `uv run agentseek-api dev`. For
+For local development against a real backend, use `uv run agentseek-api dev`.
+For mocked or in-memory graph iteration, use `langgraph dev` instead. For
 durable cron execution, run the API server, worker, and scheduler together
 against the same database and Redis instance.
 
@@ -204,7 +232,7 @@ Useful config fields:
 - `env`: either a dotenv file path or an object of scalar environment values
 - `auth.path`: custom auth backend reference
 - `auth.openapi`: OpenAPI `securitySchemes` and `security` metadata for auth
-- `auth.disable_studio_auth`: accepted for LangGraph config compatibility
+- `auth.disable_studio_auth`: disables the Studio auth bypass described below
 - `http.disable_mcp`: disable the MCP endpoint
 - `http.disable_a2a`: disable the A2A endpoint and agent-card discovery route
 - `base_image`, `python_version`, `image_distro`, `pip_config_file`,
@@ -241,6 +269,18 @@ Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
   }
 }
 ```
+
+### Studio and docs behavior
+
+- FastAPI docs stay available at `/docs`, `/redoc`, and `/openapi.json`
+- Studio connects through the same local API base URL printed by
+  `agentseek-api dev`
+- When auth is configured, AgentSeek accepts Studio requests carrying
+  `x-auth-scheme: langsmith`
+- Set `auth.disable_studio_auth` to `true` if Studio should use the same normal
+  API auth path as every other client
+- If you only need a mocked local API server for Studio experiments, use
+  `langgraph dev` instead of AgentSeek
 
 ## 🔌 MCP
 

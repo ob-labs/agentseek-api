@@ -31,6 +31,20 @@ def test_ok_endpoint(client: TestClient) -> None:
     assert response.json() == {"ok": True}
 
 
+def test_docs_and_openapi_endpoints(client: TestClient) -> None:
+    docs = client.get("/docs")
+    redoc = client.get("/redoc")
+    openapi = client.get("/openapi.json")
+
+    assert docs.status_code == 200
+    assert docs.headers["content-type"].startswith("text/html")
+    assert redoc.status_code == 200
+    assert redoc.headers["content-type"].startswith("text/html")
+    assert openapi.status_code == 200
+    assert openapi.headers["content-type"].startswith("application/json")
+    assert openapi.json()["openapi"].startswith("3.")
+
+
 def test_info_endpoint(client: TestClient) -> None:
     response = client.get("/info")
     assert response.status_code == 200
