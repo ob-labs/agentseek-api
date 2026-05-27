@@ -440,16 +440,16 @@ def _execute_dev_command(
     stdout: TextIO,
 ) -> int:
     args.reload = not args.no_reload
-    if runner is not _default_runner:
-        return _execute_runtime_command(args, runner=runner, cwd=cwd)
-
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    env["STUDIO_AUTH_LOCAL_DEV"] = "true"
     command = build_uvicorn_command(
         host=args.host,
         port=args.port,
         reload_enabled=args.reload,
     )
+    if runner is not _default_runner:
+        return runner(command, env=env, cwd=str(cwd))
     urls = _resolve_dev_urls(host=args.host, port=args.port, studio_url=args.studio_url)
     return _run_managed_dev_server(
         command=command,

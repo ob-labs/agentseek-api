@@ -275,10 +275,10 @@ Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
 - FastAPI docs stay available at `/docs`, `/redoc`, and `/openapi.json`
 - Studio connects through the same local API base URL printed by
   `agentseek-api dev`
-- When auth is configured, AgentSeek accepts Studio requests carrying
-  `x-auth-scheme: langsmith`
+- When auth is configured, `agentseek-api dev` accepts loopback Studio requests
+  carrying `x-auth-scheme: langsmith`
 - Set `auth.disable_studio_auth` to `true` if Studio should use the same normal
-  API auth path as every other client
+  API auth path as every other client during `dev`
 - If you only need a mocked local API server for Studio experiments, use
   `langgraph dev` instead of AgentSeek
 

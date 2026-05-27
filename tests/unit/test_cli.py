@@ -342,6 +342,19 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
     assert "Use 'langgraph dev' for mocked or tunneled local workflows." in stderr.getvalue()
 
 
+def test_dev_command_marks_runtime_as_local_dev_for_studio_auth(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    capture = _RunCapture()
+
+    exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
+
+    assert exit_code == 0
+    assert capture.env is not None
+    assert capture.env["STUDIO_AUTH_LOCAL_DEV"] == "true"
+
+
 def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
     from agentseek_api.cli import _resolve_dev_urls
 

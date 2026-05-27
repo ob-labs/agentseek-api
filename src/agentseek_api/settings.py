@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     AUTH_API_KEYS: str | None = None
     AUTH_JWT_SECRET: str | None = None
     AUTH_JWT_ALGORITHM: str = "HS256"
+    STUDIO_AUTH_LOCAL_DEV: bool = False
 
     OCEANBASE_HOST: str = "localhost"
     OCEANBASE_PORT: str = "2881"

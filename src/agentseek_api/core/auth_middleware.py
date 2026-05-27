@@ -222,6 +222,8 @@ def get_studio_user(request: Request) -> User | None:
     config_auth = get_config_auth_settings()
     if config_auth.disable_studio_auth is True:
         return None
+    if not settings.STUDIO_AUTH_LOCAL_DEV:
+        return None
     auth_scheme = request.headers.get("x-auth-scheme", "")
     if auth_scheme.lower() != STUDIO_AUTH_SCHEME:
         return None
