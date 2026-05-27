@@ -10,7 +10,13 @@ import pytest
 from fastapi import Request
 
 from agentseek_api.core import auth_middleware
-from agentseek_api.core.auth_middleware import ApiKeyAuthBackend, JwtAuthBackend, NoopAuthBackend, get_auth_backend
+from agentseek_api.core.auth_middleware import (
+    ApiKeyAuthBackend,
+    JwtAuthBackend,
+    NoopAuthBackend,
+    get_auth_backend,
+    get_studio_user,
+)
 from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
 
@@ -314,3 +320,61 @@ def test_get_auth_backend_wraps_missing_symbol(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(RuntimeError, match="Could not load AUTH_MODULE_PATH='fake_auth_module:backend'"):
         get_auth_backend()
+
+
+def test_get_studio_user_rejects_non_loopback_requests(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=user")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    monkeypatch.setattr(settings, "STUDIO_AUTH_LOCAL_DEV", True)
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-auth-scheme", b"langsmith")],
+            "client": ("203.0.113.10", 50000),
+        }
+    )
+
+    assert get_studio_user(request) is None
+
+
+def test_get_studio_user_rejects_loopback_requests_outside_local_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=user")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    monkeypatch.setattr(settings, "STUDIO_AUTH_LOCAL_DEV", False)
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-auth-scheme", b"langsmith")],
+            "client": ("127.0.0.1", 50000),
+        }
+    )
+
+    assert get_studio_user(request) is None
+
+
+def test_get_studio_user_accepts_loopback_requests_in_local_dev(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
+    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=user")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    monkeypatch.setattr(settings, "STUDIO_AUTH_LOCAL_DEV", True)
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-auth-scheme", b"langsmith")],
+            "client": ("127.0.0.1", 50000),
+        }
+    )
+
+    user = get_studio_user(request)
+
+    assert user is not None
+    assert user.identity == "langgraph-studio-user"
+    assert user.is_authenticated is True

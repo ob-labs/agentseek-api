@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import sys
 import time
@@ -16,6 +17,9 @@ from fastapi import Request
 from agentseek_api.core.config_file import active_config_path, get_active_config_payload
 from agentseek_api.models.auth import User
 from agentseek_api.settings import settings
+
+STUDIO_AUTH_SCHEME = "langsmith"
+STUDIO_USER_ID = "langgraph-studio-user"
 
 
 class AuthBackend(Protocol):
@@ -194,6 +198,40 @@ def get_config_auth_settings() -> ConfigAuthSettings:
 
 def get_config_auth_openapi() -> dict[str, Any] | None:
     return get_config_auth_settings().openapi
+
+
+def _auth_is_configured(config_auth: ConfigAuthSettings) -> bool:
+    auth_type = settings.AUTH_TYPE.strip().lower()
+    return auth_type != "noop" or bool(settings.AUTH_MODULE_PATH or config_auth.path)
+
+
+def _is_loopback_client(request: Request) -> bool:
+    client = request.client
+    if client is None:
+        return False
+    host = client.host
+    if host == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
+def get_studio_user(request: Request) -> User | None:
+    config_auth = get_config_auth_settings()
+    if config_auth.disable_studio_auth is True:
+        return None
+    if not settings.STUDIO_AUTH_LOCAL_DEV:
+        return None
+    auth_scheme = request.headers.get("x-auth-scheme", "")
+    if auth_scheme.lower() != STUDIO_AUTH_SCHEME:
+        return None
+    if not _is_loopback_client(request):
+        return None
+    if not _auth_is_configured(config_auth):
+        return None
+    return User(identity=STUDIO_USER_ID, is_authenticated=True)
 
 
 def _load_custom_backend(auth_module_path: str | None = None) -> AuthBackend | None:

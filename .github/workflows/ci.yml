@@ -163,6 +163,15 @@ jobs:
       - name: Sync dependencies
         run: uv sync --dev
 
+      - name: CLI dev smoke covers docs and Studio-style localhost auth
+        env:
+          OCEANBASE_HOST: 127.0.0.1
+          OCEANBASE_PORT: "3306"
+          OCEANBASE_USER: root
+          OCEANBASE_PASSWORD: root
+          OCEANBASE_DB_NAME: seekdb
+        run: uv run python scripts/test_cli_dev_studio_smoke.py
+
       - name: Run sample graphs through agentseek-api dev
         env:
           MYSQL_HOST: 127.0.0.1

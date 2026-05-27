@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -62,6 +63,13 @@ class CliConfig:
     dockerfile_lines: list[str] = field(default_factory=list)
 
 
+@dataclass(frozen=True)
+class DevServerUrls:
+    api_url: str
+    docs_url: str
+    studio_url: str
+
+
 def _resolve_path(path_text: str, *, cwd: Path) -> Path:
     path = Path(path_text).expanduser()
     if not path.is_absolute():
@@ -84,7 +92,13 @@ def _infer_cli_name() -> str:
     return DEFAULT_CLI_NAME
 
 
-def _reject_unsupported_options(args: argparse.Namespace, *, command_name: str, option_names: Sequence[str]) -> None:
+def _reject_unsupported_options(
+    args: argparse.Namespace,
+    *,
+    command_name: str,
+    option_names: Sequence[str],
+    hint: str | None = None,
+) -> None:
     unsupported = []
     for option_name in option_names:
         value = getattr(args, option_name)
@@ -95,7 +109,10 @@ def _reject_unsupported_options(args: argparse.Namespace, *, command_name: str, 
         if value is not None:
             unsupported.append(_flag_name(option_name))
     if unsupported:
-        raise CliError(f"Unsupported option(s) for '{_cli_name(args)} {command_name}': {', '.join(unsupported)}")
+        message = f"Unsupported option(s) for '{_cli_name(args)} {command_name}': {', '.join(unsupported)}"
+        if hint:
+            message = f"{message} {hint}"
+        raise CliError(message)
 
 
 def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None:
@@ -288,6 +305,122 @@ def _default_runner(command: list[str], *, env: dict[str, str], cwd: str | None 
     return completed.returncode
 
 
+def _format_http_host(host: str) -> str:
+    if ":" in host and not host.startswith("["):
+        return f"[{host}]"
+    return host
+
+
+def _is_loopbackish_host(host: str) -> bool:
+    return host in {"127.0.0.1", "localhost", "0.0.0.0", "::", "[::]"}
+
+
+def _resolve_dev_urls(*, host: str, port: int, studio_url: str | None) -> DevServerUrls:
+    display_host = "localhost" if _is_loopbackish_host(host) else host
+    studio_host = "127.0.0.1" if _is_loopbackish_host(host) else host
+    studio_origin = (studio_url or "https://smith.langchain.com").rstrip("/")
+    api_url = f"http://{_format_http_host(display_host)}:{port}"
+    studio_base_url = f"http://{_format_http_host(studio_host)}:{port}"
+    return DevServerUrls(
+        api_url=api_url,
+        docs_url=f"{api_url}/docs",
+        studio_url=f"{studio_origin}/studio/?baseUrl={studio_base_url}",
+    )
+
+
+def _render_dev_ready_banner(urls: DevServerUrls) -> str:
+    return (
+        "> Ready!\n"
+        ">\n"
+        f"> - API: {urls.api_url}\n"
+        ">\n"
+        f"> - Docs: {urls.docs_url}\n"
+        ">\n"
+        f"> - LangSmith Studio Web UI: {urls.studio_url}\n"
+    )
+
+
+def _wait_for_dev_server_ready(
+    api_url: str,
+    *,
+    process,
+    timeout_seconds: float = 30.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: Exception | None = None
+    ready_urls = [f"{api_url}/ok", f"{api_url}/health"]
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise CliError(f"Development server exited before becoming ready (exit code {process.returncode}).")
+        for ready_url in ready_urls:
+            try:
+                with urllib_request.urlopen(ready_url, timeout=2.0) as response:
+                    if 200 <= response.status < 300:
+                        return
+            except (urllib_error.URLError, TimeoutError, OSError) as exc:
+                last_error = exc
+        sleep(0.2)
+    raise CliError(f"Timed out waiting for '{api_url}' to become ready: {last_error}")
+
+
+def _default_process_factory(command: list[str], *, env: dict[str, str], cwd: str):
+    return subprocess.Popen(command, env=env, cwd=cwd)
+
+
+def _run_managed_dev_server(
+    *,
+    command: list[str],
+    env: dict[str, str],
+    cwd: Path,
+    urls: DevServerUrls,
+    stdout: TextIO,
+    open_browser: bool = True,
+    process_factory: Callable[..., object] = _default_process_factory,
+    wait_for_ready: Callable[..., None] = _wait_for_dev_server_ready,
+    browser_opener: Callable[[str], object] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    process = process_factory(command, env=env, cwd=str(cwd))
+    previous_handlers: dict[int, object] = {}
+
+    def _terminate_child(_signum, _frame) -> None:
+        if process.poll() is None:
+            process.terminate()
+
+    for signum in (signal.SIGINT, signal.SIGTERM):
+        try:
+            previous_handlers[signum] = signal.getsignal(signum)
+            signal.signal(signum, _terminate_child)
+        except ValueError:
+            continue
+
+    try:
+        wait_for_ready(urls.api_url, process=process, sleep=sleep)
+        stdout.write(_render_dev_ready_banner(urls))
+        stdout.flush()
+        if open_browser:
+            if browser_opener is None:
+                import webbrowser
+
+                browser_opener = webbrowser.open
+            browser_opener(urls.studio_url)
+        return process.wait()
+    except KeyboardInterrupt:
+        if process.poll() is None:
+            process.terminate()
+        return process.wait()
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.wait()
+        for signum, handler in previous_handlers.items():
+            try:
+                signal.signal(signum, handler)
+            except ValueError:
+                continue
+
+
 def _execute_runtime_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
@@ -297,6 +430,35 @@ def _execute_runtime_command(args: argparse.Namespace, *, runner: Callable[..., 
         reload_enabled=getattr(args, "reload", False),
     )
     return runner(command, env=env, cwd=str(cwd))
+
+
+def _execute_dev_command(
+    args: argparse.Namespace,
+    *,
+    runner: Callable[..., int],
+    cwd: Path,
+    stdout: TextIO,
+) -> int:
+    args.reload = not args.no_reload
+    config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
+    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    env["STUDIO_AUTH_LOCAL_DEV"] = "true"
+    command = build_uvicorn_command(
+        host=args.host,
+        port=args.port,
+        reload_enabled=args.reload,
+    )
+    if runner is not _default_runner:
+        return runner(command, env=env, cwd=str(cwd))
+    urls = _resolve_dev_urls(host=args.host, port=args.port, studio_url=args.studio_url)
+    return _run_managed_dev_server(
+        command=command,
+        env=env,
+        cwd=cwd,
+        urls=urls,
+        stdout=stdout,
+        open_browser=not args.no_browser,
+    )
 
 
 def _execute_worker_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
@@ -800,14 +962,12 @@ def run_namespace(
                     "n_jobs_per_worker",
                     "debug_port",
                     "wait_for_client",
-                    "no_browser",
-                    "studio_url",
                     "allow_blocking",
                     "tunnel",
                 ),
+                hint="Use 'langgraph dev' for mocked or tunneled local workflows.",
             )
-            args.reload = not args.no_reload
-            return _execute_runtime_command(args, runner=run, cwd=workdir)
+            return _execute_dev_command(args, runner=run, cwd=workdir, stdout=out)
         if command == "serve":
             args.reload = False
             return _execute_runtime_command(args, runner=run, cwd=workdir)
