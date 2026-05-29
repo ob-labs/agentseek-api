@@ -698,7 +698,7 @@ async def test_live_run_and_stateless_endpoints(e2e_base_url: str) -> None:
             headers=_user_headers(user_id),
         )
         assert waited_create.status_code == 200
-        assert waited_create.json()["status"] == "success"
+        assert waited_create.json()["output"] == {"echo": {"message": "wait-create"}}
 
         streamed_create = await client.post(
             f"/threads/{thread_id}/runs/stream",
@@ -707,7 +707,8 @@ async def test_live_run_and_stateless_endpoints(e2e_base_url: str) -> None:
         )
         assert streamed_create.status_code == 200
         assert streamed_create.headers["content-type"].startswith("text/event-stream")
-        assert "event: end" in streamed_create.text
+        assert "event: metadata" in streamed_create.text
+        assert "event: values" in streamed_create.text
 
         created = await _create_thread_run(
             client,
@@ -811,7 +812,7 @@ async def test_live_run_and_stateless_endpoints(e2e_base_url: str) -> None:
             headers=_user_headers(user_id),
         )
         assert stateless_wait.status_code == 200
-        assert stateless_wait.json()["status"] == "success"
+        assert stateless_wait.json()["output"] == {"echo": {"mode": "wait"}}
 
         stateless_stream = await client.post(
             "/runs/stream",

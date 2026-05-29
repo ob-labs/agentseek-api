@@ -2,17 +2,19 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy import delete, select
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
-from agentseek_api.models.api import RunCreate, RunRead, RunResume
+from agentseek_api.models.api import RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
 from agentseek_api.models.auth import User
+from agentseek_api.api.threads import get_thread_state
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
@@ -24,6 +26,7 @@ from agentseek_api.services.stream_persistence import (
     load_run_stream_events,
     parse_last_event_id,
 )
+from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.settings import settings
 
 router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Runs"])
@@ -31,6 +34,8 @@ router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Runs"])
 TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
 REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
+SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages"}
+RUN_STREAM_MODE_ALIASES = {"messages-tuple": "messages"}
 
 
 async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
@@ -64,6 +69,111 @@ def _to_read_model(run: Run) -> RunRead:
 
 def _uses_redis_executor() -> bool:
     return settings.EXECUTOR_BACKEND.strip().lower() == "redis"
+
+
+def _normalize_stream_modes(stream_mode: str | list[str] | None) -> list[str]:
+    raw_modes = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode or ["values"])
+    modes: list[str] = []
+    for mode in raw_modes:
+        normalized = RUN_STREAM_MODE_ALIASES.get(str(mode).strip(), str(mode).strip())
+        if normalized and normalized not in modes:
+            modes.append(normalized)
+    if not modes:
+        modes = ["values"]
+    unsupported = [mode for mode in modes if mode not in SUPPORTED_RUN_STREAM_MODES]
+    if unsupported:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Unsupported stream_mode value(s): "
+                f"{', '.join(unsupported)}. Supported values: {', '.join(sorted(SUPPORTED_RUN_STREAM_MODES))}."
+            ),
+        )
+    return modes
+
+
+async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
+    if run.status == "interrupted" and run.interrupts:
+        return {"__interrupt__": run.interrupts}
+    if run.status == "error":
+        return {"__error__": run.last_error} if run.last_error else {}
+    state = await get_thread_state(run.thread_id, user)
+    if isinstance(state, dict) and "values" in state:
+        return state["values"]
+    return {}
+
+
+def _stream_response_headers(*, location: str, content_location: str) -> dict[str, str]:
+    return {
+        "Location": location,
+        "Content-Location": content_location,
+    }
+
+
+def _wait_response_headers(*, thread_id: str, run_id: str) -> dict[str, str]:
+    return _stream_response_headers(
+        location=f"/threads/{thread_id}/runs/{run_id}/join",
+        content_location=f"/threads/{thread_id}/runs/{run_id}",
+    )
+
+
+def _interrupt_stream_event_name(stream_modes: list[str]) -> str | None:
+    if "updates" in stream_modes:
+        return "updates"
+    if "values" in stream_modes:
+        return "values"
+    return None
+
+
+def _build_create_run_stream_response(
+    *,
+    thread_id: str,
+    created: RunRead,
+    user: User,
+    stream_modes: list[str],
+    after_seq: int,
+    location: str,
+    content_location: str,
+) -> StreamingResponse:
+    protocol_channels = [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
+
+    async def _event_iter() -> AsyncIterator[str]:
+        current_seq = after_seq
+        metadata = json.dumps({"run_id": created.run_id, "attempt": 1})
+        yield f"event: metadata\ndata: {metadata}\n\n"
+
+        async for event in thread_protocol_broker.stream(
+            thread_id,
+            channels=protocol_channels,
+            namespaces=None,
+            depth=None,
+            since=after_seq,
+        ):
+            event_run_id = event.get("params", {}).get("run_id")
+            if event_run_id != created.run_id:
+                continue
+            method = str(event.get("method", "message"))
+            payload_data = event.get("params", {}).get("data", {})
+            current_seq = max(current_seq, int(event.get("seq", 0)))
+            yield f"id: {current_seq}\nevent: {method}\ndata: {json.dumps(payload_data)}\n\n"
+
+        final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
+        if final_run.status == "error":
+            current_seq += 1
+            payload = json.dumps({"error": final_run.last_error, "run_id": created.run_id})
+            yield f"id: {current_seq}\nevent: error\ndata: {payload}\n\n"
+            return
+        interrupt_event = _interrupt_stream_event_name(stream_modes)
+        if final_run.status == "interrupted" and final_run.interrupts and interrupt_event is not None:
+            current_seq += 1
+            payload = json.dumps({"__interrupt__": final_run.interrupts})
+            yield f"id: {current_seq}\nevent: {interrupt_event}\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        _event_iter(),
+        media_type="text/event-stream",
+        headers=_stream_response_headers(location=location, content_location=content_location),
+    )
 
 
 async def _is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
@@ -104,7 +214,7 @@ async def _iter_persisted_run_records(
 
 
 @router.post("", response_model=RunRead)
-async def create_run(thread_id: str, payload: RunCreate, user: User = Depends(get_current_user)) -> RunRead:
+async def create_run(thread_id: str, payload: RunCreateStateful, user: User = Depends(get_current_user)) -> RunRead:
     try:
         row = await prepare_and_submit_run(
             thread_id=thread_id,
@@ -113,7 +223,7 @@ async def create_run(thread_id: str, payload: RunCreate, user: User = Depends(ge
             user=user,
             metadata=payload.metadata,
             kwargs={"config": payload.config, "context": payload.context},
-            multitask_strategy=payload.multitask_strategy,
+            multitask_strategy=getattr(payload, "multitask_strategy", "enqueue"),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -164,18 +274,62 @@ async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current
         await asyncio.sleep(0.2)
 
 
-@router.post("/wait", response_model=RunRead)
-async def create_run_wait(thread_id: str, payload: RunCreate, user: User = Depends(get_current_user)) -> RunRead:
+@router.post(
+    "/wait",
+    response_class=JSONResponse,
+    responses={
+        200: {
+            "content": {"application/json": {"schema": {}}},
+            "headers": {
+                "Location": {"schema": {"type": "string"}},
+                "Content-Location": {"schema": {"type": "string"}},
+            },
+        }
+    },
+)
+async def create_run_wait(
+    thread_id: str,
+    payload: RunCreateStreamingStateful,
+    user: User = Depends(get_current_user),
+) -> JSONResponse:
     created = await create_run(thread_id, payload, user)
-    if created.status in TERMINAL_RUN_STATUSES:
-        return created
-    return await wait_run(thread_id, created.run_id, user)
+    final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
+    return JSONResponse(
+        await _wait_response_payload(final_run, user=user),
+        headers=_wait_response_headers(thread_id=thread_id, run_id=created.run_id),
+    )
 
 
-@router.post("/stream")
-async def create_run_stream(thread_id: str, payload: RunCreate, user: User = Depends(get_current_user)) -> StreamingResponse:
+@router.post(
+    "/stream",
+    response_class=StreamingResponse,
+    responses={
+        200: {
+            "content": {"text/event-stream": {"schema": {"type": "string"}}},
+            "headers": {
+                "Location": {"schema": {"type": "string"}},
+                "Content-Location": {"schema": {"type": "string"}},
+            },
+        }
+    },
+)
+async def create_run_stream(
+    thread_id: str,
+    payload: RunCreateStreamingStateful,
+    user: User = Depends(get_current_user),
+) -> StreamingResponse:
+    stream_modes = _normalize_stream_modes(payload.stream_mode)
+    after_seq = thread_protocol_broker.latest_seq(thread_id)
     created = await create_run(thread_id, payload, user)
-    return await stream_run(thread_id, created.run_id, user)
+    return _build_create_run_stream_response(
+        thread_id=thread_id,
+        created=created,
+        user=user,
+        stream_modes=stream_modes,
+        after_seq=after_seq,
+        location=f"/threads/{thread_id}/runs/{created.run_id}/stream",
+        content_location=f"/threads/{thread_id}/runs/{created.run_id}",
+    )
 
 
 @router.post("/{run_id}/resume", response_model=RunRead)

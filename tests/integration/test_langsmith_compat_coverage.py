@@ -227,16 +227,19 @@ def test_run_routes_cover_list_wait_resume_cancel_and_missing_paths(
     async def fake_wait_run(*args, **kwargs):
         return final_created
 
+    async def fake_wait_response_payload(*args, **kwargs):
+        return {"ok": True}
+
     monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
     monkeypatch.setattr("agentseek_api.api.runs.wait_run", fake_wait_run)
+    monkeypatch.setattr("agentseek_api.api.runs._wait_response_payload", fake_wait_response_payload)
 
     waited = client.post(
         f"/threads/{thread_id}/runs/wait",
         json={"assistant_id": assistant_id, "input": {"message": "wait later"}},
     )
     assert waited.status_code == 200
-    assert waited.json()["run_id"] == "pending-run"
-    assert waited.json()["status"] == "success"
+    assert waited.json() == {"ok": True}
 
 
 def test_stateless_routes_cover_wait_and_cancel_status_branch(client: TestClient, monkeypatch) -> None:
@@ -262,13 +265,16 @@ def test_stateless_routes_cover_wait_and_cancel_status_branch(client: TestClient
     async def fake_wait_run(*args, **kwargs):
         return finished_run
 
+    async def fake_wait_response_payload(*args, **kwargs):
+        return {"done": True}
+
     monkeypatch.setattr("agentseek_api.api.stateless_runs.create_stateless_run", fake_create_stateless_run)
     monkeypatch.setattr("agentseek_api.api.stateless_runs.wait_run", fake_wait_run)
+    monkeypatch.setattr("agentseek_api.api.stateless_runs._wait_response_payload", fake_wait_response_payload)
 
     waited = client.post("/runs/wait", json={"assistant_id": assistant_id, "input": {"message": "later"}})
     assert waited.status_code == 200
-    assert waited.json()["run_id"] == "pending-stateless"
-    assert waited.json()["status"] == "success"
+    assert waited.json() == {"done": True}
 
     created = client.post("/runs", json={"assistant_id": assistant_id, "input": {"message": "cancel by status"}})
     assert created.status_code == 200

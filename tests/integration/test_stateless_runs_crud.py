@@ -21,10 +21,13 @@ def test_stateless_run_missing_assistant(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_stateless_run_missing_input_validation(client: TestClient) -> None:
+def test_stateless_run_missing_input_matches_official_contract(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     response = client.post("/runs", json={"assistant_id": assistant_id})
-    assert response.status_code == 422
+    assert response.status_code == 200
+    body = response.json()
+    assert body["assistant_id"] == assistant_id
+    assert body["status"] == "success"
 
 
 def test_stateless_run_missing_assistant_validation(client: TestClient) -> None:

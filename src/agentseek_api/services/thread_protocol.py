@@ -311,16 +311,20 @@ def publish_values_event(
     *,
     values: Any,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": values,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     return thread_protocol_broker.publish(
         thread_id,
         {
             "method": "values",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": values,
-            },
+            "params": params,
         },
     )
 
@@ -330,16 +334,20 @@ async def apublish_values_event(
     *,
     values: Any,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": values,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     return await _apublish_thread_event(
         thread_id,
         {
             "method": "values",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": values,
-            },
+            "params": params,
         },
     )
 
@@ -349,16 +357,20 @@ def publish_updates_event(
     *,
     values: Any,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": values,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     return thread_protocol_broker.publish(
         thread_id,
         {
             "method": "updates",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": values,
-            },
+            "params": params,
         },
     )
 
@@ -368,16 +380,20 @@ async def apublish_updates_event(
     *,
     values: Any,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": values,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     return await _apublish_thread_event(
         thread_id,
         {
             "method": "updates",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": values,
-            },
+            "params": params,
         },
     )
 
@@ -434,20 +450,24 @@ def publish_message_start(
     message_id: str,
     role: str,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "message-start",
+            "role": role,
+            "id": message_id,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     thread_protocol_broker.publish(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "message-start",
-                    "role": role,
-                    "id": message_id,
-                },
-            },
+            "params": params,
         },
     )
 
@@ -458,20 +478,24 @@ async def apublish_message_start(
     message_id: str,
     role: str,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "message-start",
+            "role": role,
+            "id": message_id,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "message-start",
-                    "role": role,
-                    "id": message_id,
-                },
-            },
+            "params": params,
         },
     )
 
@@ -482,20 +506,24 @@ def publish_content_block_start(
     index: int,
     content: dict[str, Any],
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "content-block-start",
+            "index": index,
+            "content": content,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     thread_protocol_broker.publish(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "content-block-start",
-                    "index": index,
-                    "content": content,
-                },
-            },
+            "params": params,
         },
     )
 
@@ -506,20 +534,24 @@ async def apublish_content_block_start(
     index: int,
     content: dict[str, Any],
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "content-block-start",
+            "index": index,
+            "content": content,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "content-block-start",
-                    "index": index,
-                    "content": content,
-                },
-            },
+            "params": params,
         },
     )
 
@@ -530,20 +562,24 @@ def publish_content_block_delta(
     index: int,
     delta: dict[str, Any],
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "content-block-delta",
+            "index": index,
+            "delta": delta,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     thread_protocol_broker.publish(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "content-block-delta",
-                    "index": index,
-                    "delta": delta,
-                },
-            },
+            "params": params,
         },
     )
 
@@ -554,20 +590,24 @@ async def apublish_content_block_delta(
     index: int,
     delta: dict[str, Any],
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "content-block-delta",
+            "index": index,
+            "delta": delta,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "content-block-delta",
-                    "index": index,
-                    "delta": delta,
-                },
-            },
+            "params": params,
         },
     )
 
@@ -578,6 +618,7 @@ def publish_content_block_finish(
     index: int,
     content: dict[str, Any] | None = None,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
     data: dict[str, Any] = {
         "event": "content-block-finish",
@@ -585,15 +626,18 @@ def publish_content_block_finish(
     }
     if content is not None:
         data["content"] = content
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": data,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     thread_protocol_broker.publish(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": data,
-            },
+            "params": params,
         },
     )
 
@@ -604,6 +648,7 @@ async def apublish_content_block_finish(
     index: int,
     content: dict[str, Any] | None = None,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
     data: dict[str, Any] = {
         "event": "content-block-finish",
@@ -611,15 +656,18 @@ async def apublish_content_block_finish(
     }
     if content is not None:
         data["content"] = content
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": data,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": data,
-            },
+            "params": params,
         },
     )
 
@@ -628,18 +676,22 @@ def publish_message_complete(
     thread_id: str,
     *,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "message-finish",
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     thread_protocol_broker.publish(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "message-finish",
-                },
-            },
+            "params": params,
         },
     )
 
@@ -648,18 +700,22 @@ async def apublish_message_complete(
     thread_id: str,
     *,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "event": "message-finish",
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     await _apublish_thread_event(
         thread_id,
         {
             "method": "messages",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "event": "message-finish",
-                },
-            },
+            "params": params,
         },
     )
 
@@ -671,14 +727,22 @@ def publish_message_chunk(
     role: str,
     text: str,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
-    publish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace)
-    publish_content_block_start(thread_id, index=0, content={"type": "text", "text": ""}, namespace=namespace)
+    publish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace, run_id=run_id)
+    publish_content_block_start(
+        thread_id,
+        index=0,
+        content={"type": "text", "text": ""},
+        namespace=namespace,
+        run_id=run_id,
+    )
     publish_content_block_delta(
         thread_id,
         index=0,
         delta={"type": "text-delta", "text": text},
         namespace=namespace,
+        run_id=run_id,
     )
 
 
@@ -687,12 +751,14 @@ def publish_message_chunk_delta(
     *,
     text: str,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
     publish_content_block_delta(
         thread_id,
         index=0,
         delta={"type": "text-delta", "text": text},
         namespace=namespace,
+        run_id=run_id,
     )
 
 
@@ -700,9 +766,10 @@ def publish_message_finish(
     thread_id: str,
     *,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> None:
-    publish_content_block_finish(thread_id, index=0, namespace=namespace)
-    publish_message_complete(thread_id, namespace=namespace)
+    publish_content_block_finish(thread_id, index=0, namespace=namespace, run_id=run_id)
+    publish_message_complete(thread_id, namespace=namespace, run_id=run_id)
 
 
 def _message_blocks(message: dict[str, Any]) -> tuple[str | None, list[dict[str, Any]]]:
@@ -759,11 +826,23 @@ def publish_message_transcript(
             continue
 
         message_id = f"{run_id}:{start_index + index}"
-        publish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace)
+        publish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace, run_id=run_id)
         for block_index, block in enumerate(blocks):
-            publish_content_block_start(thread_id, index=block_index, content=block, namespace=namespace)
-            publish_content_block_finish(thread_id, index=block_index, content=block, namespace=namespace)
-        publish_message_complete(thread_id, namespace=namespace)
+            publish_content_block_start(
+                thread_id,
+                index=block_index,
+                content=block,
+                namespace=namespace,
+                run_id=run_id,
+            )
+            publish_content_block_finish(
+                thread_id,
+                index=block_index,
+                content=block,
+                namespace=namespace,
+                run_id=run_id,
+            )
+        publish_message_complete(thread_id, namespace=namespace, run_id=run_id)
 
 
 async def apublish_message_transcript(
@@ -780,8 +859,20 @@ async def apublish_message_transcript(
             continue
 
         message_id = f"{run_id}:{start_index + index}"
-        await apublish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace)
+        await apublish_message_start(thread_id, message_id=message_id, role=role, namespace=namespace, run_id=run_id)
         for block_index, block in enumerate(blocks):
-            await apublish_content_block_start(thread_id, index=block_index, content=block, namespace=namespace)
-            await apublish_content_block_finish(thread_id, index=block_index, content=block, namespace=namespace)
-        await apublish_message_complete(thread_id, namespace=namespace)
+            await apublish_content_block_start(
+                thread_id,
+                index=block_index,
+                content=block,
+                namespace=namespace,
+                run_id=run_id,
+            )
+            await apublish_content_block_finish(
+                thread_id,
+                index=block_index,
+                content=block,
+                namespace=namespace,
+                run_id=run_id,
+            )
+        await apublish_message_complete(thread_id, namespace=namespace, run_id=run_id)

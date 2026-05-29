@@ -128,8 +128,9 @@ class _ProtocolMessageStreamState:
         open_blocks: dict[int, str] = field(default_factory=dict)
         text_contents: dict[int, str] = field(default_factory=dict)
 
-    def __init__(self, *, thread_id: str) -> None:
+    def __init__(self, *, thread_id: str, run_id: str) -> None:
         self.thread_id = thread_id
+        self.run_id = run_id
         self._open_message_ids: dict[str, _ProtocolMessageStreamState._OpenMessage] = {}
         self.saw_live_messages = False
 
@@ -148,6 +149,7 @@ class _ProtocolMessageStreamState:
                 self.thread_id,
                 index=index,
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             del state.open_blocks[index]
 
@@ -166,6 +168,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 content={"type": "text", "text": ""},
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             state.open_blocks[index] = "text"
         previous_text = state.text_contents.get(index, "")
@@ -178,6 +181,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 delta={"type": "text-delta", "text": delta_text},
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
         state.text_contents[index] = text
 
@@ -197,6 +201,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 content=block,
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             if final:
                 publish_content_block_finish(
@@ -204,6 +209,7 @@ class _ProtocolMessageStreamState:
                     index=index,
                     content=block,
                     namespace=effective_namespace,
+                    run_id=self.run_id,
                 )
                 return
             state.open_blocks[index] = str(block.get("type", "block"))
@@ -214,6 +220,7 @@ class _ProtocolMessageStreamState:
             index=index,
             delta=block,
             namespace=effective_namespace,
+            run_id=self.run_id,
         )
         if final:
             publish_content_block_finish(
@@ -221,6 +228,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 content=block,
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             del state.open_blocks[index]
 
@@ -239,6 +247,7 @@ class _ProtocolMessageStreamState:
                 message_id=message_id,
                 role=role,
                 namespace=namespace,
+                run_id=self.run_id,
             )
             state = self._OpenMessage(
                 role=role,
@@ -317,7 +326,7 @@ class _ProtocolMessageStreamState:
             state = self._open_message_ids.pop(message_id)
             message_namespace = state.namespace or namespace
             self._finish_blocks(state, namespace=message_namespace)
-            publish_message_complete(self.thread_id, namespace=message_namespace)
+            publish_message_complete(self.thread_id, namespace=message_namespace, run_id=self.run_id)
 
     async def afinish_blocks(
         self,
@@ -334,6 +343,7 @@ class _ProtocolMessageStreamState:
                 self.thread_id,
                 index=index,
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             del state.open_blocks[index]
 
@@ -352,6 +362,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 content={"type": "text", "text": ""},
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             state.open_blocks[index] = "text"
         previous_text = state.text_contents.get(index, "")
@@ -364,6 +375,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 delta={"type": "text-delta", "text": delta_text},
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
         state.text_contents[index] = text
 
@@ -383,6 +395,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 content=block,
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             if final:
                 await apublish_content_block_finish(
@@ -390,6 +403,7 @@ class _ProtocolMessageStreamState:
                     index=index,
                     content=block,
                     namespace=effective_namespace,
+                    run_id=self.run_id,
                 )
                 return
             state.open_blocks[index] = str(block.get("type", "block"))
@@ -400,6 +414,7 @@ class _ProtocolMessageStreamState:
             index=index,
             delta=block,
             namespace=effective_namespace,
+            run_id=self.run_id,
         )
         if final:
             await apublish_content_block_finish(
@@ -407,6 +422,7 @@ class _ProtocolMessageStreamState:
                 index=index,
                 content=block,
                 namespace=effective_namespace,
+                run_id=self.run_id,
             )
             del state.open_blocks[index]
 
@@ -425,6 +441,7 @@ class _ProtocolMessageStreamState:
                 message_id=message_id,
                 role=role,
                 namespace=namespace,
+                run_id=self.run_id,
             )
             state = self._OpenMessage(
                 role=role,
@@ -503,7 +520,7 @@ class _ProtocolMessageStreamState:
             state = self._open_message_ids.pop(message_id)
             message_namespace = state.namespace or namespace
             await self.afinish_blocks(state, namespace=message_namespace)
-            await apublish_message_complete(self.thread_id, namespace=message_namespace)
+            await apublish_message_complete(self.thread_id, namespace=message_namespace, run_id=self.run_id)
 
 
 def _protocol_blocks_for_message(message: BaseMessage) -> list[dict[str, Any]]:
@@ -734,7 +751,7 @@ async def execute_run(
     result: Any = None
     interrupt_chunk: Any = None
     interrupt_namespace: list[str] | None = None
-    protocol_messages = _ProtocolMessageStreamState(thread_id=thread_id)
+    protocol_messages = _ProtocolMessageStreamState(thread_id=thread_id, run_id=run_id)
     async for stream_event in graph.astream_events(invocation, config, version="v2"):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):
@@ -804,7 +821,12 @@ async def execute_run(
             if isinstance(normalized_chunk, dict):
                 normalized_chunk.pop("__interrupt__", None)
                 if normalized_chunk:
-                    await apublish_updates_event(thread_id, values=normalized_chunk, namespace=protocol_namespace)
+                    await apublish_updates_event(
+                        thread_id,
+                        values=normalized_chunk,
+                        namespace=protocol_namespace,
+                        run_id=run_id,
+                    )
         if stream_event.get("event") == "on_chain_end" and _is_root_stream_event(stream_event):
             data = stream_event.get("data", {})
             if isinstance(data, dict) and "output" in data:
@@ -818,7 +840,12 @@ async def execute_run(
                         else:
                             await apublish_message_transcript(thread_id, run_id=run_id, messages=messages)
                     await protocol_messages.afinish_all()
-                    await apublish_values_event(thread_id, values=normalized_result, namespace=protocol_namespace)
+                    await apublish_values_event(
+                        thread_id,
+                        values=normalized_result,
+                        namespace=protocol_namespace,
+                        run_id=run_id,
+                    )
 
     if interrupt_chunk is not None:
         if isinstance(result, dict):

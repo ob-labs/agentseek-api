@@ -1,5 +1,6 @@
 from datetime import datetime
 from typing import Any
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -98,13 +99,75 @@ class ThreadRead(BaseModel):
     status: str = "idle"
 
 
-class RunCreate(BaseModel):
+RunStreamMode = Literal[
+    "values",
+    "messages",
+    "messages-tuple",
+    "tasks",
+    "checkpoints",
+    "updates",
+    "events",
+    "debug",
+    "custom",
+]
+RunInterrupt = Literal["*"] | list[str]
+RunDurability = Literal["sync", "async", "exit"]
+RunOnDisconnect = Literal["cancel", "continue"]
+RunOnCompletion = Literal["delete", "keep"]
+RunMultitaskStrategy = Literal["reject", "rollback", "interrupt", "enqueue"]
+RunIfNotExists = Literal["create", "reject"]
+
+
+class RunCreateStateful(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     assistant_id: str
-    input: Any
+    checkpoint: dict[str, Any] | None = None
+    input: Any = None
+    command: dict[str, Any] | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
-    multitask_strategy: str = "enqueue"
+    webhook: str | None = None
+    interrupt_before: RunInterrupt | None = None
+    interrupt_after: RunInterrupt | None = None
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = Field(default_factory=lambda: ["values"])
+    stream_subgraphs: bool = False
+    stream_resumable: bool = False
+    feedback_keys: list[str] | None = None
+    multitask_strategy: RunMultitaskStrategy = "enqueue"
+    if_not_exists: RunIfNotExists = "reject"
+    after_seconds: float | None = None
+    checkpoint_during: bool = False
+    durability: RunDurability = "async"
+
+
+class RunCreateStreamingStateful(RunCreateStateful):
+    on_disconnect: RunOnDisconnect = "continue"
+
+
+class RunCreateStateless(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    assistant_id: str
+    input: Any = None
+    command: dict[str, Any] | None = None
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    webhook: str | None = None
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = Field(default_factory=lambda: ["values"])
+    feedback_keys: list[str] | None = None
+    stream_subgraphs: bool = False
+    stream_resumable: bool = False
+    on_completion: RunOnCompletion = "delete"
+    after_seconds: float | None = None
+    checkpoint_during: bool = False
+    durability: RunDurability = "async"
+
+
+class RunCreateStreamingStateless(RunCreateStateless):
+    on_disconnect: RunOnDisconnect = "continue"
 
 
 class RunsCancelRequest(BaseModel):
