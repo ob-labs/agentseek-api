@@ -8,6 +8,7 @@ from agentseek_api.api import runs as runs_api
 from agentseek_api.api import threads as threads_api
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, RunStreamEvent, Thread
+from agentseek_api.models.api import RunRead
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolEventStreamRequest
 from agentseek_api.services import run_jobs as run_jobs_module
@@ -193,6 +194,91 @@ def test_run_stream_polls_persisted_events_in_redis_mode(client: TestClient, mon
     events = _parse_sse(body)
     assert [event["event"] for event in events] == ["start", "end"]
     assert events[-1]["data"]["status"] == "success"
+
+
+def test_create_run_stream_polls_persisted_protocol_events_in_redis_mode(client: TestClient, monkeypatch) -> None:
+    assistant = client.post("/assistants", json={"name": "persisted-create-stream", "graph_id": "default"})
+    assert assistant.status_code == 200
+    thread = client.post("/threads", json={"metadata": {"case": "persisted-create-stream"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+    assistant_id = assistant.json()["assistant_id"]
+    load_calls = {"count": 0}
+
+    created = RunRead.model_validate(
+        {
+            "run_id": "create-run",
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "status": "pending",
+            "output": None,
+            "metadata": {},
+            "kwargs": {},
+            "multitask_strategy": "enqueue",
+        }
+    )
+    finished = created.model_copy(update={"status": "success", "output": {"ok": True}})
+
+    async def fake_create_run(*args, **kwargs):
+        return created
+
+    async def fake_wait_run(*args, **kwargs):
+        return finished
+
+    async def fake_load_thread_stream_events(
+        requested_thread_id: str,
+        *,
+        channels: list[str],
+        namespaces,
+        depth,
+        after_seq: int = 0,
+    ) -> list[dict[str, object]]:
+        _ = (channels, namespaces, depth)
+        assert requested_thread_id == thread_id
+        load_calls["count"] += 1
+        if load_calls["count"] == 1:
+            return []
+        if load_calls["count"] == 2 and after_seq == 0:
+            return [
+                {
+                    "seq": 1,
+                    "method": "updates",
+                    "params": {"run_id": "create-run", "data": {"output": {"echo": {"message": "created"}}}},
+                }
+            ]
+        return []
+
+    async def fake_is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
+        _ = (run_id, thread_id, user_id)
+        return load_calls["count"] >= 2
+
+    def unexpected_protocol_stream(*args, **kwargs):
+        _ = (args, kwargs)
+
+        async def _iter():
+            raise AssertionError("Redis create-time protocol stream should not subscribe to the API-process broker")
+            yield {}
+
+        return _iter()
+
+    monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(runs_api, "create_run", fake_create_run)
+    monkeypatch.setattr(runs_api, "wait_run", fake_wait_run)
+    monkeypatch.setattr(runs_api, "load_thread_stream_events", fake_load_thread_stream_events)
+    monkeypatch.setattr(runs_api, "_is_run_terminal", fake_is_run_terminal)
+    monkeypatch.setattr(runs_api.thread_protocol_broker, "latest_seq", lambda _thread_id: 0)
+    monkeypatch.setattr(runs_api.thread_protocol_broker, "stream", unexpected_protocol_stream)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={"assistant_id": assistant_id, "input": {"message": "created"}, "stream_mode": "updates"},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse(response.text)
+    assert [event["event"] for event in events] == ["metadata", "updates"]
+    assert events[-1]["data"] == {"output": {"echo": {"message": "created"}}}
 
 
 def test_run_stream_polls_persisted_events_for_terminal_rows_in_redis_mode(client: TestClient, monkeypatch) -> None:

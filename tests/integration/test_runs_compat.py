@@ -72,13 +72,19 @@ def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
     assert streamed.status_code == 200
     assert streamed.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse_events(streamed.text)
-    run_id = events[0]["data"]["run_id"]
-    assert streamed.headers["location"] == f"/threads/{thread_id}/runs/{run_id}/stream"
+    run_id = next(event["data"]["run_id"] for event in events if event["event"] == "metadata")
+    assert streamed.headers["location"] == f"/threads/{thread_id}/runs/{run_id}/stream?stream_mode=updates"
     assert streamed.headers["content-location"] == f"/threads/{thread_id}/runs/{run_id}"
     assert "event: metadata" in streamed.text
     assert "event: updates" in streamed.text
     assert "event: start" not in streamed.text
     assert "event: message_chunk" not in streamed.text
+
+    joined = client.get(streamed.headers["location"])
+    assert joined.status_code == 200
+    assert "event: metadata" in joined.text
+    assert "event: start" not in joined.text
+    assert "event: message_chunk" not in joined.text
 
 
 def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
@@ -102,11 +108,21 @@ def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
     assert streamed.status_code == 200
     assert streamed.headers["content-type"].startswith("text/event-stream")
     events = _parse_sse_events(streamed.text)
-    run_id = events[0]["data"]["run_id"]
-    assert streamed.headers["location"] == f"/runs/{run_id}/stream"
-    assert streamed.headers["content-location"] == f"/runs/{run_id}"
+    run_id = next(event["data"]["run_id"] for event in events if event["event"] == "metadata")
+    stateless_stream_path = streamed.headers["content-location"].strip("/").split("/")
+    assert streamed.headers["location"] == (
+        f"/threads/{stateless_stream_path[1]}/runs/{run_id}/stream?stream_mode=updates"
+    )
+    assert streamed.headers["content-location"] == f"/threads/{stateless_stream_path[1]}/runs/{run_id}"
     assert "event: metadata" in streamed.text
     assert "event: updates" in streamed.text
+
+    joined = client.get(streamed.headers["location"])
+    assert joined.status_code == 200
+    assert "event: metadata" in joined.text
+    fetched = client.get(streamed.headers["content-location"])
+    assert fetched.status_code == 200
+    assert fetched.json()["run_id"] == run_id
 
     batch = client.post(
         "/runs/batch",
@@ -162,6 +178,29 @@ def test_create_run_stream_rejects_unsupported_stream_modes(client: TestClient) 
 
     stateless_response = client.post(
         "/runs/stream",
+        json={"assistant_id": assistant_id, "input": {"message": "bad stateless mode"}, "stream_mode": "events"},
+    )
+    assert stateless_response.status_code == 422
+    assert "Unsupported stream_mode value(s): events" in stateless_response.json()["detail"]
+    assert client.get("/threads").json() == before_threads
+
+
+def test_create_run_wait_rejects_unsupported_stream_modes_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "bad mode"}, "stream_mode": "events"},
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported stream_mode value(s): events" in response.json()["detail"]
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs/wait",
         json={"assistant_id": assistant_id, "input": {"message": "bad stateless mode"}, "stream_mode": "events"},
     )
     assert stateless_response.status_code == 422

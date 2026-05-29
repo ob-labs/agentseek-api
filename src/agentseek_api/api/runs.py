@@ -2,11 +2,12 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Any
+from typing import Annotated, Any
+from urllib.parse import urlencode
 
 from sqlalchemy import delete, select
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
@@ -23,6 +24,7 @@ from agentseek_api.services.run_preparation import (
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import (
     delete_run_stream_events,
+    load_thread_stream_events,
     load_run_stream_events,
     parse_last_event_id,
 )
@@ -117,12 +119,65 @@ def _wait_response_headers(*, thread_id: str, run_id: str) -> dict[str, str]:
     )
 
 
+def _protocol_stream_location(*, thread_id: str, run_id: str, stream_modes: list[str]) -> str:
+    query = urlencode([("stream_mode", mode) for mode in stream_modes], doseq=True)
+    return f"/threads/{thread_id}/runs/{run_id}/stream?{query}"
+
+
 def _interrupt_stream_event_name(stream_modes: list[str]) -> str | None:
     if "updates" in stream_modes:
         return "updates"
     if "values" in stream_modes:
         return "values"
     return None
+
+
+def _protocol_stream_request(*, stream_modes: list[str]):
+    from agentseek_api.models.protocol import ProtocolEventStreamRequest
+
+    return ProtocolEventStreamRequest(channels=stream_modes)
+
+
+async def _iter_persisted_protocol_run_events(
+    *,
+    thread_id: str,
+    run_id: str,
+    stream_modes: list[str],
+    user_id: str,
+    after_seq: int,
+) -> AsyncIterator[dict[str, Any]]:
+    payload = _protocol_stream_request(stream_modes=stream_modes)
+    current_seq = after_seq
+    terminal_idle_polls = 0
+    while True:
+        events = await load_thread_stream_events(
+            thread_id,
+            channels=payload.channels,
+            namespaces=payload.namespaces,
+            depth=payload.depth,
+            after_seq=current_seq,
+        )
+        matching_events = [event for event in events if event.get("params", {}).get("run_id") == run_id]
+        if matching_events:
+            terminal_idle_polls = 0
+            for event in matching_events:
+                current_seq = max(current_seq, int(event.get("seq", 0)))
+                yield event
+            continue
+
+        if await _is_run_terminal(run_id=run_id, thread_id=thread_id, user_id=user_id):
+            terminal_idle_polls += 1
+            if terminal_idle_polls >= REDIS_STREAM_TERMINAL_IDLE_POLLS:
+                return
+        else:
+            terminal_idle_polls = 0
+
+        await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
+
+
+def _protocol_event_sse(*, event_name: str, data: Any, seq: int | None = None) -> str:
+    prefix = f"id: {seq}\n" if seq is not None else ""
+    return f"{prefix}event: {event_name}\ndata: {json.dumps(data)}\n\n"
 
 
 def _build_create_run_stream_response(
@@ -134,40 +189,80 @@ def _build_create_run_stream_response(
     after_seq: int,
     location: str,
     content_location: str,
+    include_metadata: bool = True,
 ) -> StreamingResponse:
     protocol_channels = [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
 
     async def _event_iter() -> AsyncIterator[str]:
         current_seq = after_seq
-        metadata = json.dumps({"run_id": created.run_id, "attempt": 1})
-        yield f"event: metadata\ndata: {metadata}\n\n"
+        if include_metadata:
+            yield _protocol_event_sse(event_name="metadata", data={"run_id": created.run_id, "attempt": 1})
 
-        async for event in thread_protocol_broker.stream(
+        for event in await load_thread_stream_events(
             thread_id,
             channels=protocol_channels,
             namespaces=None,
             depth=None,
-            since=after_seq,
+            after_seq=after_seq,
         ):
-            event_run_id = event.get("params", {}).get("run_id")
-            if event_run_id != created.run_id:
+            if event.get("params", {}).get("run_id") != created.run_id:
                 continue
-            method = str(event.get("method", "message"))
-            payload_data = event.get("params", {}).get("data", {})
             current_seq = max(current_seq, int(event.get("seq", 0)))
-            yield f"id: {current_seq}\nevent: {method}\ndata: {json.dumps(payload_data)}\n\n"
+            yield _protocol_event_sse(
+                seq=current_seq,
+                event_name=str(event.get("method", "message")),
+                data=event.get("params", {}).get("data", {}),
+            )
+
+        if _uses_redis_executor():
+            async for event in _iter_persisted_protocol_run_events(
+                thread_id=thread_id,
+                run_id=created.run_id,
+                stream_modes=protocol_channels,
+                user_id=user.identity,
+                after_seq=current_seq,
+            ):
+                current_seq = max(current_seq, int(event.get("seq", 0)))
+                yield _protocol_event_sse(
+                    seq=current_seq,
+                    event_name=str(event.get("method", "message")),
+                    data=event.get("params", {}).get("data", {}),
+                )
+        else:
+            async for event in thread_protocol_broker.stream(
+                thread_id,
+                channels=protocol_channels,
+                namespaces=None,
+                depth=None,
+                since=current_seq,
+            ):
+                event_run_id = event.get("params", {}).get("run_id")
+                if event_run_id != created.run_id:
+                    continue
+                current_seq = max(current_seq, int(event.get("seq", 0)))
+                yield _protocol_event_sse(
+                    seq=current_seq,
+                    event_name=str(event.get("method", "message")),
+                    data=event.get("params", {}).get("data", {}),
+                )
 
         final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
         if final_run.status == "error":
             current_seq += 1
-            payload = json.dumps({"error": final_run.last_error, "run_id": created.run_id})
-            yield f"id: {current_seq}\nevent: error\ndata: {payload}\n\n"
+            yield _protocol_event_sse(
+                seq=current_seq,
+                event_name="error",
+                data={"error": final_run.last_error, "run_id": created.run_id},
+            )
             return
         interrupt_event = _interrupt_stream_event_name(stream_modes)
         if final_run.status == "interrupted" and final_run.interrupts and interrupt_event is not None:
             current_seq += 1
-            payload = json.dumps({"__interrupt__": final_run.interrupts})
-            yield f"id: {current_seq}\nevent: {interrupt_event}\ndata: {payload}\n\n"
+            yield _protocol_event_sse(
+                seq=current_seq,
+                event_name=interrupt_event,
+                data={"__interrupt__": final_run.interrupts},
+            )
 
     return StreamingResponse(
         _event_iter(),
@@ -292,6 +387,7 @@ async def create_run_wait(
     payload: RunCreateStreamingStateful,
     user: User = Depends(get_current_user),
 ) -> JSONResponse:
+    _normalize_stream_modes(payload.stream_mode)
     created = await create_run(thread_id, payload, user)
     final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
     return JSONResponse(
@@ -327,7 +423,7 @@ async def create_run_stream(
         user=user,
         stream_modes=stream_modes,
         after_seq=after_seq,
-        location=f"/threads/{thread_id}/runs/{created.run_id}/stream",
+        location=_protocol_stream_location(thread_id=thread_id, run_id=created.run_id, stream_modes=stream_modes),
         content_location=f"/threads/{thread_id}/runs/{created.run_id}",
     )
 
@@ -402,6 +498,7 @@ async def stream_run(
     run_id: str,
     user: User = Depends(get_current_user),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
+    stream_mode: Annotated[list[str] | None, Query()] = None,
 ) -> StreamingResponse:
     try:
         after_seq = parse_last_event_id(last_event_id) or 0
@@ -414,6 +511,19 @@ async def stream_run(
         )
         if row is None:
             raise HTTPException(status_code=404, detail="Run not found")
+        if stream_mode is not None:
+            stream_modes = _normalize_stream_modes(stream_mode)
+            created = _to_read_model(row)
+            return _build_create_run_stream_response(
+                thread_id=thread_id,
+                created=created,
+                user=user,
+                stream_modes=stream_modes,
+                after_seq=after_seq,
+                location=_protocol_stream_location(thread_id=thread_id, run_id=run_id, stream_modes=stream_modes),
+                content_location=f"/threads/{thread_id}/runs/{run_id}",
+                include_metadata=after_seq == 0,
+            )
 
     async def _event_iter() -> AsyncIterator[str]:
         current_seq = after_seq

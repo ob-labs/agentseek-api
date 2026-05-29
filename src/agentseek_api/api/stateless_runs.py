@@ -21,6 +21,7 @@ from agentseek_api.services.thread_service import create_thread_for_user
 from agentseek_api.api.runs import (
     _build_create_run_stream_response,
     _normalize_stream_modes,
+    _protocol_stream_location,
     _stream_response_headers,
     _wait_response_payload,
     create_run,
@@ -57,6 +58,7 @@ async def create_stateless_run(payload: RunCreateStateless, user: User = Depends
     },
 )
 async def create_stateless_run_wait(payload: RunCreateStreamingStateless, user: User = Depends(get_current_user)) -> JSONResponse:
+    _normalize_stream_modes(payload.stream_mode)
     created = await create_stateless_run(payload, user)
     final_run = created if created.status in {"success", "error", "interrupted"} else await wait_run(created.thread_id, created.run_id, user)
     return JSONResponse(
@@ -91,8 +93,8 @@ async def create_stateless_run_stream(payload: RunCreateStreamingStateless, user
         user=user,
         stream_modes=stream_modes,
         after_seq=0,
-        location=f"/runs/{created.run_id}/stream",
-        content_location=f"/runs/{created.run_id}",
+        location=_protocol_stream_location(thread_id=thread.thread_id, run_id=created.run_id, stream_modes=stream_modes),
+        content_location=f"/threads/{thread.thread_id}/runs/{created.run_id}",
     )
 
 
