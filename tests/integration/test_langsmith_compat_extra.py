@@ -134,7 +134,8 @@ def test_run_join_and_delete_endpoints(client: TestClient) -> None:
 
     joined = client.get(f"/threads/{thread_id}/runs/{run_id}/join")
     assert joined.status_code == 200
-    assert joined.json()["run_id"] == run_id
+    assert joined.headers["content-location"] == f"/threads/{thread_id}/runs/{run_id}"
+    assert joined.json()["output"] == {"echo": {"message": "join me"}}
 
     deleted = client.delete(f"/threads/{thread_id}/runs/{run_id}")
     assert deleted.status_code == 204

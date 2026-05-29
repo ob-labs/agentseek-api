@@ -64,6 +64,10 @@ def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
     wait_run_id = waited.headers["content-location"].rpartition("/")[2]
     assert waited.headers["content-location"] == f"/threads/{thread_id}/runs/{wait_run_id}"
     assert waited.headers["location"] == f"/threads/{thread_id}/runs/{wait_run_id}/join"
+    joined_wait = client.get(waited.headers["location"])
+    assert joined_wait.status_code == 200
+    assert joined_wait.headers["content-location"] == waited.headers["content-location"]
+    assert joined_wait.json() == waited_body
 
     streamed = client.post(
         f"/threads/{thread_id}/runs/stream",
@@ -100,6 +104,10 @@ def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
     assert stateless_wait_path[0] == "threads"
     assert stateless_wait_path[2] == "runs"
     assert waited.headers["location"] == f"/threads/{stateless_wait_path[1]}/runs/{stateless_wait_path[3]}/join"
+    joined_wait = client.get(waited.headers["location"])
+    assert joined_wait.status_code == 200
+    assert joined_wait.headers["content-location"] == waited.headers["content-location"]
+    assert joined_wait.json() == waited_body
 
     streamed = client.post(
         "/runs/stream",
@@ -235,6 +243,28 @@ def test_create_run_stream_messages_tuple_mode_aliases_to_messages(client: TestC
 
     assert response.status_code == 200
     events = _parse_sse_events(response.text)
+    message_events = [event for event in events if event["event"] == "messages"]
+    assert message_events
+    assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
+
+
+def test_join_stream_accepts_official_json_array_stream_mode_query(client: TestClient) -> None:
+    assistant_id = _create_assistant(client, graph_id="react_agent")
+    thread_id = _create_thread(client)
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "json array query"}},
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    streamed = client.get(
+        f"/threads/{thread_id}/runs/{run_id}/stream",
+        params={"stream_mode": json.dumps(["messages-tuple"])},
+    )
+
+    assert streamed.status_code == 200
+    events = _parse_sse_events(streamed.text)
     message_events = [event for event in events if event["event"] == "messages"]
     assert message_events
     assert any(event["data"]["event"] == "content-block-delta" for event in message_events)

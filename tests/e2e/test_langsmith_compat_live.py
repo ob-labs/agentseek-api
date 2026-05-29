@@ -729,7 +729,8 @@ async def test_live_run_and_stateless_endpoints(e2e_base_url: str) -> None:
 
         joined = await client.get(f"/threads/{thread_id}/runs/{run_id}/join", headers=_user_headers(user_id))
         assert joined.status_code == 200
-        assert joined.json()["status"] == "success"
+        assert joined.headers["content-location"] == f"/threads/{thread_id}/runs/{run_id}"
+        assert joined.json()["output"] == {"echo": {"message": "run-create"}}
 
         streamed = await client.get(f"/threads/{thread_id}/runs/{run_id}/stream", headers=_user_headers(user_id))
         assert streamed.status_code == 200

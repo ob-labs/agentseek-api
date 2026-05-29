@@ -94,6 +94,22 @@ def _normalize_stream_modes(stream_mode: str | list[str] | None) -> list[str]:
     return modes
 
 
+def _parse_stream_mode_query_param(stream_mode: list[str] | None) -> list[str] | None:
+    if stream_mode is None:
+        return None
+    if len(stream_mode) == 1:
+        raw_value = stream_mode[0].strip()
+        if raw_value.startswith("["):
+            try:
+                parsed = json.loads(raw_value)
+            except json.JSONDecodeError:
+                parsed = None
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+        return [raw_value]
+    return [value.strip() for value in stream_mode]
+
+
 async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
     if run.status == "interrupted" and run.interrupts:
         return {"__interrupt__": run.interrupts}
@@ -471,9 +487,25 @@ async def cancel_run(
     return {}
 
 
-@router.get("/{run_id}/join", response_model=RunRead)
-async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
-    return await wait_run(thread_id, run_id, user)
+@router.get(
+    "/{run_id}/join",
+    response_class=JSONResponse,
+    responses={
+        200: {
+            "content": {"application/json": {"schema": {}}},
+            "headers": {
+                "Location": {"schema": {"type": "string"}},
+                "Content-Location": {"schema": {"type": "string"}},
+            },
+        }
+    },
+)
+async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
+    run = await wait_run(thread_id, run_id, user)
+    return JSONResponse(
+        await _wait_response_payload(run, user=user),
+        headers=_wait_response_headers(thread_id=thread_id, run_id=run_id),
+    )
 
 
 @router.delete("/{run_id}", status_code=204)
@@ -512,7 +544,7 @@ async def stream_run(
         if row is None:
             raise HTTPException(status_code=404, detail="Run not found")
         if stream_mode is not None:
-            stream_modes = _normalize_stream_modes(stream_mode)
+            stream_modes = _normalize_stream_modes(_parse_stream_mode_query_param(stream_mode))
             created = _to_read_model(row)
             return _build_create_run_stream_response(
                 thread_id=thread_id,
@@ -560,4 +592,11 @@ async def stream_run(
             event_payload = {"run_id": run_id, **event}
             yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
 
-    return StreamingResponse(_event_iter(), media_type="text/event-stream")
+    return StreamingResponse(
+        _event_iter(),
+        media_type="text/event-stream",
+        headers=_stream_response_headers(
+            location=f"/threads/{thread_id}/runs/{run_id}/stream",
+            content_location=f"/threads/{thread_id}/runs/{run_id}",
+        ),
+    )
