@@ -160,7 +160,7 @@ class RunCreateStateless(BaseModel):
     feedback_keys: list[str] | None = None
     stream_subgraphs: bool = False
     stream_resumable: bool = False
-    on_completion: RunOnCompletion = "delete"
+    on_completion: RunOnCompletion = "keep"
     after_seconds: float | None = None
     checkpoint_during: bool = False
     durability: RunDurability = "async"

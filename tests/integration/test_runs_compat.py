@@ -279,11 +279,6 @@ def test_create_run_wait_and_stream_accept_official_contract_fields(client: Test
         json={
             "assistant_id": assistant_id,
             "on_disconnect": "continue",
-            "interrupt_before": ["node-a"],
-            "interrupt_after": "*",
-            "stream_subgraphs": True,
-            "stream_resumable": True,
-            "feedback_keys": ["thumbs-up"],
             "durability": "async",
             "input": {"message": "official stateful wait"},
         },
@@ -295,17 +290,121 @@ def test_create_run_wait_and_stream_accept_official_contract_fields(client: Test
         "/runs/wait",
         json={
             "assistant_id": assistant_id,
-            "on_disconnect": "cancel",
+            "on_disconnect": "continue",
             "on_completion": "keep",
-            "stream_subgraphs": True,
-            "stream_resumable": True,
-            "feedback_keys": ["thumbs-up"],
-            "durability": "exit",
+            "durability": "async",
             "input": {"message": "official stateless wait"},
         },
     )
     assert stateless_wait.status_code == 200
     assert stateless_wait.json()["output"] == {"echo": {"message": "official stateless wait"}}
+
+
+def test_create_run_rejects_unsupported_official_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs",
+        json={
+            "assistant_id": assistant_id,
+            "command": {"resume": "ignored"},
+            "interrupt_before": ["node-a"],
+            "stream_subgraphs": True,
+            "input": {"message": "bad controls"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported run control field(s)" in response.json()["detail"]
+    assert "command" in response.json()["detail"]
+    assert "interrupt_before" in response.json()["detail"]
+    assert "stream_subgraphs" in response.json()["detail"]
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs",
+        json={
+            "assistant_id": assistant_id,
+            "on_completion": "delete",
+            "durability": "exit",
+            "input": {"message": "bad stateless controls"},
+        },
+    )
+    assert stateless_response.status_code == 422
+    assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
+    assert "durability" in stateless_response.json()["detail"]
+    assert "on_completion" in stateless_response.json()["detail"]
+    assert client.get("/threads").json() == before_threads
+
+
+def test_create_run_wait_rejects_unsupported_official_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "on_disconnect": "cancel",
+            "feedback_keys": ["thumbs-up"],
+            "input": {"message": "bad wait controls"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported run control field(s)" in response.json()["detail"]
+    assert "feedback_keys" in response.json()["detail"]
+    assert "on_disconnect" in response.json()["detail"]
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "stream_resumable": True,
+            "input": {"message": "bad stateless wait controls"},
+        },
+    )
+    assert stateless_response.status_code == 422
+    assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
+    assert "stream_resumable" in stateless_response.json()["detail"]
+    assert client.get("/threads").json() == before_threads
+
+
+def test_create_run_stream_rejects_unsupported_official_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "after_seconds": 1,
+            "input": {"message": "bad stream controls"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unsupported run control field(s)" in response.json()["detail"]
+    assert "after_seconds" in response.json()["detail"]
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "on_completion": "delete",
+            "input": {"message": "bad stateless stream controls"},
+        },
+    )
+    assert stateless_response.status_code == 422
+    assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
+    assert "on_completion" in stateless_response.json()["detail"]
+    assert client.get("/threads").json() == before_threads
 
 
 def test_create_run_stream_filters_protocol_events_to_created_run(client: TestClient, monkeypatch) -> None:

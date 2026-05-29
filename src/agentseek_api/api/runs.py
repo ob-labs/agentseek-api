@@ -110,6 +110,49 @@ def _parse_stream_mode_query_param(stream_mode: list[str] | None) -> list[str] |
     return [value.strip() for value in stream_mode]
 
 
+def _validate_supported_run_controls(payload: Any, *, stateless: bool) -> None:
+    unsupported_controls: list[str] = []
+
+    if getattr(payload, "checkpoint", None) is not None:
+        unsupported_controls.append("checkpoint")
+    if getattr(payload, "command", None) is not None:
+        unsupported_controls.append("command")
+    if getattr(payload, "webhook", None) is not None:
+        unsupported_controls.append("webhook")
+    if getattr(payload, "interrupt_before", None) is not None:
+        unsupported_controls.append("interrupt_before")
+    if getattr(payload, "interrupt_after", None) is not None:
+        unsupported_controls.append("interrupt_after")
+    if bool(getattr(payload, "stream_subgraphs", False)):
+        unsupported_controls.append("stream_subgraphs")
+    if bool(getattr(payload, "stream_resumable", False)):
+        unsupported_controls.append("stream_resumable")
+    if getattr(payload, "feedback_keys", None):
+        unsupported_controls.append("feedback_keys")
+    if getattr(payload, "if_not_exists", "reject") != "reject":
+        unsupported_controls.append("if_not_exists")
+    if getattr(payload, "after_seconds", None) is not None:
+        unsupported_controls.append("after_seconds")
+    if bool(getattr(payload, "checkpoint_during", False)):
+        unsupported_controls.append("checkpoint_during")
+    if getattr(payload, "durability", "async") != "async":
+        unsupported_controls.append("durability")
+    if getattr(payload, "on_disconnect", "continue") == "cancel":
+        unsupported_controls.append("on_disconnect")
+    if stateless and getattr(payload, "on_completion", "keep") != "keep":
+        unsupported_controls.append("on_completion")
+
+    if unsupported_controls:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "Unsupported run control field(s): "
+                f"{', '.join(sorted(unsupported_controls))}. "
+                "These controls are not implemented by agentseek-api."
+            ),
+        )
+
+
 async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
     if run.status == "interrupted" and run.interrupts:
         return {"__interrupt__": run.interrupts}
@@ -326,6 +369,7 @@ async def _iter_persisted_run_records(
 
 @router.post("", response_model=RunRead)
 async def create_run(thread_id: str, payload: RunCreateStateful, user: User = Depends(get_current_user)) -> RunRead:
+    _validate_supported_run_controls(payload, stateless=False)
     try:
         row = await prepare_and_submit_run(
             thread_id=thread_id,

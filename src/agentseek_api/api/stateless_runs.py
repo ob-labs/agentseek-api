@@ -23,6 +23,7 @@ from agentseek_api.api.runs import (
     _normalize_stream_modes,
     _protocol_stream_location,
     _stream_response_headers,
+    _validate_supported_run_controls,
     _wait_response_payload,
     create_run,
     wait_run,
@@ -40,6 +41,7 @@ async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
 
 @router.post("", response_model=RunRead)
 async def create_stateless_run(payload: RunCreateStateless, user: User = Depends(get_current_user)) -> RunRead:
+    _validate_supported_run_controls(payload, stateless=True)
     thread = await create_thread_for_user(payload=ThreadCreate(metadata={"stateless": True}), user=user)
     return await create_run(thread.thread_id, payload, user)
 
@@ -85,6 +87,7 @@ async def create_stateless_run_wait(payload: RunCreateStreamingStateless, user: 
 )
 async def create_stateless_run_stream(payload: RunCreateStreamingStateless, user: User = Depends(get_current_user)):
     stream_modes = _normalize_stream_modes(payload.stream_mode)
+    _validate_supported_run_controls(payload, stateless=True)
     thread = await create_thread_for_user(payload=ThreadCreate(metadata={"stateless": True}), user=user)
     created = await create_run(thread.thread_id, payload, user)
     return _build_create_run_stream_response(
