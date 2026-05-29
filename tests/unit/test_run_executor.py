@@ -794,7 +794,7 @@ def test_protocol_message_stream_state_merges_open_messages_against_transcript_t
     protocol_broker = ThreadProtocolEventBroker()
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    state = _ProtocolMessageStreamState(thread_id="t1")
+    state = _ProtocolMessageStreamState(thread_id="t1", run_id="r1")
     state.publish_blocks(message_id="m1", role="ai", blocks=[{"type": "text", "text": "hel"}])
     state.merge_final_messages(
         messages=[
