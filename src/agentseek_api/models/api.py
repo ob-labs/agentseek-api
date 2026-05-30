@@ -119,7 +119,7 @@ RunIfNotExists = Literal["create", "reject"]
 
 
 class RunCreateStateful(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     assistant_id: str
     checkpoint: dict[str, Any] | None = None
@@ -147,7 +147,7 @@ class RunCreateStreamingStateful(RunCreateStateful):
 
 
 class RunCreateStateless(BaseModel):
-    model_config = ConfigDict(extra="allow")
+    model_config = ConfigDict(extra="forbid")
 
     assistant_id: str
     input: Any = None

@@ -427,6 +427,96 @@ def test_create_run_stream_rejects_unsupported_official_control_fields_before_si
     assert client.get("/threads").json() == before_threads
 
 
+def test_create_run_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs",
+        json={
+            "assistant_id": assistant_id,
+            "stream_mod": "updates",
+            "input": {"message": "bad unknown create control"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs",
+        json={
+            "assistant_id": assistant_id,
+            "onDisconect": "cancel",
+            "input": {"message": "bad unknown stateless create control"},
+        },
+    )
+
+    assert stateless_response.status_code == 422
+    assert client.get("/threads").json() == before_threads
+
+
+def test_create_run_wait_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "stream_mod": "updates",
+            "input": {"message": "bad unknown wait control"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "onDisconect": "cancel",
+            "input": {"message": "bad unknown stateless wait control"},
+        },
+    )
+
+    assert stateless_response.status_code == 422
+    assert client.get("/threads").json() == before_threads
+
+
+def test_create_run_stream_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "stream_mod": "updates",
+            "input": {"message": "bad unknown stream control"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "onDisconect": "cancel",
+            "input": {"message": "bad unknown stateless stream control"},
+        },
+    )
+
+    assert stateless_response.status_code == 422
+    assert client.get("/threads").json() == before_threads
+
+
 def test_create_run_stream_filters_protocol_events_to_created_run(client: TestClient, monkeypatch) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
