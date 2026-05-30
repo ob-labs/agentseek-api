@@ -162,7 +162,10 @@ async def test_live_provider_create_time_wait_and_stream_match_langgraph_contrac
         waited_body = waited_create.json()
         assert "run_id" not in waited_body
         assert "status" not in waited_body
-        assert waited_body["output"]["final_text"]
+        messages = waited_body.get("messages")
+        assert isinstance(messages, list)
+        assert len(messages) >= 2
+        assert _text_from_content(messages[-1].get("content") if isinstance(messages[-1], dict) else "").strip()
         wait_run_id = waited_create.headers["content-location"].rpartition("/")[2]
         assert waited_create.headers["content-location"] == f"/threads/{thread_id}/runs/{wait_run_id}"
         assert waited_create.headers["location"] == f"/threads/{thread_id}/runs/{wait_run_id}/join"
