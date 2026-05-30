@@ -99,9 +99,15 @@ def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
 
     joined = client.get(streamed.headers["location"])
     assert joined.status_code == 200
-    assert "event: metadata" in joined.text
+    joined_events = _parse_sse_events(joined.text)
+    assert [event["event"] for event in joined_events] == ["metadata"]
     assert "event: start" not in joined.text
     assert "event: message_chunk" not in joined.text
+
+    replayed = client.get(streamed.headers["location"], headers={"Last-Event-ID": "0"})
+    assert replayed.status_code == 200
+    replayed_events = _parse_sse_events(replayed.text)
+    assert "updates" in {event["event"] for event in replayed_events}
 
 
 def test_join_run_stays_bound_to_waited_run_after_newer_run_on_same_thread(client: TestClient) -> None:
@@ -199,7 +205,8 @@ def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
 
     joined = client.get(streamed.headers["location"])
     assert joined.status_code == 200
-    assert "event: metadata" in joined.text
+    joined_events = _parse_sse_events(joined.text)
+    assert [event["event"] for event in joined_events] == ["metadata"]
     fetched = client.get(streamed.headers["content-location"])
     assert fetched.status_code == 200
     assert fetched.json()["run_id"] == run_id
@@ -320,7 +327,7 @@ def test_create_run_stream_messages_tuple_mode_aliases_to_messages(client: TestC
     assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
 
 
-def test_join_stream_accepts_official_json_array_stream_mode_query(client: TestClient) -> None:
+def test_join_stream_accepts_official_json_array_stream_mode_query_without_replay(client: TestClient) -> None:
     assistant_id = _create_assistant(client, graph_id="react_agent")
     thread_id = _create_thread(client)
     created = client.post(
@@ -337,9 +344,7 @@ def test_join_stream_accepts_official_json_array_stream_mode_query(client: TestC
 
     assert streamed.status_code == 200
     events = _parse_sse_events(streamed.text)
-    message_events = [event for event in events if event["event"] == "messages"]
-    assert message_events
-    assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
+    assert [event["event"] for event in events] == ["metadata"]
 
 
 def test_join_stream_rejects_blank_stream_mode_query(client: TestClient) -> None:

@@ -337,6 +337,7 @@ def _build_create_run_stream_response(
     location: str,
     content_location: str,
     include_metadata: bool = True,
+    replay_existing: bool = True,
 ) -> StreamingResponse:
     protocol_channels = _protocol_channels_for_stream_modes(
         [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
@@ -354,9 +355,11 @@ def _build_create_run_stream_response(
             depth=None,
             after_seq=after_seq,
         ):
+            current_seq = max(current_seq, int(event.get("seq", 0)))
             if event.get("params", {}).get("run_id") != created.run_id:
                 continue
-            current_seq = max(current_seq, int(event.get("seq", 0)))
+            if not replay_existing:
+                continue
             yield _protocol_event_sse(
                 seq=current_seq,
                 event_name=str(event.get("method", "message")),
@@ -692,9 +695,11 @@ async def stream_run(
     stream_mode: Annotated[list[str] | None, Query()] = None,
 ) -> StreamingResponse:
     try:
-        after_seq = parse_last_event_id(last_event_id) or 0
+        parsed_last_event_id = parse_last_event_id(last_event_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    after_seq = parsed_last_event_id or 0
+    replay_existing = parsed_last_event_id is not None
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(
@@ -714,6 +719,7 @@ async def stream_run(
                 location=_protocol_stream_location(thread_id=thread_id, run_id=run_id, stream_modes=stream_modes),
                 content_location=f"/threads/{thread_id}/runs/{run_id}",
                 include_metadata=after_seq == 0,
+                replay_existing=replay_existing,
             )
 
     async def _event_iter() -> AsyncIterator[str]:
