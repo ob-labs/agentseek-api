@@ -88,9 +88,7 @@ async def test_live_provider_streaming_http_flow(live_provider_base_url: str) ->
         assert run.status_code == 200
         run_id = run.json()["run_id"]
 
-        waited = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers=user_headers(user_id))
-        assert waited.status_code == 200
-        waited_body = waited.json()
+        waited_body = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
         assert waited_body["status"] == "success"
         assert waited_body["output"]["final_text"]
 
@@ -151,8 +149,7 @@ async def test_live_provider_create_time_wait_and_stream_match_langgraph_contrac
                 "durability": "async",
                 "input": {
                     "message": (
-                        "Explain why create-time wait contract coverage matters in exactly two sentences, "
-                        "using at least forty words and no bullet points."
+                        "Reply with one short sentence about create-time wait coverage."
                     )
                 },
             },
@@ -181,8 +178,7 @@ async def test_live_provider_create_time_wait_and_stream_match_langgraph_contrac
                 "assistant_id": assistant_id,
                 "input": {
                     "message": (
-                        "Explain why create-time stream contract coverage matters in exactly two sentences, "
-                        "using at least forty words and no bullet points."
+                        "Reply with one short sentence about create-time stream coverage."
                     )
                 },
                 "stream_mode": "updates",
@@ -272,9 +268,7 @@ async def test_live_provider_store_endpoints_and_graph(live_provider_base_url: s
         assert run.status_code == 200
         run_id = run.json()["run_id"]
 
-        waited = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers=user_headers(user_id))
-        assert waited.status_code == 200
-        waited_body = waited.json()
+        waited_body = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
         assert waited_body["status"] == "success"
         assert waited_body["output"]["namespace"] == ["graph", "memory"]
         assert waited_body["output"]["key"] == memory_key
