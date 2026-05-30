@@ -16,7 +16,7 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
 from agentseek_api.models.auth import User
-from agentseek_api.api.threads import get_thread_state
+from agentseek_api.api.threads import _find_thread_state_payload, _get_thread_state_at_checkpoint, get_thread_state
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
@@ -39,6 +39,7 @@ REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
 SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages"}
 RUN_STREAM_MODE_ALIASES = {"messages-tuple": "messages"}
+RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
 
 
 async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
@@ -64,10 +65,16 @@ def _to_read_model(run: Run) -> RunRead:
         last_error=run.last_error,
         created_at=run.created_at,
         updated_at=run.updated_at,
-        metadata=run.metadata_json,
+        metadata=_public_run_metadata(run.metadata_json),
         kwargs=run.kwargs_json,
         multitask_strategy=run.multitask_strategy,
     )
+
+
+def _public_run_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    return {key: value for key, value in metadata.items() if key != RUN_CHECKPOINT_ID_METADATA_KEY}
 
 
 def _uses_redis_executor() -> bool:
@@ -170,10 +177,30 @@ async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
         return {"__interrupt__": run.interrupts}
     if run.status == "error":
         return {"__error__": run.last_error} if run.last_error else {}
-    state = await get_thread_state(run.thread_id, user)
+    checkpoint_id = await _load_run_checkpoint_id(run_id=run.run_id, thread_id=run.thread_id, user_id=user.identity)
+    if checkpoint_id is not None:
+        state = await _get_thread_state_at_checkpoint(thread_id=run.thread_id, checkpoint_id=checkpoint_id, user=user)
+    else:
+        state = await _find_thread_state_payload(thread_id=run.thread_id, user=user, checkpoint_ns=run.run_id)
+        if state is None:
+            state = await get_thread_state(run.thread_id, user)
     if isinstance(state, dict) and "values" in state:
         return state["values"]
     return {}
+
+
+async def _load_run_checkpoint_id(*, run_id: str, thread_id: str, user_id: str) -> str | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user_id)
+        )
+        if row is None or not isinstance(row.metadata_json, dict):
+            return None
+        checkpoint_id = row.metadata_json.get(RUN_CHECKPOINT_ID_METADATA_KEY)
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
+            return None
+        return checkpoint_id
 
 
 async def _wait_json_response(
@@ -218,7 +245,14 @@ def _interrupt_stream_event_name(stream_modes: list[str]) -> str | None:
 def _protocol_stream_request(*, stream_modes: list[str]):
     from agentseek_api.models.protocol import ProtocolEventStreamRequest
 
-    return ProtocolEventStreamRequest(channels=stream_modes)
+    return ProtocolEventStreamRequest(channels=_protocol_channels_for_stream_modes(stream_modes))
+
+
+def _protocol_channels_for_stream_modes(stream_modes: list[str]) -> list[str]:
+    channels = list(stream_modes)
+    if "input" not in channels:
+        channels.append("input")
+    return channels
 
 
 async def _iter_persisted_protocol_run_events(
@@ -274,7 +308,9 @@ def _build_create_run_stream_response(
     content_location: str,
     include_metadata: bool = True,
 ) -> StreamingResponse:
-    protocol_channels = [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
+    protocol_channels = _protocol_channels_for_stream_modes(
+        [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
+    )
 
     async def _event_iter() -> AsyncIterator[str]:
         current_seq = after_seq

@@ -860,6 +860,7 @@ async def execute_run(
                 interrupt_id=str(item.get("id", "")),
                 payload=item.get("value"),
                 namespace=interrupt_namespace,
+                run_id=run_id,
             )
 
     output = entry.extract_output(result, payload)

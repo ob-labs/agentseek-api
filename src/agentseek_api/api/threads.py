@@ -245,6 +245,59 @@ def _empty_thread_state_payload(thread: Thread) -> dict[str, object]:
     }
 
 
+def _checkpoint_namespace(payload: dict[str, object]) -> str:
+    checkpoint = payload.get("checkpoint")
+    if not isinstance(checkpoint, dict):
+        return ""
+    checkpoint_ns = checkpoint.get("checkpoint_ns", "")
+    return str(checkpoint_ns) if checkpoint_ns is not None else ""
+
+
+async def _find_thread_state_payload(
+    *,
+    thread_id: str,
+    user: User,
+    checkpoint_ns: str | None = None,
+) -> dict[str, object] | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        if thread is None:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        runs = (
+            await session.scalars(
+                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
+            )
+        ).all()
+    visible = _visible_checkpoint_payloads(
+        thread,
+        runs,
+        [checkpoint_to_payload(item) for item in await list_checkpoints(thread_id)],
+    )
+    if checkpoint_ns is not None:
+        visible = [payload for payload in visible if _checkpoint_namespace(payload) == checkpoint_ns]
+    if not visible:
+        return None
+    return visible[0]
+
+
+async def _get_thread_state_payload(
+    *,
+    thread_id: str,
+    user: User,
+    checkpoint_ns: str | None = None,
+) -> dict[str, object]:
+    payload = await _find_thread_state_payload(thread_id=thread_id, user=user, checkpoint_ns=checkpoint_ns)
+    if payload is not None:
+        return payload
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        if thread is None:
+            raise HTTPException(status_code=404, detail="Thread not found")
+        return _empty_thread_state_payload(thread)
+
+
 @router.post("", response_model=ThreadRead)
 async def create_thread(payload: ThreadCreate, user: User = Depends(get_current_user)) -> ThreadRead:
     session_factory = db_manager.get_session_factory()
@@ -437,25 +490,7 @@ async def copy_thread(thread_id: str, user: User = Depends(get_current_user)) ->
 
 @router.get("/{thread_id}/state")
 async def get_thread_state(thread_id: str, user: User = Depends(get_current_user)) -> dict[str, object]:
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
-        if thread is None:
-            raise HTTPException(status_code=404, detail="Thread not found")
-        runs = (
-            await session.scalars(
-                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
-            )
-        ).all()
-    checkpoints = await list_checkpoints(thread_id)
-    visible = _visible_checkpoint_payloads(
-        thread,
-        runs,
-        [checkpoint_to_payload(item) for item in checkpoints],
-    )
-    if not visible:
-        return _empty_thread_state_payload(thread)
-    return visible[0]
+    return await _get_thread_state_payload(thread_id=thread_id, user=user)
 
 
 @router.get("/{thread_id}/history")

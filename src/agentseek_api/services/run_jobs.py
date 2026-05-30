@@ -18,10 +18,12 @@ from agentseek_api.services.stream_persistence import (
     persist_run_stream_event,
     persist_thread_stream_event,
 )
+from agentseek_api.services.thread_checkpoint_store import checkpoint_to_payload, get_latest_checkpoint
 from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
 
 RUN_EXECUTION_JOB_KIND = "run.execute"
 TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
+RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
 
 
 @dataclass(slots=True)
@@ -173,6 +175,17 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                 await _persist_thread_snapshot(job.thread_id)
                 await execution_session.refresh(db_run)
                 if not _is_cancelled_run(db_run):
+                    # A missing checkpoint lookup should not turn a successful run into a failed one.
+                    try:
+                        latest_checkpoint = await get_latest_checkpoint(job.thread_id)
+                    except Exception:  # noqa: BLE001
+                        latest_checkpoint = None
+                    if latest_checkpoint is not None:
+                        checkpoint_id = checkpoint_to_payload(latest_checkpoint)["checkpoint"]["checkpoint_id"]
+                        db_run.metadata_json = {
+                            **(db_run.metadata_json or {}),
+                            RUN_CHECKPOINT_ID_METADATA_KEY: checkpoint_id,
+                        }
                     _apply_execution_result(db_run, result)
             except Exception as exc:  # noqa: BLE001
                 await execution_session.refresh(db_run)

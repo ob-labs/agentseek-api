@@ -404,19 +404,23 @@ def publish_input_requested(
     interrupt_id: str,
     payload: Any,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "interrupt_id": interrupt_id,
+            "payload": payload,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     return thread_protocol_broker.publish(
         thread_id,
         {
             "method": "input.requested",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "interrupt_id": interrupt_id,
-                    "payload": payload,
-                },
-            },
+            "params": params,
         },
     )
 
@@ -427,19 +431,23 @@ async def apublish_input_requested(
     interrupt_id: str,
     payload: Any,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {
+            "interrupt_id": interrupt_id,
+            "payload": payload,
+        },
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
     return await _apublish_thread_event(
         thread_id,
         {
             "method": "input.requested",
-            "params": {
-                "namespace": namespace or [],
-                "timestamp": protocol_timestamp_ms(),
-                "data": {
-                    "interrupt_id": interrupt_id,
-                    "payload": payload,
-                },
-            },
+            "params": params,
         },
     )
 

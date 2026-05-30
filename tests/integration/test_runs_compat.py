@@ -92,6 +92,33 @@ def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
     assert "event: message_chunk" not in joined.text
 
 
+def test_join_run_stays_bound_to_waited_run_after_newer_run_on_same_thread(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+
+    first = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "first"}},
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "second"}},
+    )
+    assert second.status_code == 200
+    second_run_id = second.json()["run_id"]
+
+    joined_first = client.get(first.headers["location"])
+    joined_second = client.get(f"/threads/{thread_id}/runs/{second_run_id}/join")
+
+    assert joined_first.status_code == 200
+    assert joined_first.json() == first_body
+    assert joined_second.status_code == 200
+    assert joined_second.json()["output"] == {"echo": {"message": "second"}}
+
+
 def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
 
@@ -595,6 +622,23 @@ def test_create_run_stream_updates_mode_surfaces_interrupt_payload(client: TestC
     assert update_events[-1]["data"]["__interrupt__"][0]["value"] == "Provide value:"
 
 
+def test_create_run_stream_messages_mode_surfaces_input_requested_interrupt(client: TestClient) -> None:
+    assistant_id = _create_assistant(client, graph_id="subgraph_hitl_agent")
+    thread_id = _create_thread(client)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={"assistant_id": assistant_id, "input": {"foo": "hello "}, "stream_mode": "messages"},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse_events(response.text)
+    input_events = [event for event in events if event["event"] == "input.requested"]
+    assert input_events
+    assert input_events[-1]["data"]["payload"] == "Provide value:"
+    assert input_events[-1]["data"]["interrupt_id"]
+
+
 def test_create_run_wait_preserves_non_dict_values(client: TestClient, monkeypatch) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
@@ -627,6 +671,44 @@ def test_create_run_wait_preserves_non_dict_values(client: TestClient, monkeypat
 
     assert response.status_code == 200
     assert response.json() == ["one", "two"]
+
+
+def test_create_run_wait_preserves_empty_run_scoped_values(client: TestClient, monkeypatch) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    created = RunRead.model_validate(
+        {
+            "run_id": "empty-run",
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "status": "success",
+            "output": None,
+            "metadata": {},
+            "kwargs": {},
+            "multitask_strategy": "enqueue",
+        }
+    )
+
+    async def fake_create_run(*args, **kwargs):
+        return created
+
+    async def fake_find_thread_state_payload(*args, **kwargs):
+        return {"values": {}}
+
+    async def fake_get_thread_state(*args, **kwargs):
+        raise AssertionError("empty run-scoped state must not fall back to latest thread state")
+
+    monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
+    monkeypatch.setattr("agentseek_api.api.runs._find_thread_state_payload", fake_find_thread_state_payload)
+    monkeypatch.setattr("agentseek_api.api.runs.get_thread_state", fake_get_thread_state)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "empty"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {}
 
 
 def test_create_run_wait_json_encodes_langchain_messages(client: TestClient, monkeypatch) -> None:

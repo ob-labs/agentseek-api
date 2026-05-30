@@ -414,3 +414,22 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         final_run = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
         assert final_run["status"] == "success"
         assert final_run["output"]["state"]["foo"].endswith("world")
+
+        create_time_thread = await client.post(
+            "/threads",
+            json={"metadata": {"suite": "live-provider-hitl-create-time-stream"}},
+            headers=user_headers(user_id),
+        )
+        assert create_time_thread.status_code == 200
+        create_time_thread_id = create_time_thread.json()["thread_id"]
+
+        create_time_stream = await client.post(
+            f"/threads/{create_time_thread_id}/runs/stream",
+            json={"assistant_id": assistant_id, "input": {"foo": "hello "}, "stream_mode": "messages"},
+            headers=user_headers(user_id),
+        )
+        assert create_time_stream.status_code == 200
+        create_time_events = parse_sse_events(create_time_stream.text)
+        create_time_input = next(event for event in create_time_events if event["event"] == "input.requested")
+        assert create_time_input["data"]["payload"] == "Provide value:"
+        assert create_time_input["data"]["interrupt_id"]
