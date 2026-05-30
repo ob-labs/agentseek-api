@@ -124,6 +124,94 @@ async def test_live_provider_streaming_http_flow(live_provider_base_url: str) ->
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
+async def test_live_provider_create_time_wait_and_stream_match_langgraph_contract(live_provider_base_url: str) -> None:
+    user_id = f"provider-create-time-{uuid4().hex}"
+
+    async with httpx.AsyncClient(base_url=live_provider_base_url, timeout=60.0, trust_env=False) as client:
+        assistant = await client.post(
+            "/assistants",
+            json={"name": "live-provider-create-time", "graph_id": provider_graph_id("stream")},
+        )
+        assert assistant.status_code == 200
+        assistant_id = assistant.json()["assistant_id"]
+
+        thread = await client.post(
+            "/threads",
+            json={"metadata": {"suite": "live-provider-create-time"}},
+            headers=user_headers(user_id),
+        )
+        assert thread.status_code == 200
+        thread_id = thread.json()["thread_id"]
+
+        waited_create = await client.post(
+            f"/threads/{thread_id}/runs/wait",
+            json={
+                "assistant_id": assistant_id,
+                "on_disconnect": "continue",
+                "durability": "async",
+                "input": {
+                    "message": (
+                        "Explain why create-time wait contract coverage matters in exactly two sentences, "
+                        "using at least forty words and no bullet points."
+                    )
+                },
+            },
+            headers=user_headers(user_id),
+        )
+        assert waited_create.status_code == 200
+        waited_body = waited_create.json()
+        assert "run_id" not in waited_body
+        assert "status" not in waited_body
+        assert waited_body["output"]["final_text"]
+        wait_run_id = waited_create.headers["content-location"].rpartition("/")[2]
+        assert waited_create.headers["content-location"] == f"/threads/{thread_id}/runs/{wait_run_id}"
+        assert waited_create.headers["location"] == f"/threads/{thread_id}/runs/{wait_run_id}/join"
+
+        joined_wait = await client.get(waited_create.headers["location"], headers=user_headers(user_id))
+        assert joined_wait.status_code == 200
+        assert joined_wait.headers["content-location"] == waited_create.headers["content-location"]
+        assert joined_wait.json() == waited_body
+
+        streamed_create = await client.post(
+            f"/threads/{thread_id}/runs/stream",
+            json={
+                "assistant_id": assistant_id,
+                "input": {
+                    "message": (
+                        "Explain why create-time stream contract coverage matters in exactly two sentences, "
+                        "using at least forty words and no bullet points."
+                    )
+                },
+                "stream_mode": "updates",
+            },
+            headers=user_headers(user_id),
+        )
+        assert streamed_create.status_code == 200
+        assert streamed_create.headers["content-type"].startswith("text/event-stream")
+        events = parse_sse_events(streamed_create.text)
+        event_names = [event["event"] for event in events]
+        assert event_names[0] == "metadata"
+        assert "updates" in event_names
+        assert "start" not in event_names
+        assert "message_chunk" not in event_names
+        stream_run_id = next(str(event["data"]["run_id"]) for event in events if event["event"] == "metadata")
+        assert streamed_create.headers["content-location"] == f"/threads/{thread_id}/runs/{stream_run_id}"
+        assert streamed_create.headers["location"] == (
+            f"/threads/{thread_id}/runs/{stream_run_id}/stream?stream_mode=updates"
+        )
+
+        joined_stream = await client.get(streamed_create.headers["location"], headers=user_headers(user_id))
+        assert joined_stream.status_code == 200
+        joined_events = parse_sse_events(joined_stream.text)
+        joined_event_names = [event["event"] for event in joined_events]
+        assert joined_event_names[0] == "metadata"
+        assert "updates" in joined_event_names
+        assert "start" not in joined_event_names
+        assert "message_chunk" not in joined_event_names
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
 async def test_live_provider_store_endpoints_and_graph(live_provider_base_url: str) -> None:
     if not provider_capability_enabled("store"):
         pytest.skip("Live provider store coverage is disabled for this backend tier.")
