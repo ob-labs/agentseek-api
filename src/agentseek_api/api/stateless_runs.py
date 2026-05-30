@@ -4,6 +4,7 @@ from typing import Any
 from sqlalchemy import select
 
 from fastapi import APIRouter, Depends, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
@@ -64,7 +65,7 @@ async def create_stateless_run_wait(payload: RunCreateStreamingStateless, user: 
     created = await create_stateless_run(payload, user)
     final_run = created if created.status in {"success", "error", "interrupted"} else await wait_run(created.thread_id, created.run_id, user)
     return JSONResponse(
-        await _wait_response_payload(final_run, user=user),
+        content=jsonable_encoder(await _wait_response_payload(final_run, user=user)),
         headers=_stream_response_headers(
             location=f"/threads/{created.thread_id}/runs/{created.run_id}/join",
             content_location=f"/threads/{created.thread_id}/runs/{created.run_id}",

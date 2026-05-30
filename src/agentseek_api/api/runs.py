@@ -8,6 +8,7 @@ from urllib.parse import urlencode
 from sqlalchemy import delete, select
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
@@ -162,6 +163,18 @@ async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
     if isinstance(state, dict) and "values" in state:
         return state["values"]
     return {}
+
+
+async def _wait_json_response(
+    *,
+    run: RunRead,
+    user: User,
+    headers: dict[str, str],
+) -> JSONResponse:
+    return JSONResponse(
+        content=jsonable_encoder(await _wait_response_payload(run, user=user)),
+        headers=headers,
+    )
 
 
 def _stream_response_headers(*, location: str, content_location: str) -> dict[str, str]:
@@ -450,8 +463,9 @@ async def create_run_wait(
     _normalize_stream_modes(payload.stream_mode)
     created = await create_run(thread_id, payload, user)
     final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
-    return JSONResponse(
-        await _wait_response_payload(final_run, user=user),
+    return await _wait_json_response(
+        run=final_run,
+        user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=created.run_id),
     )
 
@@ -546,8 +560,9 @@ async def cancel_run(
 )
 async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
     run = await wait_run(thread_id, run_id, user)
-    return JSONResponse(
-        await _wait_response_payload(run, user=user),
+    return await _wait_json_response(
+        run=run,
+        user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=run_id),
     )
 

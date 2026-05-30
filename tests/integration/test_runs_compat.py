@@ -2,6 +2,7 @@ from collections.abc import Awaitable, Callable
 import json
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import HumanMessage
 
 from agentseek_api.main import app
 from agentseek_api.models.api import RunRead
@@ -517,6 +518,51 @@ def test_create_run_wait_preserves_non_dict_values(client: TestClient, monkeypat
 
     assert response.status_code == 200
     assert response.json() == ["one", "two"]
+
+
+def test_create_run_wait_json_encodes_langchain_messages(client: TestClient, monkeypatch) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    created = RunRead.model_validate(
+        {
+            "run_id": "message-run",
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "status": "success",
+            "output": None,
+            "metadata": {},
+            "kwargs": {},
+            "multitask_strategy": "enqueue",
+        }
+    )
+
+    async def fake_create_run(*args, **kwargs):
+        return created
+
+    async def fake_get_thread_state(*args, **kwargs):
+        return {"values": {"messages": [HumanMessage(content="hello from state")]}}
+
+    monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
+    monkeypatch.setattr("agentseek_api.api.stateless_runs.create_run", fake_create_run)
+    monkeypatch.setattr("agentseek_api.api.runs.get_thread_state", fake_get_thread_state)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "serialize message"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][0]["content"] == "hello from state"
+    assert response.json()["messages"][0]["type"] == "human"
+
+    stateless_response = client.post(
+        "/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "serialize stateless message"}},
+    )
+
+    assert stateless_response.status_code == 200
+    assert stateless_response.json()["messages"][0]["content"] == "hello from state"
+    assert stateless_response.json()["messages"][0]["type"] == "human"
 
 
 def test_create_run_stream_surfaces_terminal_error_event(client: TestClient) -> None:
