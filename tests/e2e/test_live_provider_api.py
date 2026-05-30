@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from uuid import uuid4
 
 import httpx
@@ -33,6 +34,26 @@ def _text_from_content(content: object) -> str:
 
 def _normalize_text(text: str) -> str:
     return " ".join(text.split())
+
+
+async def _collect_sse_events_until(
+    response: httpx.Response,
+    predicate: Callable[[list[dict[str, object]]], bool],
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    current_event_lines: list[str] = []
+    async for line in response.aiter_lines():
+        if line:
+            current_event_lines.append(line)
+            continue
+        if current_event_lines:
+            events.extend(parse_sse_events("\n".join(current_event_lines)))
+            current_event_lines = []
+        if predicate(events):
+            return events
+    if current_event_lines:
+        events.extend(parse_sse_events("\n".join(current_event_lines)))
+    return events
 
 
 async def _poll_run(
@@ -393,13 +414,21 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         assert responded_body["type"] == "success"
         assert responded_body["id"] == 1
 
-        resumed_stream = await client.post(
+        async with client.stream(
+            "POST",
             f"/threads/{thread_id}/stream",
             json={"channels": ["lifecycle", "values"], "since": last_seq},
             headers=user_headers(user_id),
-        )
-        assert resumed_stream.status_code == 200
-        resumed_events = parse_sse_events(resumed_stream.text)
+        ) as resumed_stream:
+            assert resumed_stream.status_code == 200
+            resumed_events = await _collect_sse_events_until(
+                resumed_stream,
+                lambda events: any(
+                    event.get("event") == "lifecycle"
+                    and event.get("data", {}).get("params", {}).get("data", {}).get("event") == "completed"
+                    for event in events
+                ),
+            )
         resumed_states = [event["data"]["params"]["data"]["event"] for event in resumed_events if event["event"] == "lifecycle"]
         assert resumed_states == ["started", "completed"]
         resumed_values = [event["data"]["params"]["data"] for event in resumed_events if event["event"] == "values"]

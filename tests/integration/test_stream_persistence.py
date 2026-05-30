@@ -264,7 +264,7 @@ def test_create_run_stream_polls_persisted_protocol_events_in_redis_mode(client:
     monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", "redis")
     monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(runs_api, "create_run", fake_create_run)
-    monkeypatch.setattr(runs_api, "wait_run", fake_wait_run)
+    monkeypatch.setattr(runs_api, "_wait_run_terminal", fake_wait_run)
     monkeypatch.setattr(runs_api, "load_thread_stream_events", fake_load_thread_stream_events)
     monkeypatch.setattr(runs_api, "_is_run_terminal", fake_is_run_terminal)
     monkeypatch.setattr(runs_api.thread_protocol_broker, "latest_seq", lambda _thread_id: 0)

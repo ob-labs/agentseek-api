@@ -1,11 +1,9 @@
 from datetime import UTC, datetime
-from typing import Any
 
 from sqlalchemy import select
 
 from fastapi import APIRouter, Depends, Response
-from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
@@ -25,9 +23,8 @@ from agentseek_api.api.runs import (
     _protocol_stream_location,
     _stream_response_headers,
     _validate_supported_run_controls,
-    _wait_response_payload,
+    _wait_json_stream_response,
     create_run,
-    wait_run,
 )
 
 router = APIRouter(prefix="/runs", tags=["Stateless Runs"])
@@ -49,7 +46,7 @@ async def create_stateless_run(payload: RunCreateStateless, user: User = Depends
 
 @router.post(
     "/wait",
-    response_class=JSONResponse,
+    response_class=StreamingResponse,
     responses={
         200: {
             "content": {"application/json": {"schema": {}}},
@@ -60,12 +57,12 @@ async def create_stateless_run(payload: RunCreateStateless, user: User = Depends
         }
     },
 )
-async def create_stateless_run_wait(payload: RunCreateStreamingStateless, user: User = Depends(get_current_user)) -> JSONResponse:
+async def create_stateless_run_wait(payload: RunCreateStreamingStateless, user: User = Depends(get_current_user)) -> StreamingResponse:
     _normalize_stream_modes(payload.stream_mode)
     created = await create_stateless_run(payload, user)
-    final_run = created if created.status in {"success", "error", "interrupted"} else await wait_run(created.thread_id, created.run_id, user)
-    return JSONResponse(
-        content=jsonable_encoder(await _wait_response_payload(final_run, user=user)),
+    return _wait_json_stream_response(
+        run=created,
+        user=user,
         headers=_stream_response_headers(
             location=f"/threads/{created.thread_id}/runs/{created.run_id}/join",
             content_location=f"/threads/{created.thread_id}/runs/{created.run_id}",

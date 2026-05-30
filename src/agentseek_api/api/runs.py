@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
@@ -203,14 +203,43 @@ async def _load_run_checkpoint_id(*, run_id: str, thread_id: str, user_id: str) 
         return checkpoint_id
 
 
-async def _wait_json_response(
+async def _get_run_read(thread_id: str, run_id: str, user: User) -> RunRead:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return _to_read_model(row)
+
+
+def _wait_json_stream_response(
     *,
     run: RunRead,
     user: User,
     headers: dict[str, str],
-) -> JSONResponse:
-    return JSONResponse(
-        content=jsonable_encoder(await _wait_response_payload(run, user=user)),
+) -> StreamingResponse:
+    async def _body() -> AsyncIterator[bytes]:
+        current_run = run
+        while current_run.status not in TERMINAL_RUN_STATUSES:
+            try:
+                current_run = await _wait_run_terminal(
+                    current_run.thread_id,
+                    current_run.run_id,
+                    user,
+                    timeout_seconds=5.0,
+                )
+            except HTTPException as exc:
+                if exc.status_code != 408:
+                    raise
+                yield b"\n"
+        payload = await _wait_response_payload(current_run, user=user)
+        yield json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode()
+
+    return StreamingResponse(
+        _body(),
+        media_type="application/json",
         headers=headers,
     )
 
@@ -365,7 +394,11 @@ def _build_create_run_stream_response(
                     data=event.get("params", {}).get("data", {}),
                 )
 
-        final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
+        final_run = (
+            created
+            if created.status in TERMINAL_RUN_STATUSES
+            else await _wait_run_terminal(thread_id, created.run_id, user, timeout_seconds=None)
+        )
         if final_run.status == "error":
             current_seq += 1
             yield _protocol_event_sse(
@@ -471,9 +504,14 @@ async def get_run(thread_id: str, run_id: str, user: User = Depends(get_current_
         return _to_read_model(row)
 
 
-@router.get("/{run_id}/wait", response_model=RunRead)
-async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
-    deadline = asyncio.get_event_loop().time() + 30
+async def _wait_run_terminal(
+    thread_id: str,
+    run_id: str,
+    user: User,
+    *,
+    timeout_seconds: float | None = 30.0,
+) -> RunRead:
+    deadline = None if timeout_seconds is None else asyncio.get_event_loop().time() + timeout_seconds
     while True:
         session_factory = db_manager.get_session_factory()
         async with session_factory() as session:
@@ -484,14 +522,19 @@ async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current
                 raise HTTPException(status_code=404, detail="Run not found")
             if row.status in TERMINAL_RUN_STATUSES:
                 return _to_read_model(row)
-        if asyncio.get_event_loop().time() > deadline:
+        if deadline is not None and asyncio.get_event_loop().time() > deadline:
             raise HTTPException(status_code=408, detail="Run wait timeout")
         await asyncio.sleep(0.2)
 
 
+@router.get("/{run_id}/wait", response_model=RunRead)
+async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
+    return await _wait_run_terminal(thread_id, run_id, user)
+
+
 @router.post(
     "/wait",
-    response_class=JSONResponse,
+    response_class=StreamingResponse,
     responses={
         200: {
             "content": {"application/json": {"schema": {}}},
@@ -506,12 +549,11 @@ async def create_run_wait(
     thread_id: str,
     payload: RunCreateStreamingStateful,
     user: User = Depends(get_current_user),
-) -> JSONResponse:
+) -> StreamingResponse:
     _normalize_stream_modes(payload.stream_mode)
     created = await create_run(thread_id, payload, user)
-    final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
-    return await _wait_json_response(
-        run=final_run,
+    return _wait_json_stream_response(
+        run=created,
         user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=created.run_id),
     )
@@ -594,7 +636,7 @@ async def cancel_run(
 
 @router.get(
     "/{run_id}/join",
-    response_class=JSONResponse,
+    response_class=StreamingResponse,
     responses={
         200: {
             "content": {"application/json": {"schema": {}}},
@@ -605,9 +647,9 @@ async def cancel_run(
         }
     },
 )
-async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
-    run = await wait_run(thread_id, run_id, user)
-    return await _wait_json_response(
+async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> StreamingResponse:
+    run = await _get_run_read(thread_id, run_id, user)
+    return _wait_json_stream_response(
         run=run,
         user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=run_id),
