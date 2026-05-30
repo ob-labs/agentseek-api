@@ -75,15 +75,26 @@ def _uses_redis_executor() -> bool:
 
 
 def _normalize_stream_modes(stream_mode: str | list[str] | None) -> list[str]:
-    raw_modes = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode or ["values"])
+    if stream_mode is None:
+        return ["values"]
+
+    raw_modes = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode)
     modes: list[str] = []
+    invalid_modes: list[str] = []
+
+    if not raw_modes:
+        invalid_modes.append("<empty>")
+
     for mode in raw_modes:
-        normalized = RUN_STREAM_MODE_ALIASES.get(str(mode).strip(), str(mode).strip())
-        if normalized and normalized not in modes:
+        raw_mode = str(mode).strip()
+        if not raw_mode:
+            invalid_modes.append("<empty>")
+            continue
+        normalized = RUN_STREAM_MODE_ALIASES.get(raw_mode, raw_mode)
+        if normalized not in modes:
             modes.append(normalized)
-    if not modes:
-        modes = ["values"]
-    unsupported = [mode for mode in modes if mode not in SUPPORTED_RUN_STREAM_MODES]
+
+    unsupported = invalid_modes + [mode for mode in modes if mode not in SUPPORTED_RUN_STREAM_MODES]
     if unsupported:
         raise HTTPException(
             status_code=422,

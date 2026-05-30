@@ -271,6 +271,25 @@ def test_join_stream_accepts_official_json_array_stream_mode_query(client: TestC
     assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
 
 
+def test_join_stream_rejects_blank_stream_mode_query(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "blank query"}},
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    streamed = client.get(
+        f"/threads/{thread_id}/runs/{run_id}/stream",
+        params={"stream_mode": ""},
+    )
+
+    assert streamed.status_code == 422
+    assert "Unsupported stream_mode value(s)" in streamed.json()["detail"]
+
+
 def test_create_run_wait_and_stream_accept_official_contract_fields(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
