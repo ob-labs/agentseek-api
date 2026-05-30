@@ -29,6 +29,7 @@ from agentseek_api.services.stream_persistence import (
     load_run_stream_events,
     parse_last_event_id,
 )
+from agentseek_api.services.sse import iter_with_sse_keepalives, sse_keepalive_comment
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.settings import settings
 
@@ -363,13 +364,18 @@ def _build_create_run_stream_response(
             )
 
         if _uses_redis_executor():
-            async for event in _iter_persisted_protocol_run_events(
-                thread_id=thread_id,
-                run_id=created.run_id,
-                stream_modes=protocol_channels,
-                user_id=user.identity,
-                after_seq=current_seq,
+            async for event in iter_with_sse_keepalives(
+                _iter_persisted_protocol_run_events(
+                    thread_id=thread_id,
+                    run_id=created.run_id,
+                    stream_modes=protocol_channels,
+                    user_id=user.identity,
+                    after_seq=current_seq,
+                )
             ):
+                if event is None:
+                    yield sse_keepalive_comment()
+                    continue
                 current_seq = max(current_seq, int(event.get("seq", 0)))
                 yield _protocol_event_sse(
                     seq=current_seq,
@@ -377,13 +383,18 @@ def _build_create_run_stream_response(
                     data=event.get("params", {}).get("data", {}),
                 )
         else:
-            async for event in thread_protocol_broker.stream(
-                thread_id,
-                channels=protocol_channels,
-                namespaces=None,
-                depth=None,
-                since=current_seq,
+            async for event in iter_with_sse_keepalives(
+                thread_protocol_broker.stream(
+                    thread_id,
+                    channels=protocol_channels,
+                    namespaces=None,
+                    depth=None,
+                    since=current_seq,
+                )
             ):
+                if event is None:
+                    yield sse_keepalive_comment()
+                    continue
                 event_run_id = event.get("params", {}).get("run_id")
                 if event_run_id != created.run_id:
                     continue
@@ -721,12 +732,18 @@ async def stream_run(
             yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
 
         if use_redis_executor:
-            async for seq, event in _iter_persisted_run_records(
-                run_id=run_id,
-                thread_id=thread_id,
-                user_id=user.identity,
-                after_seq=current_seq,
+            async for item in iter_with_sse_keepalives(
+                _iter_persisted_run_records(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    user_id=user.identity,
+                    after_seq=current_seq,
+                )
             ):
+                if item is None:
+                    yield sse_keepalive_comment()
+                    continue
+                seq, event = item
                 event_name = str(event.get("event", "message"))
                 event_payload = {"run_id": run_id, **event}
                 yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
@@ -735,7 +752,11 @@ async def stream_run(
         if row.status in TERMINAL_RUN_STATUSES:
             return
 
-        async for seq, event in run_broker.stream_records(run_id, after_seq=current_seq):
+        async for item in iter_with_sse_keepalives(run_broker.stream_records(run_id, after_seq=current_seq)):
+            if item is None:
+                yield sse_keepalive_comment()
+                continue
+            seq, event = item
             event_name = str(event.get("event", "message"))
             event_payload = {"run_id": run_id, **event}
             yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"

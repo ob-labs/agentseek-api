@@ -27,6 +27,7 @@ from agentseek_api.services.stream_persistence import (
     load_thread_stream_events,
     parse_last_event_id,
 )
+from agentseek_api.services.sse import iter_with_sse_keepalives, sse_keepalive_comment
 from agentseek_api.services.thread_checkpoint_store import (
     checkpoint_to_payload,
     copy_checkpoints,
@@ -621,27 +622,37 @@ async def stream_thread(
             yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
 
         if _uses_redis_executor():
-            async for event in _iter_persisted_thread_events(
-                thread_id=thread_id,
-                payload=payload,
-                user_id=user.identity,
-                after_seq=current_seq,
-                wait_for_future_runs=True,
+            async for event in iter_with_sse_keepalives(
+                _iter_persisted_thread_events(
+                    thread_id=thread_id,
+                    payload=payload,
+                    user_id=user.identity,
+                    after_seq=current_seq,
+                    wait_for_future_runs=True,
+                )
             ):
+                if event is None:
+                    yield sse_keepalive_comment()
+                    continue
                 seq = int(event.get("seq", 0))
                 current_seq = max(current_seq, seq)
                 event_name = str(event.get("method", "event"))
                 yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
             return
 
-        async for event in thread_protocol_broker.stream(
-            thread_id,
-            channels=payload.channels,
-            namespaces=payload.namespaces,
-            depth=payload.depth,
-            since=current_seq,
-            wait_for_future_runs=True,
+        async for event in iter_with_sse_keepalives(
+            thread_protocol_broker.stream(
+                thread_id=thread_id,
+                channels=payload.channels,
+                namespaces=payload.namespaces,
+                depth=payload.depth,
+                since=current_seq,
+                wait_for_future_runs=True,
+            )
         ):
+            if event is None:
+                yield sse_keepalive_comment()
+                continue
             seq = int(event.get("seq", 0))
             current_seq = max(current_seq, seq)
             event_name = str(event.get("method", "event"))
@@ -803,25 +814,35 @@ async def stream_thread_protocol_events(
             yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
 
         if _uses_redis_executor():
-            async for event in _iter_persisted_thread_events(
-                thread_id=thread_id,
-                payload=payload,
-                user_id=user.identity,
-                after_seq=current_seq,
+            async for event in iter_with_sse_keepalives(
+                _iter_persisted_thread_events(
+                    thread_id=thread_id,
+                    payload=payload,
+                    user_id=user.identity,
+                    after_seq=current_seq,
+                )
             ):
+                if event is None:
+                    yield sse_keepalive_comment()
+                    continue
                 seq = int(event.get("seq", 0))
                 method = str(event.get("method", "event"))
                 body = json.dumps(event)
                 yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
             return
 
-        async for event in thread_protocol_broker.stream(
-            thread_id,
-            channels=payload.channels,
-            namespaces=payload.namespaces,
-            depth=payload.depth,
-            since=current_seq,
+        async for event in iter_with_sse_keepalives(
+            thread_protocol_broker.stream(
+                thread_id,
+                channels=payload.channels,
+                namespaces=payload.namespaces,
+                depth=payload.depth,
+                since=current_seq,
+            )
         ):
+            if event is None:
+                yield sse_keepalive_comment()
+                continue
             seq = int(event.get("seq", 0))
             method = str(event.get("method", "event"))
             body = json.dumps(event)

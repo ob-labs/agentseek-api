@@ -12,6 +12,7 @@ from agentseek_api.models.api import RunRead
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolEventStreamRequest
 from agentseek_api.services import run_jobs as run_jobs_module
+from agentseek_api.services import sse as sse_module
 from agentseek_api.services import stream_persistence as stream_module
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.thread_protocol import publish_values_event, thread_protocol_broker
@@ -433,6 +434,89 @@ def test_thread_protocol_stream_polls_persisted_events_in_redis_mode(client: Tes
     assert [event["event"] for event in events] == ["values", "lifecycle"]
     assert events[0]["data"]["params"]["data"] == {"phase": "mid-run"}
     assert events[1]["data"]["params"]["data"] == {"event": "completed"}
+
+
+def test_thread_protocol_stream_sends_keepalive_while_inline_broker_is_idle(client: TestClient, monkeypatch) -> None:
+    thread_id = client.portal.call(_seed_thread)
+
+    async def delayed_stream(*args, **kwargs):
+        _ = (args, kwargs)
+        await asyncio.sleep(0.01)
+        yield {
+            "seq": 1,
+            "method": "lifecycle",
+            "params": {"namespace": [], "timestamp": 1, "data": {"event": "completed"}},
+        }
+
+    monkeypatch.setattr(sse_module, "DEFAULT_SSE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(threads_api.settings, "EXECUTOR_BACKEND", "inline")
+    monkeypatch.setattr(threads_api.thread_protocol_broker, "stream", delayed_stream)
+
+    response = client.portal.call(
+        threads_api.stream_thread_protocol_events,
+        thread_id,
+        ProtocolEventStreamRequest(channels=["lifecycle"]),
+        User(identity="default_user", is_authenticated=True),
+        None,
+    )
+
+    body = client.portal.call(_collect_stream_body, response)
+    events = _parse_sse(body)
+    assert ": keepalive\n\n" in body
+    assert [event["event"] for event in events] == ["lifecycle"]
+    assert events[0]["data"]["params"]["data"] == {"event": "completed"}
+
+
+def test_create_run_stream_sends_keepalive_while_protocol_broker_is_idle(client: TestClient, monkeypatch) -> None:
+    thread_id, run_id = client.portal.call(lambda: _seed_run(status="success"))
+    created = RunRead(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="assistant",
+        status="success",
+        output={},
+        interrupts=None,
+        last_error=None,
+        created_at=None,
+        updated_at=None,
+        metadata={},
+        kwargs={},
+        multitask_strategy="enqueue",
+    )
+
+    async def delayed_protocol_stream(*args, **kwargs):
+        _ = (args, kwargs)
+        await asyncio.sleep(0.01)
+        yield {
+            "seq": 1,
+            "method": "updates",
+            "params": {"run_id": run_id, "namespace": [], "timestamp": 1, "data": {"phase": "done"}},
+        }
+
+    async def no_persisted_protocol_events(*args, **kwargs):
+        _ = (args, kwargs)
+        return []
+
+    monkeypatch.setattr(sse_module, "DEFAULT_SSE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
+    monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", "inline")
+    monkeypatch.setattr(runs_api, "load_thread_stream_events", no_persisted_protocol_events)
+    monkeypatch.setattr(runs_api.thread_protocol_broker, "stream", delayed_protocol_stream)
+
+    response = runs_api._build_create_run_stream_response(
+        thread_id=thread_id,
+        created=created,
+        user=User(identity="default_user", is_authenticated=True),
+        stream_modes=["updates"],
+        after_seq=0,
+        location=f"/threads/{thread_id}/runs/{run_id}/stream?stream_mode=updates",
+        content_location=f"/threads/{thread_id}/runs/{run_id}",
+    )
+
+    body = client.portal.call(_collect_stream_body, response)
+    events = _parse_sse(body)
+    assert ": keepalive\n\n" in body
+    assert [event["event"] for event in events] == ["metadata", "updates"]
+    assert events[1]["data"] == {"phase": "done"}
 
 
 def test_run_stream_persistence_uses_shared_seq_after_broker_reset(client: TestClient, monkeypatch) -> None:
