@@ -1,8 +1,13 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 import json
 
 from fastapi.testclient import TestClient
+from langchain_core.messages import HumanMessage
+from sqlalchemy import select
 
+from agentseek_api.core.database import db_manager
+from agentseek_api.core.orm import Run
 from agentseek_api.main import app
 from agentseek_api.models.api import RunRead
 from agentseek_api.services.run_jobs import RunExecutionJob
@@ -48,6 +53,14 @@ def _parse_sse_events(stream_text: str) -> list[dict[str, object]]:
     return events
 
 
+async def _raw_run_metadata(*, thread_id: str, run_id: str) -> dict[str, object]:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(select(Run).where(Run.thread_id == thread_id, Run.run_id == run_id))
+        assert row is not None
+        return row.metadata_json
+
+
 def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
@@ -86,9 +99,74 @@ def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
 
     joined = client.get(streamed.headers["location"])
     assert joined.status_code == 200
-    assert "event: metadata" in joined.text
+    joined_events = _parse_sse_events(joined.text)
+    assert [event["event"] for event in joined_events] == ["metadata"]
     assert "event: start" not in joined.text
     assert "event: message_chunk" not in joined.text
+
+    replayed = client.get(streamed.headers["location"], headers={"Last-Event-ID": "0"})
+    assert replayed.status_code == 200
+    replayed_events = _parse_sse_events(replayed.text)
+    assert "updates" in {event["event"] for event in replayed_events}
+
+
+def test_join_run_stays_bound_to_waited_run_after_newer_run_on_same_thread(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+
+    first = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "first"}},
+    )
+    assert first.status_code == 200
+    first_body = first.json()
+
+    second = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "second"}},
+    )
+    assert second.status_code == 200
+    second_run_id = second.json()["run_id"]
+
+    joined_first = client.get(first.headers["location"])
+    joined_second = client.get(f"/threads/{thread_id}/runs/{second_run_id}/join")
+
+    assert joined_first.status_code == 200
+    assert joined_first.json() == first_body
+    assert joined_second.status_code == 200
+    assert joined_second.json()["output"] == {"echo": {"message": "second"}}
+
+
+def test_run_read_metadata_hides_internal_checkpoint_id(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={
+            "assistant_id": assistant_id,
+            "input": {"message": "metadata visibility"},
+            "metadata": {"visible": "yes"},
+        },
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    raw_metadata = asyncio.run(_raw_run_metadata(thread_id=thread_id, run_id=run_id))
+    assert raw_metadata["visible"] == "yes"
+    assert isinstance(raw_metadata["__agentseek_checkpoint_id"], str)
+
+    public_created = created.json()["metadata"]
+    assert public_created == {"visible": "yes"}
+
+    fetched = client.get(f"/threads/{thread_id}/runs/{run_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["metadata"] == {"visible": "yes"}
+
+    listed = client.get(f"/threads/{thread_id}/runs")
+    assert listed.status_code == 200
+    listed_run = next(run for run in listed.json() if run["run_id"] == run_id)
+    assert listed_run["metadata"] == {"visible": "yes"}
 
 
 def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
@@ -127,7 +205,8 @@ def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
 
     joined = client.get(streamed.headers["location"])
     assert joined.status_code == 200
-    assert "event: metadata" in joined.text
+    joined_events = _parse_sse_events(joined.text)
+    assert [event["event"] for event in joined_events] == ["metadata"]
     fetched = client.get(streamed.headers["content-location"])
     assert fetched.status_code == 200
     assert fetched.json()["run_id"] == run_id
@@ -248,7 +327,7 @@ def test_create_run_stream_messages_tuple_mode_aliases_to_messages(client: TestC
     assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
 
 
-def test_join_stream_accepts_official_json_array_stream_mode_query(client: TestClient) -> None:
+def test_join_stream_accepts_official_json_array_stream_mode_query_without_replay(client: TestClient) -> None:
     assistant_id = _create_assistant(client, graph_id="react_agent")
     thread_id = _create_thread(client)
     created = client.post(
@@ -265,9 +344,26 @@ def test_join_stream_accepts_official_json_array_stream_mode_query(client: TestC
 
     assert streamed.status_code == 200
     events = _parse_sse_events(streamed.text)
-    message_events = [event for event in events if event["event"] == "messages"]
-    assert message_events
-    assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
+    assert [event["event"] for event in events] == ["metadata"]
+
+
+def test_join_stream_rejects_blank_stream_mode_query(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "blank query"}},
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    streamed = client.get(
+        f"/threads/{thread_id}/runs/{run_id}/stream",
+        params={"stream_mode": ""},
+    )
+
+    assert streamed.status_code == 422
+    assert "Unsupported stream_mode value(s)" in streamed.json()["detail"]
 
 
 def test_create_run_wait_and_stream_accept_official_contract_fields(client: TestClient) -> None:
@@ -407,6 +503,96 @@ def test_create_run_stream_rejects_unsupported_official_control_fields_before_si
     assert client.get("/threads").json() == before_threads
 
 
+def test_create_run_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs",
+        json={
+            "assistant_id": assistant_id,
+            "stream_mod": "updates",
+            "input": {"message": "bad unknown create control"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs",
+        json={
+            "assistant_id": assistant_id,
+            "onDisconect": "cancel",
+            "input": {"message": "bad unknown stateless create control"},
+        },
+    )
+
+    assert stateless_response.status_code == 422
+    assert client.get("/threads").json() == before_threads
+
+
+def test_create_run_wait_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "stream_mod": "updates",
+            "input": {"message": "bad unknown wait control"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs/wait",
+        json={
+            "assistant_id": assistant_id,
+            "onDisconect": "cancel",
+            "input": {"message": "bad unknown stateless wait control"},
+        },
+    )
+
+    assert stateless_response.status_code == 422
+    assert client.get("/threads").json() == before_threads
+
+
+def test_create_run_stream_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    before_threads = client.get("/threads").json()
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "stream_mod": "updates",
+            "input": {"message": "bad unknown stream control"},
+        },
+    )
+
+    assert response.status_code == 422
+    assert client.get(f"/threads/{thread_id}/runs").json() == []
+
+    stateless_response = client.post(
+        "/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "onDisconect": "cancel",
+            "input": {"message": "bad unknown stateless stream control"},
+        },
+    )
+
+    assert stateless_response.status_code == 422
+    assert client.get("/threads").json() == before_threads
+
+
 def test_create_run_stream_filters_protocol_events_to_created_run(client: TestClient, monkeypatch) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
@@ -485,6 +671,23 @@ def test_create_run_stream_updates_mode_surfaces_interrupt_payload(client: TestC
     assert update_events[-1]["data"]["__interrupt__"][0]["value"] == "Provide value:"
 
 
+def test_create_run_stream_messages_mode_surfaces_input_requested_interrupt(client: TestClient) -> None:
+    assistant_id = _create_assistant(client, graph_id="subgraph_hitl_agent")
+    thread_id = _create_thread(client)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={"assistant_id": assistant_id, "input": {"foo": "hello "}, "stream_mode": "messages"},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse_events(response.text)
+    input_events = [event for event in events if event["event"] == "input.requested"]
+    assert input_events
+    assert input_events[-1]["data"]["payload"] == "Provide value:"
+    assert input_events[-1]["data"]["interrupt_id"]
+
+
 def test_create_run_wait_preserves_non_dict_values(client: TestClient, monkeypatch) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
@@ -517,6 +720,89 @@ def test_create_run_wait_preserves_non_dict_values(client: TestClient, monkeypat
 
     assert response.status_code == 200
     assert response.json() == ["one", "two"]
+
+
+def test_create_run_wait_preserves_empty_run_scoped_values(client: TestClient, monkeypatch) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    created = RunRead.model_validate(
+        {
+            "run_id": "empty-run",
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "status": "success",
+            "output": None,
+            "metadata": {},
+            "kwargs": {},
+            "multitask_strategy": "enqueue",
+        }
+    )
+
+    async def fake_create_run(*args, **kwargs):
+        return created
+
+    async def fake_find_thread_state_payload(*args, **kwargs):
+        return {"values": {}}
+
+    async def fake_get_thread_state(*args, **kwargs):
+        raise AssertionError("empty run-scoped state must not fall back to latest thread state")
+
+    monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
+    monkeypatch.setattr("agentseek_api.api.runs._find_thread_state_payload", fake_find_thread_state_payload)
+    monkeypatch.setattr("agentseek_api.api.runs.get_thread_state", fake_get_thread_state)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "empty"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {}
+
+
+def test_create_run_wait_json_encodes_langchain_messages(client: TestClient, monkeypatch) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+    created = RunRead.model_validate(
+        {
+            "run_id": "message-run",
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "status": "success",
+            "output": None,
+            "metadata": {},
+            "kwargs": {},
+            "multitask_strategy": "enqueue",
+        }
+    )
+
+    async def fake_create_run(*args, **kwargs):
+        return created
+
+    async def fake_get_thread_state(*args, **kwargs):
+        return {"values": {"messages": [HumanMessage(content="hello from state")]}}
+
+    monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
+    monkeypatch.setattr("agentseek_api.api.stateless_runs.create_run", fake_create_run)
+    monkeypatch.setattr("agentseek_api.api.runs.get_thread_state", fake_get_thread_state)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "serialize message"}},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["messages"][0]["content"] == "hello from state"
+    assert response.json()["messages"][0]["type"] == "human"
+
+    stateless_response = client.post(
+        "/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "serialize stateless message"}},
+    )
+
+    assert stateless_response.status_code == 200
+    assert stateless_response.json()["messages"][0]["content"] == "hello from state"
+    assert stateless_response.json()["messages"][0]["type"] == "human"
 
 
 def test_create_run_stream_surfaces_terminal_error_event(client: TestClient) -> None:

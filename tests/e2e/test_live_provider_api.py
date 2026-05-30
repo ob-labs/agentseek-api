@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from collections.abc import Callable
 from uuid import uuid4
 
 import httpx
@@ -33,6 +34,26 @@ def _text_from_content(content: object) -> str:
 
 def _normalize_text(text: str) -> str:
     return " ".join(text.split())
+
+
+async def _collect_sse_events_until(
+    response: httpx.Response,
+    predicate: Callable[[list[dict[str, object]]], bool],
+) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    current_event_lines: list[str] = []
+    async for line in response.aiter_lines():
+        if line:
+            current_event_lines.append(line)
+            continue
+        if current_event_lines:
+            events.extend(parse_sse_events("\n".join(current_event_lines)))
+            current_event_lines = []
+        if predicate(events):
+            return events
+    if current_event_lines:
+        events.extend(parse_sse_events("\n".join(current_event_lines)))
+    return events
 
 
 async def _poll_run(
@@ -88,9 +109,7 @@ async def test_live_provider_streaming_http_flow(live_provider_base_url: str) ->
         assert run.status_code == 200
         run_id = run.json()["run_id"]
 
-        waited = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers=user_headers(user_id))
-        assert waited.status_code == 200
-        waited_body = waited.json()
+        waited_body = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
         assert waited_body["status"] == "success"
         assert waited_body["output"]["final_text"]
 
@@ -120,6 +139,94 @@ async def test_live_provider_streaming_http_flow(live_provider_base_url: str) ->
         assert _normalize_text("".join(_text_from_content(payload.get("content")) for payload in message_chunks)) == _normalize_text(
             waited_body["output"]["final_text"]
         )
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_live_provider_create_time_wait_and_stream_match_langgraph_contract(live_provider_base_url: str) -> None:
+    user_id = f"provider-create-time-{uuid4().hex}"
+
+    async with httpx.AsyncClient(base_url=live_provider_base_url, timeout=60.0, trust_env=False) as client:
+        assistant = await client.post(
+            "/assistants",
+            json={"name": "live-provider-create-time", "graph_id": provider_graph_id("stream")},
+        )
+        assert assistant.status_code == 200
+        assistant_id = assistant.json()["assistant_id"]
+
+        thread = await client.post(
+            "/threads",
+            json={"metadata": {"suite": "live-provider-create-time"}},
+            headers=user_headers(user_id),
+        )
+        assert thread.status_code == 200
+        thread_id = thread.json()["thread_id"]
+
+        waited_create = await client.post(
+            f"/threads/{thread_id}/runs/wait",
+            json={
+                "assistant_id": assistant_id,
+                "on_disconnect": "continue",
+                "durability": "async",
+                "input": {
+                    "message": (
+                        "Reply with one short sentence about create-time wait coverage."
+                    )
+                },
+            },
+            headers=user_headers(user_id),
+        )
+        assert waited_create.status_code == 200
+        waited_body = waited_create.json()
+        assert "run_id" not in waited_body
+        assert "status" not in waited_body
+        messages = waited_body.get("messages")
+        assert isinstance(messages, list)
+        assert len(messages) >= 2
+        assert _text_from_content(messages[-1].get("content") if isinstance(messages[-1], dict) else "").strip()
+        wait_run_id = waited_create.headers["content-location"].rpartition("/")[2]
+        assert waited_create.headers["content-location"] == f"/threads/{thread_id}/runs/{wait_run_id}"
+        assert waited_create.headers["location"] == f"/threads/{thread_id}/runs/{wait_run_id}/join"
+
+        joined_wait = await client.get(waited_create.headers["location"], headers=user_headers(user_id))
+        assert joined_wait.status_code == 200
+        assert joined_wait.headers["content-location"] == waited_create.headers["content-location"]
+        assert joined_wait.json() == waited_body
+
+        streamed_create = await client.post(
+            f"/threads/{thread_id}/runs/stream",
+            json={
+                "assistant_id": assistant_id,
+                "input": {
+                    "message": (
+                        "Reply with one short sentence about create-time stream coverage."
+                    )
+                },
+                "stream_mode": "updates",
+            },
+            headers=user_headers(user_id),
+        )
+        assert streamed_create.status_code == 200
+        assert streamed_create.headers["content-type"].startswith("text/event-stream")
+        events = parse_sse_events(streamed_create.text)
+        event_names = [event["event"] for event in events]
+        assert event_names[0] == "metadata"
+        assert "updates" in event_names
+        assert "start" not in event_names
+        assert "message_chunk" not in event_names
+        stream_run_id = next(str(event["data"]["run_id"]) for event in events if event["event"] == "metadata")
+        assert streamed_create.headers["content-location"] == f"/threads/{thread_id}/runs/{stream_run_id}"
+        assert streamed_create.headers["location"] == (
+            f"/threads/{thread_id}/runs/{stream_run_id}/stream?stream_mode=updates"
+        )
+
+        joined_stream = await client.get(streamed_create.headers["location"], headers=user_headers(user_id))
+        assert joined_stream.status_code == 200
+        joined_events = parse_sse_events(joined_stream.text)
+        joined_event_names = [event["event"] for event in joined_events]
+        assert joined_event_names == ["metadata"]
+        assert "start" not in joined_event_names
+        assert "message_chunk" not in joined_event_names
 
 
 @pytest.mark.e2e
@@ -181,9 +288,7 @@ async def test_live_provider_store_endpoints_and_graph(live_provider_base_url: s
         assert run.status_code == 200
         run_id = run.json()["run_id"]
 
-        waited = await client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers=user_headers(user_id))
-        assert waited.status_code == 200
-        waited_body = waited.json()
+        waited_body = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
         assert waited_body["status"] == "success"
         assert waited_body["output"]["namespace"] == ["graph", "memory"]
         assert waited_body["output"]["key"] == memory_key
@@ -308,13 +413,21 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         assert responded_body["type"] == "success"
         assert responded_body["id"] == 1
 
-        resumed_stream = await client.post(
+        async with client.stream(
+            "POST",
             f"/threads/{thread_id}/stream",
             json={"channels": ["lifecycle", "values"], "since": last_seq},
             headers=user_headers(user_id),
-        )
-        assert resumed_stream.status_code == 200
-        resumed_events = parse_sse_events(resumed_stream.text)
+        ) as resumed_stream:
+            assert resumed_stream.status_code == 200
+            resumed_events = await _collect_sse_events_until(
+                resumed_stream,
+                lambda events: any(
+                    event.get("event") == "lifecycle"
+                    and event.get("data", {}).get("params", {}).get("data", {}).get("event") == "completed"
+                    for event in events
+                ),
+            )
         resumed_states = [event["data"]["params"]["data"]["event"] for event in resumed_events if event["event"] == "lifecycle"]
         assert resumed_states == ["started", "completed"]
         resumed_values = [event["data"]["params"]["data"] for event in resumed_events if event["event"] == "values"]
@@ -323,3 +436,22 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         final_run = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
         assert final_run["status"] == "success"
         assert final_run["output"]["state"]["foo"].endswith("world")
+
+        create_time_thread = await client.post(
+            "/threads",
+            json={"metadata": {"suite": "live-provider-hitl-create-time-stream"}},
+            headers=user_headers(user_id),
+        )
+        assert create_time_thread.status_code == 200
+        create_time_thread_id = create_time_thread.json()["thread_id"]
+
+        create_time_stream = await client.post(
+            f"/threads/{create_time_thread_id}/runs/stream",
+            json={"assistant_id": assistant_id, "input": {"foo": "hello "}, "stream_mode": "messages"},
+            headers=user_headers(user_id),
+        )
+        assert create_time_stream.status_code == 200
+        create_time_events = parse_sse_events(create_time_stream.text)
+        create_time_input = next(event for event in create_time_events if event["event"] == "input.requested")
+        assert create_time_input["data"]["payload"] == "Provide value:"
+        assert create_time_input["data"]["interrupt_id"]

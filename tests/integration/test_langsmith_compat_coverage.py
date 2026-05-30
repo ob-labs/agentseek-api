@@ -1,5 +1,6 @@
 import asyncio
 
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -231,7 +232,7 @@ def test_run_routes_cover_list_wait_resume_cancel_and_missing_paths(
         return {"ok": True}
 
     monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
-    monkeypatch.setattr("agentseek_api.api.runs.wait_run", fake_wait_run)
+    monkeypatch.setattr("agentseek_api.api.runs._wait_run_terminal", fake_wait_run)
     monkeypatch.setattr("agentseek_api.api.runs._wait_response_payload", fake_wait_response_payload)
 
     waited = client.post(
@@ -240,6 +241,51 @@ def test_run_routes_cover_list_wait_resume_cancel_and_missing_paths(
     )
     assert waited.status_code == 200
     assert waited.json() == {"ok": True}
+
+
+def test_create_run_wait_keeps_join_open_across_internal_wait_windows(client: TestClient, monkeypatch) -> None:
+    assistant_id = str(_create_assistant(client)["assistant_id"])
+    thread_id = str(_create_thread(client, metadata={"case": "wait-keepalive"})["thread_id"])
+
+    pending_created = RunRead.model_validate(
+        {
+            "run_id": "slow-run",
+            "thread_id": thread_id,
+            "assistant_id": assistant_id,
+            "status": "pending",
+            "output": None,
+            "metadata": {},
+            "kwargs": {},
+            "multitask_strategy": "enqueue",
+        }
+    )
+    final_created = pending_created.model_copy(update={"status": "success", "output": {"ok": True}})
+    wait_calls = {"count": 0}
+
+    async def fake_create_run(*args, **kwargs):
+        return pending_created
+
+    async def fake_wait_run(*args, **kwargs):
+        wait_calls["count"] += 1
+        if wait_calls["count"] == 1:
+            raise HTTPException(status_code=408, detail="Run wait timeout")
+        return final_created
+
+    async def fake_wait_response_payload(*args, **kwargs):
+        return {"ok": True}
+
+    monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
+    monkeypatch.setattr("agentseek_api.api.runs._wait_run_terminal", fake_wait_run)
+    monkeypatch.setattr("agentseek_api.api.runs._wait_response_payload", fake_wait_response_payload)
+
+    waited = client.post(
+        f"/threads/{thread_id}/runs/wait",
+        json={"assistant_id": assistant_id, "input": {"message": "wait through keepalive"}},
+    )
+
+    assert waited.status_code == 200
+    assert waited.json() == {"ok": True}
+    assert wait_calls["count"] == 2
 
 
 def test_stateless_routes_cover_wait_and_cancel_status_branch(client: TestClient, monkeypatch) -> None:
@@ -269,8 +315,8 @@ def test_stateless_routes_cover_wait_and_cancel_status_branch(client: TestClient
         return {"done": True}
 
     monkeypatch.setattr("agentseek_api.api.stateless_runs.create_stateless_run", fake_create_stateless_run)
-    monkeypatch.setattr("agentseek_api.api.stateless_runs.wait_run", fake_wait_run)
-    monkeypatch.setattr("agentseek_api.api.stateless_runs._wait_response_payload", fake_wait_response_payload)
+    monkeypatch.setattr("agentseek_api.api.runs._wait_run_terminal", fake_wait_run)
+    monkeypatch.setattr("agentseek_api.api.runs._wait_response_payload", fake_wait_response_payload)
 
     waited = client.post("/runs/wait", json={"assistant_id": assistant_id, "input": {"message": "later"}})
     assert waited.status_code == 200

@@ -124,6 +124,18 @@ def _checkpoint_payload(thread: Thread, checkpoint_id: str, *, values=None) -> d
     }
 
 
+def _checkpoint_payload_in_namespace(
+    thread: Thread,
+    checkpoint_id: str,
+    *,
+    checkpoint_ns: str,
+    values=None,
+) -> dict[str, object]:
+    payload = _checkpoint_payload(thread, checkpoint_id, values=values)
+    payload["checkpoint"]["checkpoint_ns"] = checkpoint_ns
+    return payload
+
+
 @pytest.mark.asyncio
 async def test_best_effort_checkpointer_call_covers_missing_and_not_implemented(monkeypatch: pytest.MonkeyPatch) -> None:
     class MissingMethodCheckpointer:
@@ -272,6 +284,51 @@ async def test_get_thread_state_prefers_latest_checkpoint_when_store_order_varie
 
     assert payload["checkpoint"]["checkpoint_id"] == "cp-new"
     assert payload["values"] == {"manual": "new"}
+
+
+@pytest.mark.asyncio
+async def test_get_thread_state_payload_filters_to_requested_checkpoint_namespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread = _thread()
+    session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
+    monkeypatch.setattr(
+        "agentseek_api.api.threads.db_manager.get_session_factory",
+        lambda: FakeSessionFactory([session]),
+    )
+
+    other_payload = _checkpoint_payload_in_namespace(
+        thread,
+        "cp-other",
+        checkpoint_ns="run-other",
+        values={"output": {"echo": {"message": "other"}}},
+    )
+    other_payload["created_at"] = datetime(2026, 1, 2, tzinfo=UTC)
+    target_payload = _checkpoint_payload_in_namespace(
+        thread,
+        "cp-target",
+        checkpoint_ns="run-target",
+        values={"output": {"echo": {"message": "target"}}},
+    )
+    target_payload["created_at"] = datetime(2026, 1, 1, tzinfo=UTC)
+
+    async def fake_list_checkpoints(*_args, **_kwargs):
+        return ["other", "target"]
+
+    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
+    monkeypatch.setattr(
+        "agentseek_api.api.threads.checkpoint_to_payload",
+        lambda token: other_payload if token == "other" else target_payload,
+    )
+
+    payload = await threads_module._get_thread_state_payload(
+        thread_id=thread.thread_id,
+        user=User(identity=thread.user_id, is_authenticated=True),
+        checkpoint_ns="run-target",
+    )
+
+    assert payload["checkpoint"]["checkpoint_id"] == "cp-target"
+    assert payload["values"] == {"output": {"echo": {"message": "target"}}}
 
 
 @pytest.mark.asyncio

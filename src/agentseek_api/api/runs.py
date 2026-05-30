@@ -8,14 +8,15 @@ from urllib.parse import urlencode
 from sqlalchemy import delete, select
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
 from agentseek_api.models.auth import User
-from agentseek_api.api.threads import get_thread_state
+from agentseek_api.api.threads import _find_thread_state_payload, _get_thread_state_at_checkpoint, get_thread_state
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
@@ -28,6 +29,7 @@ from agentseek_api.services.stream_persistence import (
     load_run_stream_events,
     parse_last_event_id,
 )
+from agentseek_api.services.sse import iter_with_sse_keepalives, sse_keepalive_comment
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.settings import settings
 
@@ -38,6 +40,7 @@ REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
 SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages"}
 RUN_STREAM_MODE_ALIASES = {"messages-tuple": "messages"}
+RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
 
 
 async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
@@ -63,10 +66,16 @@ def _to_read_model(run: Run) -> RunRead:
         last_error=run.last_error,
         created_at=run.created_at,
         updated_at=run.updated_at,
-        metadata=run.metadata_json,
+        metadata=_public_run_metadata(run.metadata_json),
         kwargs=run.kwargs_json,
         multitask_strategy=run.multitask_strategy,
     )
+
+
+def _public_run_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(metadata, dict):
+        return {}
+    return {key: value for key, value in metadata.items() if key != RUN_CHECKPOINT_ID_METADATA_KEY}
 
 
 def _uses_redis_executor() -> bool:
@@ -74,15 +83,26 @@ def _uses_redis_executor() -> bool:
 
 
 def _normalize_stream_modes(stream_mode: str | list[str] | None) -> list[str]:
-    raw_modes = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode or ["values"])
+    if stream_mode is None:
+        return ["values"]
+
+    raw_modes = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode)
     modes: list[str] = []
+    invalid_modes: list[str] = []
+
+    if not raw_modes:
+        invalid_modes.append("<empty>")
+
     for mode in raw_modes:
-        normalized = RUN_STREAM_MODE_ALIASES.get(str(mode).strip(), str(mode).strip())
-        if normalized and normalized not in modes:
+        raw_mode = str(mode).strip()
+        if not raw_mode:
+            invalid_modes.append("<empty>")
+            continue
+        normalized = RUN_STREAM_MODE_ALIASES.get(raw_mode, raw_mode)
+        if normalized not in modes:
             modes.append(normalized)
-    if not modes:
-        modes = ["values"]
-    unsupported = [mode for mode in modes if mode not in SUPPORTED_RUN_STREAM_MODES]
+
+    unsupported = invalid_modes + [mode for mode in modes if mode not in SUPPORTED_RUN_STREAM_MODES]
     if unsupported:
         raise HTTPException(
             status_code=422,
@@ -158,10 +178,71 @@ async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
         return {"__interrupt__": run.interrupts}
     if run.status == "error":
         return {"__error__": run.last_error} if run.last_error else {}
-    state = await get_thread_state(run.thread_id, user)
+    checkpoint_id = await _load_run_checkpoint_id(run_id=run.run_id, thread_id=run.thread_id, user_id=user.identity)
+    if checkpoint_id is not None:
+        state = await _get_thread_state_at_checkpoint(thread_id=run.thread_id, checkpoint_id=checkpoint_id, user=user)
+    else:
+        state = await _find_thread_state_payload(thread_id=run.thread_id, user=user, checkpoint_ns=run.run_id)
+        if state is None:
+            state = await get_thread_state(run.thread_id, user)
     if isinstance(state, dict) and "values" in state:
         return state["values"]
     return {}
+
+
+async def _load_run_checkpoint_id(*, run_id: str, thread_id: str, user_id: str) -> str | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user_id)
+        )
+        if row is None or not isinstance(row.metadata_json, dict):
+            return None
+        checkpoint_id = row.metadata_json.get(RUN_CHECKPOINT_ID_METADATA_KEY)
+        if not isinstance(checkpoint_id, str) or not checkpoint_id:
+            return None
+        return checkpoint_id
+
+
+async def _get_run_read(thread_id: str, run_id: str, user: User) -> RunRead:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
+        )
+        if row is None:
+            raise HTTPException(status_code=404, detail="Run not found")
+        return _to_read_model(row)
+
+
+def _wait_json_stream_response(
+    *,
+    run: RunRead,
+    user: User,
+    headers: dict[str, str],
+) -> StreamingResponse:
+    async def _body() -> AsyncIterator[bytes]:
+        current_run = run
+        while current_run.status not in TERMINAL_RUN_STATUSES:
+            try:
+                current_run = await _wait_run_terminal(
+                    current_run.thread_id,
+                    current_run.run_id,
+                    user,
+                    timeout_seconds=5.0,
+                )
+            except HTTPException as exc:
+                if exc.status_code != 408:
+                    raise
+                yield b"\n"
+        payload = await _wait_response_payload(current_run, user=user)
+        yield json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode()
+
+    return StreamingResponse(
+        _body(),
+        media_type="application/json",
+        headers=headers,
+    )
 
 
 def _stream_response_headers(*, location: str, content_location: str) -> dict[str, str]:
@@ -194,7 +275,14 @@ def _interrupt_stream_event_name(stream_modes: list[str]) -> str | None:
 def _protocol_stream_request(*, stream_modes: list[str]):
     from agentseek_api.models.protocol import ProtocolEventStreamRequest
 
-    return ProtocolEventStreamRequest(channels=stream_modes)
+    return ProtocolEventStreamRequest(channels=_protocol_channels_for_stream_modes(stream_modes))
+
+
+def _protocol_channels_for_stream_modes(stream_modes: list[str]) -> list[str]:
+    channels = list(stream_modes)
+    if "input" not in channels:
+        channels.append("input")
+    return channels
 
 
 async def _iter_persisted_protocol_run_events(
@@ -249,8 +337,11 @@ def _build_create_run_stream_response(
     location: str,
     content_location: str,
     include_metadata: bool = True,
+    replay_existing: bool = True,
 ) -> StreamingResponse:
-    protocol_channels = [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
+    protocol_channels = _protocol_channels_for_stream_modes(
+        [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
+    )
 
     async def _event_iter() -> AsyncIterator[str]:
         current_seq = after_seq
@@ -264,9 +355,11 @@ def _build_create_run_stream_response(
             depth=None,
             after_seq=after_seq,
         ):
+            current_seq = max(current_seq, int(event.get("seq", 0)))
             if event.get("params", {}).get("run_id") != created.run_id:
                 continue
-            current_seq = max(current_seq, int(event.get("seq", 0)))
+            if not replay_existing:
+                continue
             yield _protocol_event_sse(
                 seq=current_seq,
                 event_name=str(event.get("method", "message")),
@@ -274,13 +367,18 @@ def _build_create_run_stream_response(
             )
 
         if _uses_redis_executor():
-            async for event in _iter_persisted_protocol_run_events(
-                thread_id=thread_id,
-                run_id=created.run_id,
-                stream_modes=protocol_channels,
-                user_id=user.identity,
-                after_seq=current_seq,
+            async for event in iter_with_sse_keepalives(
+                _iter_persisted_protocol_run_events(
+                    thread_id=thread_id,
+                    run_id=created.run_id,
+                    stream_modes=protocol_channels,
+                    user_id=user.identity,
+                    after_seq=current_seq,
+                )
             ):
+                if event is None:
+                    yield sse_keepalive_comment()
+                    continue
                 current_seq = max(current_seq, int(event.get("seq", 0)))
                 yield _protocol_event_sse(
                     seq=current_seq,
@@ -288,13 +386,18 @@ def _build_create_run_stream_response(
                     data=event.get("params", {}).get("data", {}),
                 )
         else:
-            async for event in thread_protocol_broker.stream(
-                thread_id,
-                channels=protocol_channels,
-                namespaces=None,
-                depth=None,
-                since=current_seq,
+            async for event in iter_with_sse_keepalives(
+                thread_protocol_broker.stream(
+                    thread_id,
+                    channels=protocol_channels,
+                    namespaces=None,
+                    depth=None,
+                    since=current_seq,
+                )
             ):
+                if event is None:
+                    yield sse_keepalive_comment()
+                    continue
                 event_run_id = event.get("params", {}).get("run_id")
                 if event_run_id != created.run_id:
                     continue
@@ -305,7 +408,11 @@ def _build_create_run_stream_response(
                     data=event.get("params", {}).get("data", {}),
                 )
 
-        final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
+        final_run = (
+            created
+            if created.status in TERMINAL_RUN_STATUSES
+            else await _wait_run_terminal(thread_id, created.run_id, user, timeout_seconds=None)
+        )
         if final_run.status == "error":
             current_seq += 1
             yield _protocol_event_sse(
@@ -411,9 +518,14 @@ async def get_run(thread_id: str, run_id: str, user: User = Depends(get_current_
         return _to_read_model(row)
 
 
-@router.get("/{run_id}/wait", response_model=RunRead)
-async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
-    deadline = asyncio.get_event_loop().time() + 30
+async def _wait_run_terminal(
+    thread_id: str,
+    run_id: str,
+    user: User,
+    *,
+    timeout_seconds: float | None = 30.0,
+) -> RunRead:
+    deadline = None if timeout_seconds is None else asyncio.get_event_loop().time() + timeout_seconds
     while True:
         session_factory = db_manager.get_session_factory()
         async with session_factory() as session:
@@ -424,14 +536,19 @@ async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current
                 raise HTTPException(status_code=404, detail="Run not found")
             if row.status in TERMINAL_RUN_STATUSES:
                 return _to_read_model(row)
-        if asyncio.get_event_loop().time() > deadline:
+        if deadline is not None and asyncio.get_event_loop().time() > deadline:
             raise HTTPException(status_code=408, detail="Run wait timeout")
         await asyncio.sleep(0.2)
 
 
+@router.get("/{run_id}/wait", response_model=RunRead)
+async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
+    return await _wait_run_terminal(thread_id, run_id, user)
+
+
 @router.post(
     "/wait",
-    response_class=JSONResponse,
+    response_class=StreamingResponse,
     responses={
         200: {
             "content": {"application/json": {"schema": {}}},
@@ -446,12 +563,12 @@ async def create_run_wait(
     thread_id: str,
     payload: RunCreateStreamingStateful,
     user: User = Depends(get_current_user),
-) -> JSONResponse:
+) -> StreamingResponse:
     _normalize_stream_modes(payload.stream_mode)
     created = await create_run(thread_id, payload, user)
-    final_run = created if created.status in TERMINAL_RUN_STATUSES else await wait_run(thread_id, created.run_id, user)
-    return JSONResponse(
-        await _wait_response_payload(final_run, user=user),
+    return _wait_json_stream_response(
+        run=created,
+        user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=created.run_id),
     )
 
@@ -533,7 +650,7 @@ async def cancel_run(
 
 @router.get(
     "/{run_id}/join",
-    response_class=JSONResponse,
+    response_class=StreamingResponse,
     responses={
         200: {
             "content": {"application/json": {"schema": {}}},
@@ -544,10 +661,11 @@ async def cancel_run(
         }
     },
 )
-async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> JSONResponse:
-    run = await wait_run(thread_id, run_id, user)
-    return JSONResponse(
-        await _wait_response_payload(run, user=user),
+async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> StreamingResponse:
+    run = await _get_run_read(thread_id, run_id, user)
+    return _wait_json_stream_response(
+        run=run,
+        user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=run_id),
     )
 
@@ -577,9 +695,11 @@ async def stream_run(
     stream_mode: Annotated[list[str] | None, Query()] = None,
 ) -> StreamingResponse:
     try:
-        after_seq = parse_last_event_id(last_event_id) or 0
+        parsed_last_event_id = parse_last_event_id(last_event_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    after_seq = parsed_last_event_id or 0
+    replay_existing = parsed_last_event_id is not None
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(
@@ -599,6 +719,7 @@ async def stream_run(
                 location=_protocol_stream_location(thread_id=thread_id, run_id=run_id, stream_modes=stream_modes),
                 content_location=f"/threads/{thread_id}/runs/{run_id}",
                 include_metadata=after_seq == 0,
+                replay_existing=replay_existing,
             )
 
     async def _event_iter() -> AsyncIterator[str]:
@@ -617,12 +738,18 @@ async def stream_run(
             yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
 
         if use_redis_executor:
-            async for seq, event in _iter_persisted_run_records(
-                run_id=run_id,
-                thread_id=thread_id,
-                user_id=user.identity,
-                after_seq=current_seq,
+            async for item in iter_with_sse_keepalives(
+                _iter_persisted_run_records(
+                    run_id=run_id,
+                    thread_id=thread_id,
+                    user_id=user.identity,
+                    after_seq=current_seq,
+                )
             ):
+                if item is None:
+                    yield sse_keepalive_comment()
+                    continue
+                seq, event = item
                 event_name = str(event.get("event", "message"))
                 event_payload = {"run_id": run_id, **event}
                 yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
@@ -631,7 +758,11 @@ async def stream_run(
         if row.status in TERMINAL_RUN_STATUSES:
             return
 
-        async for seq, event in run_broker.stream_records(run_id, after_seq=current_seq):
+        async for item in iter_with_sse_keepalives(run_broker.stream_records(run_id, after_seq=current_seq)):
+            if item is None:
+                yield sse_keepalive_comment()
+                continue
+            seq, event = item
             event_name = str(event.get("event", "message"))
             event_payload = {"run_id": run_id, **event}
             yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
