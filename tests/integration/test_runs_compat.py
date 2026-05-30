@@ -1,9 +1,13 @@
+import asyncio
 from collections.abc import Awaitable, Callable
 import json
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import HumanMessage
+from sqlalchemy import select
 
+from agentseek_api.core.database import db_manager
+from agentseek_api.core.orm import Run
 from agentseek_api.main import app
 from agentseek_api.models.api import RunRead
 from agentseek_api.services.run_jobs import RunExecutionJob
@@ -47,6 +51,14 @@ def _parse_sse_events(stream_text: str) -> list[dict[str, object]]:
     if current:
         events.append(current)
     return events
+
+
+async def _raw_run_metadata(*, thread_id: str, run_id: str) -> dict[str, object]:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(select(Run).where(Run.thread_id == thread_id, Run.run_id == run_id))
+        assert row is not None
+        return row.metadata_json
 
 
 def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
@@ -117,6 +129,38 @@ def test_join_run_stays_bound_to_waited_run_after_newer_run_on_same_thread(clien
     assert joined_first.json() == first_body
     assert joined_second.status_code == 200
     assert joined_second.json()["output"] == {"echo": {"message": "second"}}
+
+
+def test_run_read_metadata_hides_internal_checkpoint_id(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client)
+
+    created = client.post(
+        f"/threads/{thread_id}/runs",
+        json={
+            "assistant_id": assistant_id,
+            "input": {"message": "metadata visibility"},
+            "metadata": {"visible": "yes"},
+        },
+    )
+    assert created.status_code == 200
+    run_id = created.json()["run_id"]
+
+    raw_metadata = asyncio.run(_raw_run_metadata(thread_id=thread_id, run_id=run_id))
+    assert raw_metadata["visible"] == "yes"
+    assert isinstance(raw_metadata["__agentseek_checkpoint_id"], str)
+
+    public_created = created.json()["metadata"]
+    assert public_created == {"visible": "yes"}
+
+    fetched = client.get(f"/threads/{thread_id}/runs/{run_id}")
+    assert fetched.status_code == 200
+    assert fetched.json()["metadata"] == {"visible": "yes"}
+
+    listed = client.get(f"/threads/{thread_id}/runs")
+    assert listed.status_code == 200
+    listed_run = next(run for run in listed.json() if run["run_id"] == run_id)
+    assert listed_run["metadata"] == {"visible": "yes"}
 
 
 def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
