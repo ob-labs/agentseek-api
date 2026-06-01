@@ -67,6 +67,7 @@ class CliConfig:
 class DevServerUrls:
     api_url: str
     docs_url: str
+    scalar_docs_url: str
     studio_url: str
 
 
@@ -324,6 +325,7 @@ def _resolve_dev_urls(*, host: str, port: int, studio_url: str | None) -> DevSer
     return DevServerUrls(
         api_url=api_url,
         docs_url=f"{api_url}/docs",
+        scalar_docs_url=f"{api_url}/scalar-docs",
         studio_url=f"{studio_origin}/studio/?baseUrl={studio_base_url}",
     )
 
@@ -334,7 +336,9 @@ def _render_dev_ready_banner(urls: DevServerUrls) -> str:
         ">\n"
         f"> - API: {urls.api_url}\n"
         ">\n"
-        f"> - Docs: {urls.docs_url}\n"
+        f"> - Docs (Swagger): {urls.docs_url}\n"
+        ">\n"
+        f"> - Docs (Scalar): {urls.scalar_docs_url}\n"
         ">\n"
         f"> - LangSmith Studio Web UI: {urls.studio_url}\n"
     )
