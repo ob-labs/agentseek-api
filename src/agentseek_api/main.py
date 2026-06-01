@@ -5,7 +5,8 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
+from scalar_fastapi import get_scalar_api_reference
 from starlette.routing import Route
 
 from agentseek_api import __version__
@@ -155,6 +156,14 @@ def create_app() -> FastAPI:
     @app.get("/ok")
     async def ok() -> dict[str, bool]:
         return {"ok": True}
+
+    @app.get("/scalar-docs", include_in_schema=False)
+    async def scalar_docs() -> HTMLResponse:
+        return get_scalar_api_reference(
+            openapi_url=app.openapi_url,
+            title=f"{settings.APP_NAME} - Scalar",
+            persist_auth=True,
+        )
 
     @app.get("/info")
     async def info() -> dict[str, object]:

@@ -362,6 +362,7 @@ def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
 
     assert urls.api_url == "http://localhost:2024"
     assert urls.docs_url == "http://localhost:2024/docs"
+    assert urls.scalar_docs_url == "http://localhost:2024/scalar-docs"
     assert urls.studio_url == "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"
 
 
@@ -372,6 +373,7 @@ def test_resolve_dev_urls_preserve_explicit_host_and_override_studio_origin() ->
 
     assert urls.api_url == "http://devbox.local:3030"
     assert urls.docs_url == "http://devbox.local:3030/docs"
+    assert urls.scalar_docs_url == "http://devbox.local:3030/scalar-docs"
     assert urls.studio_url == "https://smith.example.com/studio/?baseUrl=http://devbox.local:3030"
 
 
@@ -413,7 +415,8 @@ def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) 
     assert exit_code == 0
     assert "> Ready!" in stdout.getvalue()
     assert "- API: http://localhost:2024" in stdout.getvalue()
-    assert "- Docs: http://localhost:2024/docs" in stdout.getvalue()
+    assert "- Docs (Swagger): http://localhost:2024/docs" in stdout.getvalue()
+    assert "- Docs (Scalar): http://localhost:2024/scalar-docs" in stdout.getvalue()
     assert "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024" in stdout.getvalue()
     assert opened == ["https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"]
 
