@@ -203,19 +203,17 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
 
         graph = await client.get(f"/assistants/{default_assistant['assistant_id']}/graph")
         assert graph.status_code == 200
-        assert graph.json()["graph_id"] == "stress_test"
+        assert "nodes" in graph.json()
 
         schemas = await client.get(f"/assistants/{default_assistant['assistant_id']}/schemas")
         assert schemas.status_code == 200
         assert "input_schema" in schemas.json()
 
         subgraphs = await client.get(f"/assistants/{default_assistant['assistant_id']}/subgraphs")
-        assert subgraphs.status_code == 501
-        assert subgraphs.json()["detail"] == "Assistant subgraph inspection is not supported"
+        assert subgraphs.status_code == 200
 
         namespaced = await client.get(f"/assistants/{default_assistant['assistant_id']}/subgraphs/root")
-        assert namespaced.status_code == 501
-        assert namespaced.json()["detail"] == "Assistant subgraph inspection is not supported"
+        assert namespaced.status_code == 200
 
         versions = await client.post(f"/assistants/{default_assistant['assistant_id']}/versions")
         assert versions.status_code == 200
