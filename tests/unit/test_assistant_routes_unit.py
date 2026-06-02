@@ -214,13 +214,30 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
         await assistants_module.set_latest_assistant_version("assistant-1")
     assert latest_error.value.status_code == 409
 
-    with pytest.raises(HTTPException, match="Assistant subgraph inspection is not supported") as subgraph_error:
-        await assistants_module.get_assistant_subgraphs("assistant-1")
-    assert subgraph_error.value.status_code == 501
+    class FakeGraph:
+        pass
 
-    with pytest.raises(HTTPException, match="Assistant subgraph inspection is not supported") as namespaced_error:
+    class FakeEntry:
+        @staticmethod
+        def build_graph():
+            return FakeGraph()
+
+    class FakeLangGraphService:
+        def get_entry(self, _graph_id):
+            return FakeEntry()
+
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.get_langgraph_service",
+        FakeLangGraphService,
+    )
+
+    with pytest.raises(HTTPException, match="The graph does not support subgraphs") as subgraph_error:
+        await assistants_module.get_assistant_subgraphs("assistant-1")
+    assert subgraph_error.value.status_code == 422
+
+    with pytest.raises(HTTPException, match="The graph does not support subgraphs") as namespaced_error:
         await assistants_module.get_assistant_subgraphs_by_namespace("assistant-1", "root")
-    assert namespaced_error.value.status_code == 501
+    assert namespaced_error.value.status_code == 422
 
 
 def test_assistant_helper_openapi_matches_limited_contract() -> None:
@@ -241,17 +258,17 @@ def test_assistant_helper_openapi_matches_limited_contract() -> None:
     )
 
     subgraphs_responses = schema["paths"]["/assistants/{assistant_id}/subgraphs"]["get"]["responses"]
-    assert "200" not in subgraphs_responses
-    assert "501" in subgraphs_responses
-    assert subgraphs_responses["501"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
-    assert subgraphs_responses["501"]["content"]["application/json"]["example"] == {
-        "detail": "Assistant subgraph inspection is not supported"
+    assert "200" in subgraphs_responses
+    assert "422" in subgraphs_responses
+    assert subgraphs_responses["422"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert subgraphs_responses["422"]["content"]["application/json"]["example"] == {
+        "detail": "The graph does not support subgraphs"
     }
 
     namespaced_responses = schema["paths"]["/assistants/{assistant_id}/subgraphs/{namespace}"]["get"]["responses"]
-    assert "200" not in namespaced_responses
-    assert "501" in namespaced_responses
-    assert namespaced_responses["501"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert "200" in namespaced_responses
+    assert "422" in namespaced_responses
+    assert namespaced_responses["422"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
 
     latest_responses = schema["paths"]["/assistants/{assistant_id}/latest"]["post"]["responses"]
     assert "200" not in latest_responses

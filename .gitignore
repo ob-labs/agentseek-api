@@ -2,6 +2,7 @@
 .coverage
 .agentseek/
 .pytest_cache/
+.ruff_cache/
 .tmp/
 .venv/
 __pycache__/
@@ -15,3 +16,5 @@ venv/
 ENV/
 env.bak/
 venv.bak/
+graph/
+.langgraph_api/

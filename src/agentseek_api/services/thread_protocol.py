@@ -12,7 +12,11 @@ def protocol_timestamp_ms() -> int:
 
 
 def protocol_channel_for_method(method: str) -> str:
-    return "input" if method.startswith("input.") else method
+    if method.startswith("input."):
+        return "input"
+    if method.startswith("messages/"):
+        return "messages"
+    return method
 
 
 def _namespace_matches(
@@ -723,6 +727,83 @@ async def apublish_message_complete(
         thread_id,
         {
             "method": "messages",
+            "params": params,
+        },
+    )
+
+
+async def apublish_messages_metadata(
+    thread_id: str,
+    *,
+    message_id: str,
+    metadata: dict[str, Any],
+    namespace: list[str] | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Emit ``messages/metadata`` matching the official LangGraph wire format."""
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": {message_id: {"metadata": metadata}},
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
+    await _apublish_thread_event(
+        thread_id,
+        {
+            "method": "messages/metadata",
+            "params": params,
+        },
+    )
+
+
+async def apublish_messages_partial(
+    thread_id: str,
+    *,
+    messages: list[dict[str, Any]],
+    namespace: list[str] | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Emit ``messages/partial`` matching the official LangGraph wire format.
+
+    ``messages`` must be the *accumulated* message dicts (not deltas), one entry
+    per message currently being streamed.
+    """
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": messages,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
+    await _apublish_thread_event(
+        thread_id,
+        {
+            "method": "messages/partial",
+            "params": params,
+        },
+    )
+
+
+async def apublish_messages_complete(
+    thread_id: str,
+    *,
+    messages: list[dict[str, Any]],
+    namespace: list[str] | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Emit ``messages/complete`` for non-streaming messages (e.g. ToolMessage)."""
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": messages,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
+    await _apublish_thread_event(
+        thread_id,
+        {
+            "method": "messages/complete",
             "params": params,
         },
     )

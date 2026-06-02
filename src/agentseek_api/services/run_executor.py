@@ -2,7 +2,8 @@ from dataclasses import dataclass, field
 import inspect
 from typing import Any
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, BaseMessageChunk
+from langchain_core.messages.utils import message_chunk_to_message
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 from langgraph.types import Command
 
@@ -19,6 +20,9 @@ from agentseek_api.services.thread_protocol import (
     apublish_message_complete,
     apublish_message_start,
     apublish_message_transcript,
+    apublish_messages_complete,
+    apublish_messages_metadata,
+    apublish_messages_partial,
     apublish_tool_event,
     apublish_updates_event,
     apublish_values_event,
@@ -42,20 +46,19 @@ class RunExecutionResult:
 
 def _normalize_stream_value(value: Any) -> Any:
     if isinstance(value, BaseMessage):
-        payload: dict[str, Any] = {
-            "type": type(value).__name__,
-            "content": _normalize_stream_value(getattr(value, "content", None)),
-        }
-        tool_calls = getattr(value, "tool_calls", None)
-        if tool_calls:
-            payload["tool_calls"] = _normalize_stream_value(tool_calls)
-        message_name = getattr(value, "name", None)
-        if message_name:
-            payload["name"] = message_name
-        tool_call_id = getattr(value, "tool_call_id", None)
-        if tool_call_id:
-            payload["tool_call_id"] = tool_call_id
-        return payload
+        # Use model_dump so the wire-level shape matches the official LangGraph
+        # SDK contract: lowercase ``type`` (``"ai"``/``"human"``/...), plus
+        # ``id``, ``additional_kwargs``, ``response_metadata``, ``tool_calls``.
+        # Without this, clients parsing ``{"type": "AIMessage"}`` won't recognize
+        # the message and ``updates`` events render as opaque dicts.
+        try:
+            dumped = value.model_dump()
+        except Exception:  # noqa: BLE001
+            dumped = {
+                "type": getattr(value, "type", type(value).__name__),
+                "content": getattr(value, "content", None),
+            }
+        return _normalize_stream_value(dumped)
     if isinstance(value, dict):
         return {str(key): _normalize_stream_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
@@ -97,6 +100,39 @@ def _extract_text_chunk(chunk: Any) -> Any:
     return None
 
 
+def _to_chunk(message: BaseMessage) -> BaseMessageChunk | None:
+    """Best-effort conversion of a complete BaseMessage to its chunk type.
+
+    Needed because chat-model providers may emit a final non-chunk frame after
+    streaming chunks; ``BaseMessageChunk + BaseMessage`` raises, but two chunks
+    add cleanly.
+    """
+    from langchain_core.messages import (
+        AIMessage,
+        AIMessageChunk,
+        HumanMessage,
+        HumanMessageChunk,
+        SystemMessage,
+        SystemMessageChunk,
+        ToolMessage,
+        ToolMessageChunk,
+    )
+
+    pairs: list[tuple[type[BaseMessage], type[BaseMessageChunk]]] = [
+        (AIMessage, AIMessageChunk),
+        (HumanMessage, HumanMessageChunk),
+        (SystemMessage, SystemMessageChunk),
+        (ToolMessage, ToolMessageChunk),
+    ]
+    for base_cls, chunk_cls in pairs:
+        if isinstance(message, base_cls) and not isinstance(message, BaseMessageChunk):
+            try:
+                return chunk_cls(**message.model_dump(exclude={"type"}))
+            except Exception:  # noqa: BLE001
+                return None
+    return None
+
+
 def _protocol_role_for_message(message: BaseMessage) -> str | None:
     if isinstance(message, BaseMessage):
         message_type = type(message).__name__
@@ -106,6 +142,8 @@ def _protocol_role_for_message(message: BaseMessage) -> str | None:
             return "human"
         if message_type.startswith("SystemMessage"):
             return "system"
+        if message_type.startswith("ToolMessage"):
+            return "tool"
     return None
 
 
@@ -752,6 +790,11 @@ async def execute_run(
     interrupt_chunk: Any = None
     interrupt_namespace: list[str] | None = None
     protocol_messages = _ProtocolMessageStreamState(thread_id=thread_id, run_id=run_id)
+    # Accumulators for the official LangGraph ``messages/partial`` wire format —
+    # one accumulated message per id, plus a "metadata seen" set so we only emit
+    # ``messages/metadata`` once per message_id.
+    messages_partial_acc: dict[str, BaseMessage] = {}
+    messages_metadata_seen: set[str] = set()
     async for stream_event in graph.astream_events(invocation, config, version="v2"):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):
@@ -762,7 +805,8 @@ async def execute_run(
         if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:
             data = stream_event.get("data", {})
             chunk = data.get("chunk") if isinstance(data, dict) else None
-            for message_index, message in enumerate(_extract_chunk_messages(chunk)):
+            extracted_messages = _extract_chunk_messages(chunk)
+            for message_index, message in enumerate(extracted_messages):
                 role = _protocol_role_for_message(message)
                 blocks = _protocol_blocks_for_message(message)
                 if role is None or not blocks:
@@ -778,6 +822,59 @@ async def execute_run(
                     blocks=blocks,
                     namespace=protocol_namespace,
                 )
+                # Emit ``messages/metadata`` once, then accumulate the message
+                # and emit ``messages/partial`` with the full accumulated payload.
+                first_seen = message_id not in messages_metadata_seen
+                if first_seen:
+                    messages_metadata_seen.add(message_id)
+                    await apublish_messages_metadata(
+                        thread_id,
+                        message_id=message_id,
+                        metadata=_normalize_stream_value(stream_event.get("metadata", {})) or {},
+                        namespace=protocol_namespace,
+                        run_id=run_id,
+                    )
+                if role == "tool":
+                    # Tool messages arrive complete (not streamed) — emit once as
+                    # ``messages/complete`` matching official LangGraph protocol.
+                    if first_seen:
+                        tool_dump = _normalize_stream_value(message)
+                        if isinstance(tool_dump, dict):
+                            await apublish_messages_complete(
+                                thread_id,
+                                messages=[tool_dump],
+                                namespace=protocol_namespace,
+                                run_id=run_id,
+                            )
+                    continue
+                existing = messages_partial_acc.get(message_id)
+                if existing is None:
+                    accumulated = message
+                elif not isinstance(message, BaseMessageChunk):
+                    # A full BaseMessage with an id we've been streaming is the
+                    # node's final assembled message — replace, don't re-add.
+                    accumulated = message
+                else:
+                    left = existing if isinstance(existing, BaseMessageChunk) else _to_chunk(existing)
+                    accumulated = left + message if left is not None else message
+                messages_partial_acc[message_id] = accumulated
+                # Wire format mirrors official LangGraph: lowercase ``type``
+                # ("ai", not "AIMessageChunk"). ``message_chunk_to_message``
+                # converts the accumulated chunk to its non-chunk equivalent
+                # before serialization.
+                output_message = (
+                    message_chunk_to_message(accumulated)
+                    if isinstance(accumulated, BaseMessageChunk)
+                    else accumulated
+                )
+                accumulated_dump = _normalize_stream_value(output_message)
+                if isinstance(accumulated_dump, dict):
+                    await apublish_messages_partial(
+                        thread_id,
+                        messages=[accumulated_dump],
+                        namespace=protocol_namespace,
+                        run_id=run_id,
+                    )
             if raw_event_name == "on_llm_stream":
                 text = _extract_text_chunk(chunk)
                 if text not in ("", None):

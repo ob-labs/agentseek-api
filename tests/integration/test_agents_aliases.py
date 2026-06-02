@@ -53,15 +53,13 @@ def test_agents_alias_exposes_graph_schema_and_version_helpers(client: TestClien
 
     graph = client.get(f"/agents/{assistant_id}/graph")
     assert graph.status_code == 200
-    assert graph.json()["assistant_id"] == assistant_id
-    assert "default" in graph.json()["registered_graph_ids"]
+    assert "nodes" in graph.json()
+    assert "edges" in graph.json()
 
     schemas = client.get(f"/agents/{assistant_id}/schemas")
     assert schemas.status_code == 200
-    assert schemas.json()["assistant_id"] == assistant_id
-    assert schemas.json()["name"] == "agent-helpers"
-    assert schemas.json()["description"] == "Custom helper description"
-    assert schemas.json()["input_schema"] == {"type": "object"}
+    assert schemas.json()["graph_id"] == "default"
+    assert schemas.json()["input_schema"]["type"] == "object"
 
     latest = client.post(f"/agents/{assistant_id}/latest")
     assert latest.status_code == 409

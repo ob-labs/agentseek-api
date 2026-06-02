@@ -5,6 +5,7 @@ from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from scalar_fastapi import get_scalar_api_reference
 from starlette.routing import Route
@@ -26,9 +27,12 @@ from agentseek_api.api.threads import router as threads_router
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.a2a_config import is_a2a_enabled
+from agentseek_api.core.content_type_fix import ContentTypeFixMiddleware
+from agentseek_api.core.cors_config import DEFAULT_EXPOSE_HEADERS, CorsConfig, get_cors_config
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.mcp_config import is_mcp_enabled
 from agentseek_api.mcp_server import MCPMount, build_mcp_mount
+from agentseek_api.services.default_assistants import ensure_default_assistants
 from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.settings import settings
 
@@ -36,6 +40,7 @@ from agentseek_api.settings import settings
 @asynccontextmanager
 async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await db_manager.initialize()
+    await ensure_default_assistants()
     try:
         async with AsyncExitStack() as stack:
             mcp_mount: MCPMount | None = getattr(_app.state, "mcp_mount", None)
@@ -83,7 +88,6 @@ def _server_metadata() -> dict[str, object]:
         "compatibility_tier": "oss-core",
         "unsupported_features": [
             "distributed_runtime",
-            "assistant_subgraph_inspection",
             "assistant_version_promotion",
         ],
     }
@@ -135,8 +139,44 @@ async def _resolve_mcp_user(app: FastAPI, request) -> object:
     return resolved
 
 
+def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
+    """Register CORSMiddleware using config-or-defaults.
+
+    When ``allow_origins`` is the wildcard ``["*"]``, ``allow_credentials``
+    defaults to ``False`` — the combination of wildcard + credentials is
+    rejected by browsers and unsafe in practice. To enable credentials,
+    list concrete origins.
+    """
+    if cors_config:
+        origins = cors_config.get("allow_origins", ["*"])
+        credentials = cors_config.get(
+            "allow_credentials",
+            origins not in (["*"], "*"),
+        )
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=origins,
+            allow_credentials=credentials,
+            allow_methods=cors_config.get("allow_methods", ["*"]),
+            allow_headers=cors_config.get("allow_headers", ["*"]),
+            expose_headers=cors_config.get("expose_headers", DEFAULT_EXPOSE_HEADERS),
+            max_age=cors_config.get("max_age", 600),
+        )
+    else:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=False,
+            allow_methods=["*"],
+            allow_headers=["*"],
+            expose_headers=DEFAULT_EXPOSE_HEADERS,
+        )
+
+
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
+    _add_cors_middleware(app, get_cors_config())
+    app.add_middleware(ContentTypeFixMiddleware)
     _apply_auth_openapi(app)
     app.state.a2a_enabled = is_a2a_enabled()
     app.state.a2a_registry = A2ATaskRegistry()

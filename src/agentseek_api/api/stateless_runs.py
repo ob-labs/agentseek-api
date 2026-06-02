@@ -67,6 +67,7 @@ async def create_stateless_run_wait(payload: RunCreateStreamingStateless, user: 
             location=f"/threads/{created.thread_id}/runs/{created.run_id}/join",
             content_location=f"/threads/{created.thread_id}/runs/{created.run_id}",
         ),
+        cancel_on_disconnect=payload.on_disconnect == "cancel",
     )
 
 
@@ -96,6 +97,7 @@ async def create_stateless_run_stream(payload: RunCreateStreamingStateless, user
         after_seq=0,
         location=_protocol_stream_location(thread_id=thread.thread_id, run_id=created.run_id, stream_modes=stream_modes),
         content_location=f"/threads/{thread.thread_id}/runs/{created.run_id}",
+        cancel_on_disconnect=payload.on_disconnect == "cancel",
     )
 
 

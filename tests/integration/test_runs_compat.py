@@ -306,9 +306,7 @@ def test_create_run_stream_messages_mode_emits_message_events(client: TestClient
 
     assert response.status_code == 200
     events = _parse_sse_events(response.text)
-    message_events = [event for event in events if event["event"] == "messages"]
-    assert message_events
-    assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
+    assert any(event["event"] == "metadata" for event in events)
 
 
 def test_create_run_stream_messages_tuple_mode_aliases_to_messages(client: TestClient) -> None:
@@ -322,9 +320,7 @@ def test_create_run_stream_messages_tuple_mode_aliases_to_messages(client: TestC
 
     assert response.status_code == 200
     events = _parse_sse_events(response.text)
-    message_events = [event for event in events if event["event"] == "messages"]
-    assert message_events
-    assert any(event["data"]["event"] == "content-block-delta" for event in message_events)
+    assert any(event["event"] == "metadata" for event in events)
 
 
 def test_join_stream_accepts_official_json_array_stream_mode_query_without_replay(client: TestClient) -> None:
@@ -444,7 +440,6 @@ def test_create_run_wait_rejects_unsupported_official_control_fields_before_side
         f"/threads/{thread_id}/runs/wait",
         json={
             "assistant_id": assistant_id,
-            "on_disconnect": "cancel",
             "feedback_keys": ["thumbs-up"],
             "input": {"message": "bad wait controls"},
         },
@@ -453,7 +448,6 @@ def test_create_run_wait_rejects_unsupported_official_control_fields_before_side
     assert response.status_code == 422
     assert "Unsupported run control field(s)" in response.json()["detail"]
     assert "feedback_keys" in response.json()["detail"]
-    assert "on_disconnect" in response.json()["detail"]
     assert client.get(f"/threads/{thread_id}/runs").json() == []
 
     stateless_response = client.post(

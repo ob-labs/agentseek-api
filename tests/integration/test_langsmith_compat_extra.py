@@ -90,22 +90,22 @@ def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> Non
 
     graph = client.get(f"/assistants/{assistant_id}/graph")
     assert graph.status_code == 200
-    assert graph.json()["graph_id"] == "react_agent"
+    assert "nodes" in graph.json()
+    assert "edges" in graph.json()
 
     schemas = client.get(f"/assistants/{assistant_id}/schemas")
     assert schemas.status_code == 200
-    assert schemas.json()["name"] == "finance-bot"
-    assert schemas.json()["description"] == "Answers finance questions"
-    assert schemas.json()["input_schema"] == {"type": "object"}
-    assert schemas.json()["output_schema"] == {"type": "object"}
+    assert schemas.json()["graph_id"] == "react_agent"
+    assert schemas.json()["input_schema"]["type"] == "object"
+    assert schemas.json()["output_schema"]["type"] == "object"
 
     subgraphs = client.get(f"/assistants/{assistant_id}/subgraphs")
-    assert subgraphs.status_code == 501
-    assert subgraphs.json()["detail"] == "Assistant subgraph inspection is not supported"
+    assert subgraphs.status_code == 200
+    assert subgraphs.json() == {}
 
     namespaced = client.get(f"/assistants/{assistant_id}/subgraphs/root")
-    assert namespaced.status_code == 501
-    assert namespaced.json()["detail"] == "Assistant subgraph inspection is not supported"
+    assert namespaced.status_code == 200
+    assert namespaced.json() == {}
 
     versioned = client.post(f"/assistants/{assistant_id}/versions")
     assert versioned.status_code == 200
