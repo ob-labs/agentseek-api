@@ -158,7 +158,8 @@ def main() -> int:
         logs = log_path.read_text(encoding="utf-8", errors="replace")
         assert "> Ready!" in logs, logs
         assert f"> - API: http://localhost:{api_port}" in logs, logs
-        assert f"> - Docs: http://localhost:{api_port}/docs" in logs, logs
+        assert f"> - Docs (Swagger): http://localhost:{api_port}/docs" in logs, logs
+        assert f"> - Docs (Scalar): http://localhost:{api_port}/scalar-docs" in logs, logs
         assert (
             "https://smith.langchain.com/studio/?baseUrl="
             f"http://127.0.0.1:{api_port}"
