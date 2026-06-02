@@ -47,6 +47,7 @@ def test_embed_launcher_reraises_nested_module_not_found(
 
 
 def test_embed_launcher_starts_service_and_bootstraps_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OCEANBASE_DB_NAME", raising=False)
     observed: dict[str, object] = {}
 
     class FakeCursor:

@@ -46,6 +46,10 @@ class FakeStore:
         return None
 
 
+async def _noop_ensure_default_assistants() -> None:
+    return None
+
+
 def test_health_uses_postgresql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None:
     captured_calls: list[tuple[str, bool]] = []
 
@@ -58,6 +62,7 @@ def test_health_uses_postgresql_async_driver(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.core.database.LangGraphOceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseStore", FakeStore)
+    monkeypatch.setattr("agentseek_api.main.ensure_default_assistants", _noop_ensure_default_assistants)
     monkeypatch.setattr(
         settings,
         "METADATA_DB_URL",
@@ -87,6 +92,7 @@ def test_health_uses_mysql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.core.database.LangGraphOceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseStore", FakeStore)
+    monkeypatch.setattr("agentseek_api.main.ensure_default_assistants", _noop_ensure_default_assistants)
     monkeypatch.setattr(
         settings,
         "METADATA_DB_URL",

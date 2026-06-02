@@ -561,12 +561,13 @@ class FakeProtocolMixedStructuredGraph(FakeGraph):
                 "output": {
                     "output": {
                         "messages": [
-                            AIMessage(
-                                content=[
+                            {
+                                "type": "AIMessage",
+                                "content": [
                                     {"type": "text", "text": "hello"},
                                     {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
-                                ]
-                            )
+                                ],
+                            }
                         ]
                     }
                 }
