@@ -444,7 +444,6 @@ def test_create_run_wait_rejects_unsupported_official_control_fields_before_side
         f"/threads/{thread_id}/runs/wait",
         json={
             "assistant_id": assistant_id,
-            "on_disconnect": "cancel",
             "feedback_keys": ["thumbs-up"],
             "input": {"message": "bad wait controls"},
         },
@@ -453,7 +452,6 @@ def test_create_run_wait_rejects_unsupported_official_control_fields_before_side
     assert response.status_code == 422
     assert "Unsupported run control field(s)" in response.json()["detail"]
     assert "feedback_keys" in response.json()["detail"]
-    assert "on_disconnect" in response.json()["detail"]
     assert client.get(f"/threads/{thread_id}/runs").json() == []
 
     stateless_response = client.post(

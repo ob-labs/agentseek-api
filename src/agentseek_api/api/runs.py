@@ -38,7 +38,7 @@ router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Runs"])
 TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
 REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
-SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages"}
+SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages","debug"}
 RUN_STREAM_MODE_ALIASES = {"messages-tuple": "messages"}
 RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
 
@@ -157,8 +157,6 @@ def _validate_supported_run_controls(payload: Any, *, stateless: bool) -> None:
         unsupported_controls.append("checkpoint_during")
     if getattr(payload, "durability", "async") != "async":
         unsupported_controls.append("durability")
-    if getattr(payload, "on_disconnect", "continue") == "cancel":
-        unsupported_controls.append("on_disconnect")
     if stateless and getattr(payload, "on_completion", "keep") != "keep":
         unsupported_controls.append("on_completion")
 
@@ -220,23 +218,36 @@ def _wait_json_stream_response(
     run: RunRead,
     user: User,
     headers: dict[str, str],
+    cancel_on_disconnect: bool = False,
 ) -> StreamingResponse:
     async def _body() -> AsyncIterator[bytes]:
-        current_run = run
-        while current_run.status not in TERMINAL_RUN_STATUSES:
-            try:
-                current_run = await _wait_run_terminal(
-                    current_run.thread_id,
-                    current_run.run_id,
-                    user,
-                    timeout_seconds=5.0,
-                )
-            except HTTPException as exc:
-                if exc.status_code != 408:
-                    raise
-                yield b"\n"
-        payload = await _wait_response_payload(current_run, user=user)
-        yield json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode()
+        try:
+            current_run = run
+            while current_run.status not in TERMINAL_RUN_STATUSES:
+                try:
+                    current_run = await _wait_run_terminal(
+                        current_run.thread_id,
+                        current_run.run_id,
+                        user,
+                        timeout_seconds=5.0,
+                    )
+                except HTTPException as exc:
+                    if exc.status_code != 408:
+                        raise
+                    yield b"\n"
+            payload = await _wait_response_payload(current_run, user=user)
+            yield json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode()
+        finally:
+            if cancel_on_disconnect:
+                try:
+                    await _cancel_active_run(
+                        thread_id=run.thread_id,
+                        run_id=run.run_id,
+                        user_id=user.identity,
+                        require_existing=False,
+                    )
+                except Exception:
+                    pass
 
     return StreamingResponse(
         _body(),
@@ -338,97 +349,114 @@ def _build_create_run_stream_response(
     content_location: str,
     include_metadata: bool = True,
     replay_existing: bool = True,
+    cancel_on_disconnect: bool = False,
 ) -> StreamingResponse:
     protocol_channels = _protocol_channels_for_stream_modes(
         [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
     )
 
     async def _event_iter() -> AsyncIterator[str]:
-        current_seq = after_seq
-        if include_metadata:
-            yield _protocol_event_sse(event_name="metadata", data={"run_id": created.run_id, "attempt": 1})
+        try:
+            current_seq = after_seq
+            if include_metadata:
+                yield _protocol_event_sse(event_name="metadata", data={"run_id": created.run_id, "attempt": 1})
 
-        for event in await load_thread_stream_events(
-            thread_id,
-            channels=protocol_channels,
-            namespaces=None,
-            depth=None,
-            after_seq=after_seq,
-        ):
-            current_seq = max(current_seq, int(event.get("seq", 0)))
-            if event.get("params", {}).get("run_id") != created.run_id:
-                continue
-            if not replay_existing:
-                continue
-            yield _protocol_event_sse(
-                seq=current_seq,
-                event_name=str(event.get("method", "message")),
-                data=event.get("params", {}).get("data", {}),
-            )
-
-        if _uses_redis_executor():
-            async for event in iter_with_sse_keepalives(
-                _iter_persisted_protocol_run_events(
-                    thread_id=thread_id,
-                    run_id=created.run_id,
-                    stream_modes=protocol_channels,
-                    user_id=user.identity,
-                    after_seq=current_seq,
-                )
+            for event in await load_thread_stream_events(
+                thread_id,
+                channels=protocol_channels,
+                namespaces=None,
+                depth=None,
+                after_seq=after_seq,
             ):
-                if event is None:
-                    yield sse_keepalive_comment()
-                    continue
                 current_seq = max(current_seq, int(event.get("seq", 0)))
-                yield _protocol_event_sse(
-                    seq=current_seq,
-                    event_name=str(event.get("method", "message")),
-                    data=event.get("params", {}).get("data", {}),
-                )
-        else:
-            async for event in iter_with_sse_keepalives(
-                thread_protocol_broker.stream(
-                    thread_id,
-                    channels=protocol_channels,
-                    namespaces=None,
-                    depth=None,
-                    since=current_seq,
-                )
-            ):
-                if event is None:
-                    yield sse_keepalive_comment()
+                if event.get("params", {}).get("run_id") != created.run_id:
                     continue
-                event_run_id = event.get("params", {}).get("run_id")
-                if event_run_id != created.run_id:
+                if not replay_existing:
                     continue
-                current_seq = max(current_seq, int(event.get("seq", 0)))
                 yield _protocol_event_sse(
                     seq=current_seq,
                     event_name=str(event.get("method", "message")),
                     data=event.get("params", {}).get("data", {}),
                 )
 
-        final_run = (
-            created
-            if created.status in TERMINAL_RUN_STATUSES
-            else await _wait_run_terminal(thread_id, created.run_id, user, timeout_seconds=None)
-        )
-        if final_run.status == "error":
-            current_seq += 1
-            yield _protocol_event_sse(
-                seq=current_seq,
-                event_name="error",
-                data={"error": final_run.last_error, "run_id": created.run_id},
+            if _uses_redis_executor():
+                async for event in iter_with_sse_keepalives(
+                    _iter_persisted_protocol_run_events(
+                        thread_id=thread_id,
+                        run_id=created.run_id,
+                        stream_modes=protocol_channels,
+                        user_id=user.identity,
+                        after_seq=current_seq,
+                    )
+                ):
+                    if event is None:
+                        yield sse_keepalive_comment()
+                        continue
+                    current_seq = max(current_seq, int(event.get("seq", 0)))
+                    yield _protocol_event_sse(
+                        seq=current_seq,
+                        event_name=str(event.get("method", "message")),
+                        data=event.get("params", {}).get("data", {}),
+                    )
+            else:
+                async for event in iter_with_sse_keepalives(
+                    thread_protocol_broker.stream(
+                        thread_id,
+                        channels=protocol_channels,
+                        namespaces=None,
+                        depth=None,
+                        since=current_seq,
+                    )
+                ):
+                    if event is None:
+                        yield sse_keepalive_comment()
+                        continue
+                    event_run_id = event.get("params", {}).get("run_id")
+                    if event_run_id != created.run_id:
+                        continue
+                    current_seq = max(current_seq, int(event.get("seq", 0)))
+                    yield _protocol_event_sse(
+                        seq=current_seq,
+                        event_name=str(event.get("method", "message")),
+                        data=event.get("params", {}).get("data", {}),
+                    )
+
+            final_run = (
+                created
+                if created.status in TERMINAL_RUN_STATUSES
+                else await _wait_run_terminal(thread_id, created.run_id, user, timeout_seconds=None)
             )
-            return
-        interrupt_event = _interrupt_stream_event_name(stream_modes)
-        if final_run.status == "interrupted" and final_run.interrupts and interrupt_event is not None:
-            current_seq += 1
-            yield _protocol_event_sse(
-                seq=current_seq,
-                event_name=interrupt_event,
-                data={"__interrupt__": final_run.interrupts},
-            )
+            if final_run.status == "error":
+                current_seq += 1
+                yield _protocol_event_sse(
+                    seq=current_seq,
+                    event_name="error",
+                    data={"error": final_run.last_error, "run_id": created.run_id},
+                )
+                return
+            interrupt_event = _interrupt_stream_event_name(stream_modes)
+            if final_run.status == "interrupted" and final_run.interrupts and interrupt_event is not None:
+                current_seq += 1
+                yield _protocol_event_sse(
+                    seq=current_seq,
+                    event_name=interrupt_event,
+                    data={"__interrupt__": final_run.interrupts},
+                )
+        finally:
+            # When the client disconnects mid-stream, Starlette closes this
+            # generator and we transition the run to a terminal state if it's
+            # still active. If the stream finished naturally the run is already
+            # terminal, so _cancel_active_run is a no-op.
+            if cancel_on_disconnect:
+                try:
+                    await _cancel_active_run(
+                        thread_id=thread_id,
+                        run_id=created.run_id,
+                        user_id=user.identity,
+                        require_existing=False,
+                    )
+                except Exception:
+                    pass
 
     return StreamingResponse(
         _event_iter(),
@@ -570,6 +598,7 @@ async def create_run_wait(
         run=created,
         user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=created.run_id),
+        cancel_on_disconnect=payload.on_disconnect == "cancel",
     )
 
 
@@ -602,6 +631,7 @@ async def create_run_stream(
         after_seq=after_seq,
         location=_protocol_stream_location(thread_id=thread_id, run_id=created.run_id, stream_modes=stream_modes),
         content_location=f"/threads/{thread_id}/runs/{created.run_id}",
+        cancel_on_disconnect=payload.on_disconnect == "cancel",
     )
 
 
@@ -621,30 +651,50 @@ async def resume_existing_run(
     return _to_read_model(row)
 
 
+async def _cancel_active_run(
+    *,
+    thread_id: str,
+    run_id: str,
+    user_id: str,
+    require_existing: bool = True,
+) -> bool:
+    """Mark an active run as cancelled and best-effort drop its checkpoints.
+
+    Returns True if the run existed and was transitioned to a terminal state by
+    this call. Returns False if the run did not exist (when ``require_existing``
+    is False) or was already terminal.
+    """
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(
+            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user_id)
+        )
+        if row is None:
+            if require_existing:
+                raise HTTPException(status_code=404, detail="Run not found")
+            return False
+        if row.status in TERMINAL_RUN_STATUSES:
+            return False
+        row.status = "error"
+        row.last_error = "Run cancelled"
+        thread = await session.scalar(
+            select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user_id)
+        )
+        if thread is not None:
+            thread.status = "error"
+            thread.state_updated_at = datetime.now(UTC)
+        await session.commit()
+    await _best_effort_delete_for_runs([run_id])
+    return True
+
+
 @router.post("/{run_id}/cancel")
 async def cancel_run(
     thread_id: str,
     run_id: str,
     user: User = Depends(get_current_user),
 ) -> dict[str, object]:
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        row = await session.scalar(
-            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
-        )
-        if row is None:
-            raise HTTPException(status_code=404, detail="Run not found")
-        if row.status not in TERMINAL_RUN_STATUSES:
-            row.status = "error"
-            row.last_error = "Run cancelled"
-            thread = await session.scalar(
-                select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
-            )
-            if thread is not None:
-                thread.status = "error"
-                thread.state_updated_at = datetime.now(UTC)
-            await session.commit()
-    await _best_effort_delete_for_runs([run_id])
+    await _cancel_active_run(thread_id=thread_id, run_id=run_id, user_id=user.identity)
     return {}
 
 

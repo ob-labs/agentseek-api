@@ -1,6 +1,9 @@
+from typing import Any
+
 from sqlalchemy import select
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from langchain_core.runnables.utils import create_model
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
@@ -16,9 +19,9 @@ from agentseek_api.models.api import (
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
-ASSISTANT_SUBGRAPHS_UNSUPPORTED = "Assistant subgraph inspection is not supported"
 ASSISTANT_VERSION_PROMOTION_UNSUPPORTED = "Assistant version promotion is not supported"
 DELETE_THREADS_UNSUPPORTED = "delete_threads=true is not supported"
+SUBGRAPHS_UNSUPPORTED = "The graph does not support subgraphs"
 
 
 def _detail_response(*, description: str, detail: str) -> dict[str, object]:
@@ -165,55 +168,119 @@ async def delete_assistant(assistant_id: str, delete_threads: bool = False) -> R
 
 
 @router.get("/{assistant_id}/graph")
-async def get_assistant_graph(assistant_id: str) -> dict[str, object]:
+async def get_assistant_graph(
+    assistant_id: str,
+    xray: bool | int | None = Query(
+        None,
+        description="Expand subgraph nodes. Pass true or a positive integer depth.",
+    ),
+) -> dict[str, object]:
     assistant = await get_assistant(assistant_id)
-    return {
-        "assistant_id": assistant.assistant_id,
-        "graph_id": assistant.graph_id,
-        "registered_graph_ids": get_langgraph_service().registered_graph_ids(),
-    }
+    entry = get_langgraph_service().get_entry(assistant.graph_id)
+    graph = entry.build_graph()
+    if isinstance(xray, int) and not isinstance(xray, bool) and xray <= 0:
+        raise HTTPException(status_code=422, detail="Invalid xray value")
+    xray_value: bool | int = xray if xray is not None else False
+    try:
+        drawable_graph = await graph.aget_graph(xray=xray_value)
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=422, detail="The graph does not support visualization") from exc
+    json_graph = drawable_graph.to_json()
+    for node in json_graph.get("nodes", []):
+        data = node.get("data") if isinstance(node, dict) else None
+        if isinstance(data, dict):
+            data.pop("id", None)
+    return json_graph
 
 
 @router.get("/{assistant_id}/schemas")
 async def get_assistant_schemas(assistant_id: str) -> dict[str, object]:
     assistant = await get_assistant(assistant_id)
     entry = get_langgraph_service().get_entry(assistant.graph_id)
+    graph = entry.build_graph()
+    return {"graph_id": assistant.graph_id, **_extract_graph_schemas(graph)}
+
+
+def _safe_schema(getter, *args, **kwargs) -> dict[str, object] | None:
+    try:
+        return getter(*args, **kwargs)
+    except Exception:  # noqa: BLE001 - graph helpers raise broad errors
+        return None
+
+
+def _state_jsonschema(graph) -> dict[str, object] | None:
+    channel_list = getattr(graph, "stream_channels_list", None)
+    channels = getattr(graph, "channels", None)
+    if not channel_list or channels is None:
+        return None
+    fields: dict[str, tuple[object, object]] = {}
+    for key in channel_list:
+        channel = channels.get(key) if isinstance(channels, dict) else getattr(channels, key, None)
+        update_type = getattr(channel, "UpdateType", Any) if channel is not None else Any
+        fields[key] = (update_type, None)
+    try:
+        name = graph.get_name("State") if hasattr(graph, "get_name") else "State"
+        return create_model(name, **fields).model_json_schema()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _extract_graph_schemas(graph) -> dict[str, object | None]:
     return {
-        "assistant_id": assistant.assistant_id,
-        "graph_id": assistant.graph_id,
-        "name": assistant.name,
-        "description": assistant.description,
-        "input_schema": entry.input_schema,
-        "output_schema": entry.output_schema,
+        "input_schema": _safe_schema(graph.get_input_jsonschema),
+        "output_schema": _safe_schema(graph.get_output_jsonschema),
+        "state_schema": _state_jsonschema(graph),
+        "config_schema": _safe_schema(graph.get_config_jsonschema) if hasattr(graph, "get_config_jsonschema") else None,
+        "context_schema": _safe_schema(graph.get_context_jsonschema) if hasattr(graph, "get_context_jsonschema") else None,
     }
+
+
+async def _collect_subgraphs(assistant_id: str, *, namespace: str | None, recurse: bool) -> dict[str, dict[str, object | None]]:
+    assistant = await get_assistant(assistant_id)
+    entry = get_langgraph_service().get_entry(assistant.graph_id)
+    graph = entry.build_graph()
+    aget_subgraphs = getattr(graph, "aget_subgraphs", None)
+    if not callable(aget_subgraphs):
+        raise HTTPException(status_code=422, detail=SUBGRAPHS_UNSUPPORTED)
+    try:
+        return {
+            ns: _extract_graph_schemas(subgraph)
+            async for ns, subgraph in aget_subgraphs(namespace=namespace, recurse=recurse)
+        }
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=422, detail=SUBGRAPHS_UNSUPPORTED) from exc
 
 
 @router.get(
     "/{assistant_id}/subgraphs",
-    status_code=501,
-    response_model=None,
+    response_model=dict[str, dict[str, object | None]],
     responses={
         404: _detail_response(description="Assistant not found", detail="Assistant not found"),
-        501: _detail_response(description="Unsupported helper endpoint", detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED),
+        422: _detail_response(description="Graph does not support subgraphs", detail=SUBGRAPHS_UNSUPPORTED),
     },
 )
-async def get_assistant_subgraphs(assistant_id: str) -> None:
-    _ = await get_assistant(assistant_id)
-    raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
+async def get_assistant_subgraphs(
+    assistant_id: str,
+    recurse: bool = Query(False, description="Recursively include nested subgraphs."),
+    namespace: str | None = Query(None, description="Filter to a specific subgraph namespace."),
+) -> dict[str, dict[str, object | None]]:
+    return await _collect_subgraphs(assistant_id, namespace=namespace, recurse=recurse)
 
 
 @router.get(
     "/{assistant_id}/subgraphs/{namespace}",
-    status_code=501,
-    response_model=None,
+    response_model=dict[str, dict[str, object | None]],
     responses={
         404: _detail_response(description="Assistant not found", detail="Assistant not found"),
-        501: _detail_response(description="Unsupported helper endpoint", detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED),
+        422: _detail_response(description="Graph does not support subgraphs", detail=SUBGRAPHS_UNSUPPORTED),
     },
 )
-async def get_assistant_subgraphs_by_namespace(assistant_id: str, namespace: str) -> None:
-    _ = (await get_assistant(assistant_id), namespace)
-    raise HTTPException(status_code=501, detail=ASSISTANT_SUBGRAPHS_UNSUPPORTED)
+async def get_assistant_subgraphs_by_namespace(
+    assistant_id: str,
+    namespace: str,
+    recurse: bool = Query(False, description="Recursively include nested subgraphs."),
+) -> dict[str, dict[str, object | None]]:
+    return await _collect_subgraphs(assistant_id, namespace=namespace, recurse=recurse)
 
 
 @router.post(
