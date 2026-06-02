@@ -1,5 +1,12 @@
 # AgentSeek API
 
+**English** | [中文](README.zh-CN.md)
+
+> [!WARNING]
+> This project is under active development and is **not production-ready**.
+> LangSmith Studio connection is not yet available.
+> Pull requests for bug fixes and enhancements are warmly welcomed!
+
 Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
 `agentseek-api` CLI.
 
@@ -32,7 +39,7 @@ Current release boundary:
 | Workflow | Use it when | Recommended command |
 | --- | --- | --- |
 | `langgraph dev` | You want the fastest mocked or in-memory local API loop for graph prototyping or Studio experimentation. | `langgraph dev` |
-| `agentseek-api dev` | You want the real AgentSeek API surface with your actual MySQL-family / SeekDB / OceanBase-style persistence, auth, and Docker/runtime behavior. | `uv run agentseek-api dev` |
+| `agentseek-api dev` | You want the real AgentSeek API surface with your actual MySQL-family / seekdb / OceanBase-style persistence, auth, and Docker/runtime behavior. | `uv run agentseek-api dev` |
 
 Use `langgraph dev` when you do not need real backend validation. Use
 `agentseek-api dev` when you want to exercise the actual API contract this repo
@@ -180,13 +187,13 @@ in-memory, or tunneled local workflows, prefer `langgraph dev`.
 - 🤖 Agent resources exposed through both `/assistants` and `/agents`
 - 🧑‍💻 Human-in-the-loop resume through
   `POST /threads/{thread_id}/runs/{run_id}/resume`
-- 🗄️ SeekDB / OceanBase-first checkpoint persistence via
+- 🗄️ seekdb / OceanBase-first checkpoint persistence via
   `langchain-oceanbase`
 - 📦 Redis-backed durable execution with a dedicated worker process
 - ♻️ Persisted run and thread stream replay for resume-after-restart flows
 - 🔐 `noop` and custom auth backends
 - 🐳 Dockerfile generation, image build, and local Docker runtime helpers
-- 🧪 Real backend CI coverage across MySQL, SeekDB, OceanBase, and Redis runtime paths
+- 🧪 Real backend CI coverage across MySQL, seekdb, OceanBase, and Redis runtime paths
 - 🧪 Manual provider-backed streaming checks for live SSE proof
 
 ## 🎯 Compatibility Scope
@@ -488,7 +495,7 @@ parent api build --config ./langgraph.json -t my-api:dev
 - `METADATA_DB_BACKEND=auto` normalizes drivers:
   - PostgreSQL: `postgresql+asyncpg://...`
   - OceanBase / MySQL: `mysql+aiomysql://...`
-- Checkpoint persistence defaults to OceanBase / SeekDB settings
+- Checkpoint persistence defaults to OceanBase / seekdb settings
 - Auth modes:
   - `AUTH_TYPE=noop`
   - `AUTH_TYPE=custom` with `AUTH_MODULE_PATH=module:backend_symbol`
@@ -547,10 +554,10 @@ make test-redis-docker
 ```
 
 GitHub Actions also runs the Docker-backed backend matrix against MySQL,
-SeekDB, and OceanBase, including the dedicated `Redis Durable Execution`
+seekdb, and OceanBase, including the dedicated `Redis Durable Execution`
 workflow jobs.
 
-For local embedded SeekDB smoke coverage, install the optional extra first:
+For local embedded seekdb smoke coverage, install the optional extra first:
 
 ```bash
 uv sync --dev --extra embedded
@@ -586,7 +593,7 @@ The live-provider workflow is the canonical proof for real SSE
 `message_chunk` events from provider-backed graphs, and it now also covers
 provider-backed Store, MCP, and HITL flows in a tiered backend matrix:
 
-- SeekDB: full Streaming + Store + MCP + HITL acceptance
+- seekdb: full Streaming + Store + MCP + HITL acceptance
 - OceanBase: full Streaming + Store + MCP + HITL acceptance
 - MySQL: Streaming + HITL compatibility
 - PostgreSQL metadata: Streaming + MCP compatibility while runtime
@@ -606,11 +613,66 @@ Use `ci.yml` for the normal development signal, and use
 `live-provider-streaming.yml` when you need explicit proof that real providers
 still satisfy the intended streaming, Store, MCP, and HITL contracts.
 
-## 🗺️ Future Work
+## 🧱 Built On
 
-1. [x] Add Redis-backed task queue and worker handoff for durable run execution
-2. [ ] Deepen Agent Protocol schema parity beyond the current alias coverage
-3. [x] Add crons and scheduler support
-4. [ ] Add distributed runtime parity beyond the current single-worker Redis flow
-5. [ ] Add assistant version history and subgraph inspection support
-6. [x] Add MCP and A2A endpoint parity
+AgentSeek API is glue around a small set of upstream projects and infra.
+
+**Core pillars**
+
+- [LangGraph](https://github.com/langchain-ai/langgraph) — graph runtime that
+  executes registered assistants
+- [langchain-oceanbase](https://pypi.org/project/langchain-oceanbase/) —
+  checkpointer and store implementation, the primary path for graph state
+- [OceanBase](https://github.com/oceanbase/oceanbase) /
+  [seekdb](https://github.com/oceanbase/seekdb) — first-class supported
+  databases for checkpoint and store persistence
+- [Redis](https://github.com/redis/redis) — run queue, worker lease, and
+  stream-event persistence when `EXECUTOR_BACKEND=redis`
+- [FastAPI](https://github.com/tiangolo/fastapi) — HTTP framework for every
+  `/assistants`, `/threads`, `/runs`, `/mcp`, `/a2a` surface
+- [Model Context Protocol (MCP)](https://github.com/modelcontextprotocol/python-sdk)
+  — registered graphs exposed as MCP tools over Streamable HTTP at `/mcp`
+- [A2A SDK](https://github.com/a2aproject/a2a-python) — assistant-to-assistant
+  RPC and agent-card discovery shape under `/a2a`
+
+<details>
+<summary>Full dependency list</summary>
+
+**Runtime & API**
+- [Uvicorn](https://github.com/encode/uvicorn) — ASGI server used by
+  `agentseek-api dev` and `serve`
+- [Pydantic](https://github.com/pydantic/pydantic) and pydantic-settings —
+  request/response models and env-driven configuration
+- [scalar-fastapi](https://github.com/scalar/scalar) — alternate API docs
+  rendering at `/scalar`
+
+**LangChain / LangGraph stack**
+- [LangChain Core](https://github.com/langchain-ai/langchain) and
+  [langgraph-sdk](https://github.com/langchain-ai/langgraph) — message,
+  tool, and SDK contracts the API speaks
+- [langchain-openai](https://github.com/langchain-ai/langchain) /
+  [langchain-anthropic](https://github.com/langchain-ai/langchain) —
+  provider integrations used by sample graphs and live-provider CI
+- [Agent Protocol](https://github.com/langchain-ai/agent-protocol) —
+  external compatibility reference for the assistants/threads/runs surface
+
+**Database drivers**
+- [SQLAlchemy](https://github.com/sqlalchemy/sqlalchemy) (async) plus
+  [asyncpg](https://github.com/MagicStack/asyncpg) (PostgreSQL),
+  [aiomysql](https://github.com/aio-libs/aiomysql) and
+  [PyMySQL](https://github.com/PyMySQL/PyMySQL) (MySQL family),
+  [aiosqlite](https://github.com/omnilib/aiosqlite) (SQLite)
+- [redis-py](https://github.com/redis/redis-py) — async Redis client
+
+**Interop**
+- [LangSmith Studio](https://smith.langchain.com/) — external UI that
+  connects to the local API for graph inspection and runs
+
+**Packaging & runtime delivery**
+- [uv](https://github.com/astral-sh/uv) — dependency resolution and the
+  recommended way to run the CLI
+- [Hatchling](https://github.com/pypa/hatch) — wheel build backend
+- [Docker](https://www.docker.com/) — `dockerfile`, `build`, and `up`
+  commands generate and run a containerized API
+
+</details>
