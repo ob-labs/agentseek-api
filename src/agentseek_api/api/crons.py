@@ -17,16 +17,19 @@ from agentseek_api.models.api import (
 )
 from agentseek_api.models.auth import User
 from agentseek_api.services import cron_service
+from agentseek_api.services.default_assistants import resolve_assistant_id
 
 router = APIRouter(tags=["Crons"])
 
 
-async def _ensure_assistant_exists(*, assistant_id: str) -> None:
+async def _ensure_assistant_exists(*, assistant_id: str) -> str:
+    resolved_id = resolve_assistant_id(assistant_id)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        existing = await session.scalar(select(Assistant.assistant_id).where(Assistant.assistant_id == assistant_id))
+        existing = await session.scalar(select(Assistant.assistant_id).where(Assistant.assistant_id == resolved_id))
         if existing is None:
             raise HTTPException(status_code=404, detail="Assistant not found")
+    return resolved_id
 
 
 async def _create_cron(
@@ -44,19 +47,19 @@ async def _create_cron(
 
 @router.post("/runs/crons", response_model=CronRead)
 async def create_stateless_cron(payload: CronCreate, user: User = Depends(get_current_user)) -> CronRead:
-    await _ensure_assistant_exists(assistant_id=payload.assistant_id)
-    return await _create_cron(assistant_id=payload.assistant_id, thread_id=None, payload=payload, user=user)
+    resolved_id = await _ensure_assistant_exists(assistant_id=payload.assistant_id)
+    return await _create_cron(assistant_id=resolved_id, thread_id=None, payload=payload, user=user)
 
 
 @router.post("/threads/{thread_id}/runs/crons", response_model=CronRead)
 async def create_thread_cron(thread_id: str, payload: CronCreate, user: User = Depends(get_current_user)) -> CronRead:
-    await _ensure_assistant_exists(assistant_id=payload.assistant_id)
+    resolved_id = await _ensure_assistant_exists(assistant_id=payload.assistant_id)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
-    return await _create_cron(assistant_id=payload.assistant_id, thread_id=thread_id, payload=payload, user=user)
+    return await _create_cron(assistant_id=resolved_id, thread_id=thread_id, payload=payload, user=user)
 
 
 @router.post("/runs/crons/search", response_model=CronSearchResponse)

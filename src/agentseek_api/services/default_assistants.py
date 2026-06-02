@@ -12,6 +12,7 @@ mapping and the operation is idempotent.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from uuid import UUID, uuid5
 
 from sqlalchemy import select
@@ -19,12 +20,28 @@ from sqlalchemy import select
 from agentseek_api.core.config_file import get_active_config_payload
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant
+from agentseek_api.services.langgraph_service import get_langgraph_service
 
 ASSISTANT_NAMESPACE_UUID = UUID("6ba7b821-9dad-11d1-80b4-00c04fd430c8")
 
 
 def derive_assistant_id(graph_id: str) -> str:
     return str(uuid5(ASSISTANT_NAMESPACE_UUID, graph_id))
+
+
+def resolve_assistant_id(requested_id: str, available_graphs: Iterable[str] | None = None) -> str:
+    """Resolve an assistant identifier that may be an assistant UUID or a graph_id.
+
+    If ``requested_id`` matches a known graph_id, return the deterministic
+    default assistant UUID derived for that graph. Otherwise return the input
+    unchanged so callers can look it up directly as an assistant_id.
+    """
+    if available_graphs is None:
+        available_graphs = get_langgraph_service().registered_graph_ids()
+    graph_set = available_graphs if isinstance(available_graphs, set) else set(available_graphs)
+    if requested_id in graph_set:
+        return derive_assistant_id(requested_id)
+    return requested_id
 
 
 def _manifest_graph_ids() -> list[str]:

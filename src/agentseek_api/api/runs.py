@@ -184,7 +184,10 @@ async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
         if state is None:
             state = await get_thread_state(run.thread_id, user)
     if isinstance(state, dict) and "values" in state:
-        return state["values"]
+        values = state["values"]
+        if isinstance(values, dict):
+            values.pop("__pregel_tasks", None)
+        return values
     return {}
 
 
@@ -354,6 +357,15 @@ def _build_create_run_stream_response(
     protocol_channels = _protocol_channels_for_stream_modes(
         [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
     )
+    # When the client asked for ``messages``, the official LangGraph wire
+    # contract is ``messages/metadata`` + ``messages/partial`` only. The
+    # protocol-v2 block stream (message-start / content-block-* / message-finish)
+    # is internal noise to that client and would fight the partial accumulator,
+    # so suppress it here.
+    suppress_block_messages = "messages" in stream_modes
+
+    def _is_block_message_event(event: dict[str, Any]) -> bool:
+        return str(event.get("method", "")) == "messages"
 
     async def _event_iter() -> AsyncIterator[str]:
         try:
@@ -372,6 +384,8 @@ def _build_create_run_stream_response(
                 if event.get("params", {}).get("run_id") != created.run_id:
                     continue
                 if not replay_existing:
+                    continue
+                if suppress_block_messages and _is_block_message_event(event):
                     continue
                 yield _protocol_event_sse(
                     seq=current_seq,
@@ -393,6 +407,8 @@ def _build_create_run_stream_response(
                         yield sse_keepalive_comment()
                         continue
                     current_seq = max(current_seq, int(event.get("seq", 0)))
+                    if suppress_block_messages and _is_block_message_event(event):
+                        continue
                     yield _protocol_event_sse(
                         seq=current_seq,
                         event_name=str(event.get("method", "message")),
@@ -415,6 +431,8 @@ def _build_create_run_stream_response(
                     if event_run_id != created.run_id:
                         continue
                     current_seq = max(current_seq, int(event.get("seq", 0)))
+                    if suppress_block_messages and _is_block_message_event(event):
+                        continue
                     yield _protocol_event_sse(
                         seq=current_seq,
                         event_name=str(event.get("method", "message")),

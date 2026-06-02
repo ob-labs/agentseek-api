@@ -6,6 +6,7 @@ from sqlalchemy import select, update
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant, CronTick, Run, Thread
 from agentseek_api.models.auth import User
+from agentseek_api.services.default_assistants import resolve_assistant_id
 from agentseek_api.services.executor import get_executor
 from agentseek_api.services import run_jobs as run_jobs_module
 from agentseek_api.services.run_jobs import RunExecutionJob
@@ -180,9 +181,13 @@ async def _prepare_run(
         )
         if thread is None:
             raise ValueError("Thread not found")
-        assistant = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
+        resolved_assistant_id = resolve_assistant_id(assistant_id)
+        assistant = await session.scalar(
+            select(Assistant).where(Assistant.assistant_id == resolved_assistant_id)
+        )
         if assistant is None:
             raise ValueError("Assistant not found")
+        assistant_id = resolved_assistant_id
         graph_id = assistant.graph_id
         claimed_at = datetime.now(UTC)
         if not await _claim_thread_for_run(

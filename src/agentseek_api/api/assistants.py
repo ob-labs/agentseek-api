@@ -16,6 +16,7 @@ from agentseek_api.models.api import (
     AssistantVersionInfo,
     ErrorDetailResponse,
 )
+from agentseek_api.services.default_assistants import resolve_assistant_id
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
 router = APIRouter(dependencies=[Depends(get_current_user)])
@@ -114,9 +115,10 @@ async def count_assistants(payload: AssistantSearchRequest) -> int:
 
 @router.get("/{assistant_id}", response_model=AssistantRead)
 async def get_assistant(assistant_id: str) -> AssistantRead:
+    resolved_id = resolve_assistant_id(assistant_id)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
+        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == resolved_id))
         if row is None:
             raise HTTPException(status_code=404, detail="Assistant not found")
         return _to_read_model(row)
@@ -124,9 +126,10 @@ async def get_assistant(assistant_id: str) -> AssistantRead:
 
 @router.patch("/{assistant_id}", response_model=AssistantRead)
 async def patch_assistant(assistant_id: str, payload: AssistantPatch) -> AssistantRead:
+    resolved_id = resolve_assistant_id(assistant_id)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
+        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == resolved_id))
         if row is None:
             raise HTTPException(status_code=404, detail="Assistant not found")
         if payload.graph_id is not None:
@@ -157,9 +160,10 @@ async def patch_assistant(assistant_id: str, payload: AssistantPatch) -> Assista
 async def delete_assistant(assistant_id: str, delete_threads: bool = False) -> Response:
     if delete_threads:
         raise HTTPException(status_code=400, detail=DELETE_THREADS_UNSUPPORTED)
+    resolved_id = resolve_assistant_id(assistant_id)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
+        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == resolved_id))
         if row is None:
             raise HTTPException(status_code=404, detail="Assistant not found")
         await session.delete(row)
