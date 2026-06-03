@@ -100,6 +100,12 @@ def test_message_content_stringifies_non_string_content() -> None:
     assert _message_content(Obj()) == "['list', 'content']"
 
 
+def test_ensure_messages_payload_non_string_text() -> None:
+    result = _ensure_messages_payload({"message": ["not", "a", "string"]})
+    content = result["messages"][0].content
+    assert json.loads(content) == ["not", "a", "string"]
+
+
 def test_build_sample_registry_returns_all_expected_ids() -> None:
     registry = build_sample_registry()
     for expected in (
@@ -116,3 +122,18 @@ def test_build_sample_registry_returns_all_expected_ids() -> None:
         assert callable(entry["extract_output"])
         assert callable(entry["graph_factory"])
         assert entry["graph_factory"]() is not None
+
+
+def test_build_sample_registry_skips_failed_imports(monkeypatch) -> None:
+    import builtins
+
+    real_import = builtins.__import__
+
+    def fail_graphs(name, *args, **kwargs):
+        if name.startswith("graphs."):
+            raise ImportError(f"fake: {name}")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_graphs)
+    registry = build_sample_registry()
+    assert registry == {}
