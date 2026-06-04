@@ -8,7 +8,7 @@ DEFAULT_EXPOSE_HEADERS: list[str] = ["Content-Location", "Location"]
 
 class CorsConfig(TypedDict, total=False):
     allow_origins: list[str]
-    allow_origin_regex: str
+    allow_origin_regex: str | None
     allow_methods: list[str]
     allow_headers: list[str]
     allow_credentials: bool

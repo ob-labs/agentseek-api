@@ -1,7 +1,7 @@
 import inspect
 import logging
-from contextlib import AsyncExitStack, asynccontextmanager
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any
 
@@ -38,6 +38,10 @@ from agentseek_api.mcp_server import MCPMount, build_mcp_mount
 from agentseek_api.services.default_assistants import ensure_default_assistants
 from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.settings import settings
+
+_FASTAPI_DEFAULT_PATHS = frozenset(
+    {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+)
 
 
 @asynccontextmanager
@@ -171,8 +175,8 @@ def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
     )
 
 
-def _include_custom_routers(app: FastAPI) -> None:
-    """Load custom FastAPI app from config and merge its routes into the main app."""
+def _merge_custom_app(app: FastAPI) -> None:
+    """Load custom FastAPI app from config and merge its routes, lifespan, and middleware."""
     http_config = get_http_config()
     if not http_config or not http_config.get("app"):
         return
@@ -185,8 +189,29 @@ def _include_custom_routers(app: FastAPI) -> None:
         logger.error("Failed to load custom app '%s': %s", http_config["app"], exc)
         raise
 
+    # --- Merge lifespan ---
+    user_lifespan = custom_app.router.lifespan_context
+    core_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def combined_lifespan(a):
+        async with core_lifespan(a):
+            async with user_lifespan(a):
+                yield
+
+    app.router.lifespan_context = combined_lifespan
+
+    # --- Merge middleware ---
+    app.user_middleware.extend(custom_app.user_middleware)
+    if custom_app.user_middleware:
+        logger.info(
+            "Merged %d custom middleware(s): %s",
+            len(custom_app.user_middleware),
+            [mw.cls.__name__ for mw in custom_app.user_middleware],
+        )
+
+    # --- Merge routes ---
     existing_paths = {getattr(r, "path", None) for r in app.router.routes}
-    _FASTAPI_DEFAULT_PATHS = {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
 
     for route in custom_app.routes:
         path = getattr(route, "path", None)
@@ -318,7 +343,7 @@ def create_app() -> FastAPI:
     app.include_router(stateless_runs_router)
     app.include_router(store_router)
 
-    _include_custom_routers(app)
+    _merge_custom_app(app)
 
     return app
 
