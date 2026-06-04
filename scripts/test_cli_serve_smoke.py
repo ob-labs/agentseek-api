@@ -35,12 +35,15 @@ def _wait_for_log_line(log_path: Path, needle: str, *, timeout_seconds: float, p
     raise RuntimeError(f"Timed out waiting for '{needle}' in {log_path}:\n{last_content}")
 
 
-def _wait_for_http_json(url: str, *, timeout_seconds: float) -> str:
+def _wait_for_http_json(url: str, *, timeout_seconds: float, method: str = "GET", data: bytes | None = None) -> str:
     deadline = time.time() + timeout_seconds
     last_error: Exception | None = None
     while time.time() < deadline:
         try:
-            with urllib_request.urlopen(url, timeout=2.0) as response:
+            req = urllib_request.Request(url, method=method, data=data)
+            if data is not None:
+                req.add_header("Content-Type", "application/json")
+            with urllib_request.urlopen(req, timeout=2.0) as response:
                 if 200 <= response.status < 300:
                     return response.read().decode("utf-8")
         except (urllib_error.URLError, TimeoutError, OSError) as exc:
@@ -132,8 +135,10 @@ def main() -> int:
                 timeout_seconds=30.0,
             )
             assistants_body = _wait_for_http_json(
-                f"http://127.0.0.1:{api_port}/assistants",
+                f"http://127.0.0.1:{api_port}/assistants/search",
                 timeout_seconds=30.0,
+                method="POST",
+                data=b"{}",
             )
             assert '"healthy"' in health_body
             assert '"flags"' in info_body

@@ -188,6 +188,127 @@ async def test_assistant_route_handlers_raise_not_found(monkeypatch: pytest.Monk
 
 
 @pytest.mark.asyncio
+async def test_validate_graph_id_rejects_unknown_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeGraphEntry:
+        def build_graph(self):
+            return None
+
+    class FakeLangGraphService:
+        def registered_graph_ids(self) -> list[str]:
+            return ["default"]
+
+        def get_entry(self, graph_id: str):
+            return FakeGraphEntry()
+
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.get_langgraph_service",
+        FakeLangGraphService,
+    )
+
+    with pytest.raises(HTTPException, match="Graph 'bad' not found") as exc:
+        await assistants_module.create_assistant(AssistantCreate(graph_id="bad"))
+    assert exc.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_validate_graph_id_rejects_unloadable_graph(monkeypatch: pytest.MonkeyPatch) -> None:
+    class BrokenEntry:
+        def build_graph(self):
+            raise RuntimeError("cannot build")
+
+    class FakeLangGraphService:
+        def registered_graph_ids(self) -> list[str]:
+            return ["broken"]
+
+        def get_entry(self, graph_id: str):
+            return BrokenEntry()
+
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.get_langgraph_service",
+        FakeLangGraphService,
+    )
+
+    with pytest.raises(HTTPException, match="failed to load") as exc:
+        await assistants_module.create_assistant(AssistantCreate(graph_id="broken"))
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_create_assistant_if_exists_do_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = _assistant(assistant_id="existing-1", name="existing")
+    session_factory = FakeSessionFactory([FakeSession(scalar_rows=[existing])])
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.db_manager.get_session_factory",
+        lambda: session_factory,
+    )
+
+    class FakeGraphEntry:
+        def build_graph(self):
+            return None
+
+    class FakeLangGraphService:
+        def registered_graph_ids(self) -> list[str]:
+            return ["default"]
+
+        def get_entry(self, graph_id: str):
+            return FakeGraphEntry()
+
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.get_langgraph_service",
+        FakeLangGraphService,
+    )
+
+    result = await assistants_module.create_assistant(
+        AssistantCreate(assistant_id="existing-1", graph_id="default", if_exists="do_nothing")
+    )
+    assert result.assistant_id == "existing-1"
+
+
+@pytest.mark.asyncio
+async def test_create_assistant_if_exists_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    existing = _assistant(assistant_id="existing-1", name="existing")
+    session_factory = FakeSessionFactory([FakeSession(scalar_rows=[existing])])
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.db_manager.get_session_factory",
+        lambda: session_factory,
+    )
+
+    class FakeGraphEntry:
+        def build_graph(self):
+            return None
+
+    class FakeLangGraphService:
+        def registered_graph_ids(self) -> list[str]:
+            return ["default"]
+
+        def get_entry(self, graph_id: str):
+            return FakeGraphEntry()
+
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.get_langgraph_service",
+        FakeLangGraphService,
+    )
+
+    with pytest.raises(HTTPException, match="Assistant already exists") as exc:
+        await assistants_module.create_assistant(
+            AssistantCreate(assistant_id="existing-1", graph_id="default", if_exists="raise")
+        )
+    assert exc.value.status_code == 409
+
+
+@pytest.mark.asyncio
+async def test_delete_assistant_rejects_delete_threads(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.db_manager.get_session_factory",
+        lambda: FakeSessionFactory([]),
+    )
+
+    with pytest.raises(HTTPException, match="delete_threads=true is not supported") as exc:
+        await assistants_module.delete_assistant("any-id", delete_threads=True)
+    assert exc.value.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_assistant_helper_routes_are_truthful_about_missing_version_and_subgraph_support(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -202,7 +202,7 @@ def _assert_common_flow(base_url: str) -> None:
     assert info["flags"]["runs"] is True
     assert isinstance(info["version"], str) and info["version"]
 
-    _, assistants, _ = _request(base_url=base_url, path="/assistants")
+    _, assistants, _ = _request(base_url=base_url, path="/assistants/search", method="POST", payload={})
     assert isinstance(assistants, list)
 
     _assert_custom_auth_default_identity(base_url=base_url, other_headers=alice)
@@ -220,7 +220,7 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(fetched_assistant, dict)
     assert fetched_assistant["assistant_id"] == assistant_id
 
-    _, listed_assistants, _ = _request(base_url=base_url, path="/assistants")
+    _, listed_assistants, _ = _request(base_url=base_url, path="/assistants/search", method="POST", payload={})
     assert isinstance(listed_assistants, list)
     assert any(item["assistant_id"] == assistant_id for item in listed_assistants)
 
