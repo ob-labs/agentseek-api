@@ -1,6 +1,7 @@
 import inspect
-from contextlib import AsyncExitStack, asynccontextmanager
+import logging
 from collections.abc import AsyncIterator
+from contextlib import AsyncExitStack, asynccontextmanager
 from importlib.metadata import PackageNotFoundError, version as package_version
 from typing import Any
 
@@ -24,17 +25,23 @@ from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
 from agentseek_api.api.store import router as store_router
 from agentseek_api.api.threads import router as threads_router
+from agentseek_api.core.app_loader import load_custom_app
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.a2a_config import is_a2a_enabled
 from agentseek_api.core.content_type_fix import ContentTypeFixMiddleware
 from agentseek_api.core.cors_config import DEFAULT_EXPOSE_HEADERS, CorsConfig, get_cors_config
 from agentseek_api.core.database import db_manager
+from agentseek_api.core.http_config import get_config_dir, get_http_config
 from agentseek_api.core.mcp_config import is_mcp_enabled
 from agentseek_api.mcp_server import MCPMount, build_mcp_mount
 from agentseek_api.services.default_assistants import ensure_default_assistants
 from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.settings import settings
+
+_FASTAPI_DEFAULT_PATHS = frozenset(
+    {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
+)
 
 
 @asynccontextmanager
@@ -140,29 +147,7 @@ async def _resolve_mcp_user(app: FastAPI, request) -> object:
 
 
 def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
-    """Register CORSMiddleware using config-or-defaults.
-
-    When ``allow_origins`` is the wildcard ``["*"]``, ``allow_credentials``
-    defaults to ``False`` — the combination of wildcard + credentials is
-    rejected by browsers and unsafe in practice. To enable credentials,
-    list concrete origins.
-    """
-    if cors_config:
-        origins = cors_config.get("allow_origins", ["*"])
-        credentials = cors_config.get(
-            "allow_credentials",
-            origins not in (["*"], "*"),
-        )
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=origins,
-            allow_credentials=credentials,
-            allow_methods=cors_config.get("allow_methods", ["*"]),
-            allow_headers=cors_config.get("allow_headers", ["*"]),
-            expose_headers=cors_config.get("expose_headers", DEFAULT_EXPOSE_HEADERS),
-            max_age=cors_config.get("max_age", 600),
-        )
-    else:
+    if not cors_config:
         app.add_middleware(
             CORSMiddleware,
             allow_origins=["*"],
@@ -171,6 +156,71 @@ def _add_cors_middleware(app: FastAPI, cors_config: CorsConfig | None) -> None:
             allow_headers=["*"],
             expose_headers=DEFAULT_EXPOSE_HEADERS,
         )
+        return
+
+    origins = cors_config.get("allow_origins", ["*"])
+    credentials = cors_config.get(
+        "allow_credentials",
+        origins not in (["*"], "*"),
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=credentials,
+        allow_methods=cors_config.get("allow_methods", ["*"]),
+        allow_headers=cors_config.get("allow_headers", ["*"]),
+        allow_origin_regex=cors_config.get("allow_origin_regex"),
+        expose_headers=cors_config.get("expose_headers", DEFAULT_EXPOSE_HEADERS),
+        max_age=cors_config.get("max_age", 600),
+    )
+
+
+def _merge_custom_app(app: FastAPI) -> None:
+    """Load custom FastAPI app from config and merge its routes, lifespan, and middleware."""
+    http_config = get_http_config()
+    if not http_config or not http_config.get("app"):
+        return
+
+    logger = logging.getLogger(__name__)
+    config_dir = get_config_dir()
+    try:
+        custom_app = load_custom_app(http_config["app"], base_dir=config_dir)
+    except Exception as exc:
+        logger.error("Failed to load custom app '%s': %s", http_config["app"], exc)
+        raise
+
+    # --- Merge lifespan ---
+    user_lifespan = custom_app.router.lifespan_context
+    core_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def combined_lifespan(a):
+        async with core_lifespan(a):
+            async with user_lifespan(a):
+                yield
+
+    app.router.lifespan_context = combined_lifespan
+
+    # --- Merge middleware ---
+    app.user_middleware.extend(custom_app.user_middleware)
+    if custom_app.user_middleware:
+        logger.info(
+            "Merged %d custom middleware(s): %s",
+            len(custom_app.user_middleware),
+            [mw.cls.__name__ for mw in custom_app.user_middleware],
+        )
+
+    # --- Merge routes ---
+    existing_paths = {getattr(r, "path", None) for r in app.router.routes}
+
+    for route in custom_app.routes:
+        path = getattr(route, "path", None)
+        if path in _FASTAPI_DEFAULT_PATHS:
+            continue
+        if path in existing_paths:
+            logger.warning("Custom route path '%s' conflicts with a built-in route, skipping", path)
+            continue
+        app.router.routes.append(route)
 
 
 def create_app() -> FastAPI:
@@ -292,6 +342,9 @@ def create_app() -> FastAPI:
     app.include_router(runs_router)
     app.include_router(stateless_runs_router)
     app.include_router(store_router)
+
+    _merge_custom_app(app)
+
     return app
 
 

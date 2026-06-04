@@ -70,3 +70,27 @@ async def test_redis_executor_enqueues_job() -> None:
     await executor.submit(job)
 
     assert queue.enqueued == [job]
+
+
+@pytest.mark.asyncio
+async def test_executor_facade_not_implemented() -> None:
+    from agentseek_api.services.executor import ExecutorFacade
+
+    with pytest.raises(NotImplementedError):
+        await ExecutorFacade().submit(None)  # type: ignore[arg-type]
+
+
+def test_get_executor_invalid_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    executor_module._executor = None
+    monkeypatch.setattr(executor_module.settings, "EXECUTOR_BACKEND", "bogus")
+    with pytest.raises(ValueError, match="Unsupported EXECUTOR_BACKEND"):
+        get_executor()
+    executor_module._executor = None
+
+
+def test_get_executor_redis_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    executor_module._executor = None
+    monkeypatch.setattr(executor_module.settings, "EXECUTOR_BACKEND", "redis")
+    ex = get_executor()
+    assert isinstance(ex, RedisExecutor)
+    executor_module._executor = None
