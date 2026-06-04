@@ -119,10 +119,10 @@ def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: Test
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
 
-    missing_assistant_list = auth_client.get("/assistants")
+    missing_assistant_list = auth_client.post("/assistants/search", json={})
     assert missing_assistant_list.status_code == 401
 
-    assistant_list = auth_client.get("/assistants", headers={"X-API-Key": "secret"})
+    assistant_list = auth_client.post("/assistants/search", json={}, headers={"X-API-Key": "secret"})
     assert assistant_list.status_code == 200
     assert any(item["assistant_id"] == assistant_id for item in assistant_list.json())
 

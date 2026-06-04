@@ -7,7 +7,7 @@ def test_list_assistants_latest_first(client: TestClient) -> None:
     assert first.status_code == 200
     assert second.status_code == 200
 
-    listed = client.get("/assistants")
+    listed = client.post("/assistants/search", json={})
     assert listed.status_code == 200
     body = listed.json()
     assert body[0]["name"] == "second"

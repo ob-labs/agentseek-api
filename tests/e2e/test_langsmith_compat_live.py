@@ -156,21 +156,15 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
             name="live-default",
             graph_id="default",
             metadata={"suite": "live-create"},
-            config={"temperature": 0},
+            config={"configurable": {"temperature": 0}},
             context={"tenant": "mysql-family"},
             description="live assistant create",
         )
         react_assistant = await _create_assistant(client, name="live-react", graph_id="react_agent")
         assert default_assistant["metadata"] == {"suite": "live-create"}
-        assert default_assistant["config"] == {"temperature": 0}
+        assert default_assistant["config"] == {"tags": [], "recursion_limit": None, "configurable": {"temperature": 0}}
         assert default_assistant["context"] == {"tenant": "mysql-family"}
         assert default_assistant["description"] == "live assistant create"
-
-        listed = await client.get("/assistants")
-        assert listed.status_code == 200
-        listed_ids = {item["assistant_id"] for item in listed.json()}
-        assert default_assistant["assistant_id"] in listed_ids
-        assert react_assistant["assistant_id"] in listed_ids
 
         searched = await client.post("/assistants/search", json={"graph_id": "default", "limit": 20, "offset": 0})
         assert searched.status_code == 200
@@ -190,7 +184,7 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
                 "name": "live-default-patched",
                 "graph_id": "stress_test",
                 "metadata": {"suite": "live"},
-                "config": {"temperature": 0},
+                "config": {"configurable": {"temperature": 0}},
                 "context": {"tenant": "mysql-family"},
                 "description": "live assistant",
             },

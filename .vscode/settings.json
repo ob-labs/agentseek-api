@@ -1,0 +1,19 @@
+{
+    "sqltools.connections": [
+        {
+            "mysqlOptions": {
+                "authProtocol": "default",
+                "enableSsl": "Disabled"
+            },
+            "ssh": "Disabled",
+            "previewLimit": 50,
+            "server": "localhost",
+            "port": 2881,
+            "driver": "MySQL",
+            "name": "agentseek-api",
+            "database": "agentseek_test",
+            "username": "root",
+            "askForPassword": true
+        }
+    ]
+}

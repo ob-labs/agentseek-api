@@ -8,22 +8,39 @@ from pydantic import BaseModel, ConfigDict, Field
 class AssistantCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    name: str
-    graph_id: str = "default"
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    assistant_id: str | None = None
+    graph_id: str
     config: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    if_exists: Literal["raise", "do_nothing"] = "raise"
+    name: str = "Untitled"
     description: str | None = None
+
+
+AssistantSortBy = Literal["assistant_id", "created_at", "updated_at", "name", "graph_id"]
+AssistantSortOrder = Literal["asc", "desc"]
+AssistantSelectField = Literal[
+    "assistant_id", "graph_id", "name", "description",
+    "config", "context", "created_at", "updated_at", "metadata", "version",
+]
+
+
+class AssistantCountRequest(BaseModel):
+    metadata: dict[str, Any] | None = None
+    graph_id: str | None = None
+    name: str | None = None
 
 
 class AssistantSearchRequest(BaseModel):
     metadata: dict[str, Any] | None = None
     graph_id: str | None = None
     name: str | None = None
-    limit: int = 10
-    offset: int = 0
-    sort_by: str = "created_at"
-    sort_order: str = "desc"
+    limit: int = Field(default=10, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
+    sort_by: AssistantSortBy | None = None
+    sort_order: AssistantSortOrder | None = None
+    select: list[AssistantSelectField] | None = None
 
 
 class AssistantPatch(BaseModel):
@@ -35,16 +52,22 @@ class AssistantPatch(BaseModel):
     description: str | None = None
 
 
+class AssistantConfigRead(BaseModel):
+    tags: list[str] = Field(default_factory=list)
+    recursion_limit: int | None = None
+    configurable: dict[str, Any] = Field(default_factory=dict)
+
+
 class AssistantRead(BaseModel):
     assistant_id: str
-    name: str
     graph_id: str
-    created_at: datetime
-    updated_at: datetime | None = None
-    metadata: dict[str, Any] = Field(default_factory=dict)
-    config: dict[str, Any] = Field(default_factory=dict)
+    config: AssistantConfigRead
     context: dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+    updated_at: datetime
+    metadata: dict[str, Any]
     version: int = 1
+    name: str = "Untitled"
     description: str | None = None
 
 

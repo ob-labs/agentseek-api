@@ -20,7 +20,7 @@ from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant
 from agentseek_api.core.runtime_store import UserScopedStore
-from agentseek_api.models.api import AssistantRead
+from agentseek_api.models.api import AssistantConfigRead, AssistantRead
 from agentseek_api.models.auth import User
 from agentseek_api.services.langgraph_service import GraphEntry
 from agentseek_api.settings import settings
@@ -865,6 +865,12 @@ async def load_assistant(assistant_id: str) -> AssistantRead:
         row = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
         if row is None:
             raise HTTPException(status_code=404, detail="Assistant not found")
+        raw_config = row.config_json or {}
+        config = AssistantConfigRead(
+            tags=raw_config.get("tags", []),
+            recursion_limit=raw_config.get("recursion_limit"),
+            configurable=raw_config.get("configurable", {}),
+        )
         return AssistantRead(
             assistant_id=row.assistant_id,
             name=row.name,
@@ -872,7 +878,7 @@ async def load_assistant(assistant_id: str) -> AssistantRead:
             created_at=row.created_at,
             updated_at=row.updated_at,
             metadata=row.metadata_json,
-            config=row.config_json,
+            config=config,
             context=row.context_json,
             version=row.version,
             description=row.description,

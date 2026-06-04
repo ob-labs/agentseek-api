@@ -40,9 +40,9 @@ def test_assistant_routes_cover_list_patch_and_missing_paths(client: TestClient)
     created = _create_assistant(client, name="before", graph_id="default")
     assistant_id = str(created["assistant_id"])
 
-    listed = client.get("/assistants")
+    listed = client.post("/assistants/search", json={})
     assert listed.status_code == 200
-    assert [item["assistant_id"] for item in listed.json()] == [assistant_id]
+    assert any(item["assistant_id"] == assistant_id for item in listed.json())
 
     patched = client.patch(
         f"/assistants/{assistant_id}",
@@ -50,7 +50,7 @@ def test_assistant_routes_cover_list_patch_and_missing_paths(client: TestClient)
             "name": "after",
             "graph_id": "react_agent",
             "metadata": {"team": "api"},
-            "config": {"temperature": 0},
+            "config": {"configurable": {"temperature": 0}},
             "context": {"tenant": "compat"},
             "description": "updated",
         },
@@ -60,7 +60,7 @@ def test_assistant_routes_cover_list_patch_and_missing_paths(client: TestClient)
     assert patched_body["name"] == "after"
     assert patched_body["graph_id"] == "react_agent"
     assert patched_body["metadata"] == {"team": "api"}
-    assert patched_body["config"] == {"temperature": 0}
+    assert patched_body["config"] == {"tags": [], "recursion_limit": None, "configurable": {"temperature": 0}}
     assert patched_body["context"] == {"tenant": "compat"}
     assert patched_body["description"] == "updated"
 

@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from agentseek_api.api import assistants as assistants_module
 from agentseek_api.main import create_app
 from agentseek_api.core.orm import Assistant
-from agentseek_api.models.api import AssistantCreate, AssistantPatch, AssistantSearchRequest
+from agentseek_api.models.api import AssistantConfigRead, AssistantCountRequest, AssistantCreate, AssistantPatch, AssistantSearchRequest
 
 
 class FakeScalarResult:
@@ -106,12 +106,28 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
         lambda: session_factory,
     )
 
+    class FakeGraphEntry:
+        def build_graph(self):
+            return None
+
+    class FakeLangGraphService:
+        def registered_graph_ids(self) -> list[str]:
+            return ["react_agent", "stress_test", "default"]
+
+        def get_entry(self, graph_id: str):
+            return FakeGraphEntry()
+
+    monkeypatch.setattr(
+        "agentseek_api.api.assistants.get_langgraph_service",
+        FakeLangGraphService,
+    )
+
     created = await assistants_module.create_assistant(
         AssistantCreate(
             name="created",
             graph_id="react_agent",
             metadata={"suite": "unit"},
-            config={"temperature": 0},
+            config={"configurable": {"temperature": 0}},
             context={"tenant": "tests"},
             description="created assistant",
         )
@@ -119,11 +135,11 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
     assert created.assistant_id == "assistant-1"
     assert created.graph_id == "react_agent"
     assert created.metadata == {"suite": "unit"}
-    assert created.config == {"temperature": 0}
+    assert created.config == AssistantConfigRead(configurable={"temperature": 0})
     assert created.context == {"tenant": "tests"}
     assert created.description == "created assistant"
 
-    listed = await assistants_module.list_assistants()
+    listed = await assistants_module.search_assistants(AssistantSearchRequest())
     assert [item.assistant_id for item in listed] == ["assistant-existing"]
 
     patched = await assistants_module.patch_assistant(
@@ -132,7 +148,7 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
             name="after",
             graph_id="stress_test",
             metadata={"team": "compat"},
-            config={"temperature": 0},
+            config={"configurable": {"temperature": 0}},
             context={"tenant": "unit"},
             description="patched",
         ),
@@ -140,12 +156,12 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
     assert patched.name == "after"
     assert patched.graph_id == "stress_test"
     assert patched.metadata == {"team": "compat"}
-    assert patched.config == {"temperature": 0}
+    assert patched.config == AssistantConfigRead(configurable={"temperature": 0})
     assert patched.context == {"tenant": "unit"}
     assert patched.description == "patched"
 
     deleted = await assistants_module.delete_assistant("assistant-delete")
-    assert deleted.status_code == 204
+    assert deleted == {}
     assert delete_session.deleted == [delete_target]
 
 
@@ -169,18 +185,6 @@ async def test_assistant_route_handlers_raise_not_found(monkeypatch: pytest.Monk
         await assistants_module.delete_assistant("missing")
     assert delete_error.value.status_code == 404
 
-
-@pytest.mark.asyncio
-async def test_delete_assistant_rejects_delete_threads_until_supported(monkeypatch: pytest.MonkeyPatch) -> None:
-    session_factory = FakeSessionFactory([])
-    monkeypatch.setattr(
-        "agentseek_api.api.assistants.db_manager.get_session_factory",
-        lambda: session_factory,
-    )
-
-    with pytest.raises(HTTPException, match="delete_threads=true is not supported") as error:
-        await assistants_module.delete_assistant("assistant-1", delete_threads=True)
-    assert error.value.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -245,10 +249,7 @@ def test_assistant_helper_openapi_matches_limited_contract() -> None:
     error_schema_ref = "#/components/schemas/ErrorDetailResponse"
 
     delete_responses = schema["paths"]["/assistants/{assistant_id}"]["delete"]["responses"]
-    assert delete_responses["400"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
-    assert delete_responses["400"]["content"]["application/json"]["example"] == {
-        "detail": "delete_threads=true is not supported"
-    }
+    assert "400" not in delete_responses
     assert delete_responses["404"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
     delete_parameters = schema["paths"]["/assistants/{assistant_id}"]["delete"]["parameters"]
     assert any(
@@ -290,13 +291,12 @@ def test_assistant_helper_openapi_matches_limited_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_count_assistants_returns_exact_count_beyond_page_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    assistants = [_assistant(assistant_id=f"assistant-{index}") for index in range(10_001)]
-    session_factory = FakeSessionFactory([FakeSession(scalars_rows=[assistants])])
+    session_factory = FakeSessionFactory([FakeSession(scalar_rows=[10_001])])
     monkeypatch.setattr(
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: session_factory,
     )
 
-    count = await assistants_module.count_assistants(AssistantSearchRequest())
+    count = await assistants_module.count_assistants(AssistantCountRequest())
 
     assert count == 10_001

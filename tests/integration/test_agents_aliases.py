@@ -10,9 +10,9 @@ def test_agents_alias_crud_matches_assistants_resource(client: TestClient) -> No
 
     assistant_id = body["assistant_id"]
 
-    listed = client.get("/agents")
+    listed = client.post("/agents/search", json={})
     assert listed.status_code == 200
-    assert [item["assistant_id"] for item in listed.json()] == [assistant_id]
+    assert any(item["assistant_id"] == assistant_id for item in listed.json())
 
     fetched_via_assistants = client.get(f"/assistants/{assistant_id}")
     assert fetched_via_assistants.status_code == 200
@@ -35,7 +35,7 @@ def test_agents_alias_crud_matches_assistants_resource(client: TestClient) -> No
     assert count.json() == 1
 
     deleted = client.delete(f"/agents/{assistant_id}")
-    assert deleted.status_code == 204
+    assert deleted.status_code == 200
     assert client.get(f"/assistants/{assistant_id}").status_code == 404
 
 

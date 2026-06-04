@@ -25,14 +25,14 @@ def test_create_assistant_persists_langsmith_fields(client: TestClient) -> None:
             "name": "rich",
             "graph_id": "default",
             "metadata": {"suite": "compat"},
-            "config": {"temperature": 0},
+            "config": {"configurable": {"temperature": 0}},
             "context": {"tenant": "mysql-family"},
             "description": "assistant description",
         },
     )
     assert created.status_code == 200
     assert created.json()["metadata"] == {"suite": "compat"}
-    assert created.json()["config"] == {"temperature": 0}
+    assert created.json()["config"] == {"tags": [], "recursion_limit": None, "configurable": {"temperature": 0}}
     assert created.json()["context"] == {"tenant": "mysql-family"}
     assert created.json()["description"] == "assistant description"
 
@@ -55,7 +55,7 @@ def test_patch_and_delete_assistant(client: TestClient) -> None:
     assert patched.json()["metadata"] == {"existing": True, "team": "api"}
 
     deleted = client.delete(f"/assistants/{assistant_id}")
-    assert deleted.status_code == 204
+    assert deleted.status_code == 200
 
     fetched = client.get(f"/assistants/{assistant_id}")
     assert fetched.status_code == 404
