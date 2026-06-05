@@ -174,7 +174,7 @@ def _assert_custom_auth_default_identity(
     assert isinstance(created_thread, dict)
     thread_id = str(created_thread["thread_id"])
 
-    _, default_threads, _ = _request(base_url=base_url, path="/threads")
+    _, default_threads, _ = _request(base_url=base_url, path="/threads/search", method="POST", payload={})
     assert isinstance(default_threads, list)
     assert any(item["thread_id"] == thread_id for item in default_threads)
 
@@ -233,7 +233,7 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(created_thread, dict)
     thread_id = str(created_thread["thread_id"])
 
-    _, listed_threads, _ = _request(base_url=base_url, path="/threads", headers=alice)
+    _, listed_threads, _ = _request(base_url=base_url, path="/threads/search", method="POST", payload={}, headers=alice)
     assert isinstance(listed_threads, list)
     assert any(item["thread_id"] == thread_id for item in listed_threads)
 
@@ -241,7 +241,7 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(fetched_thread, dict)
     assert fetched_thread["thread_id"] == thread_id
 
-    _, other_threads, _ = _request(base_url=base_url, path="/threads", headers=bob)
+    _, other_threads, _ = _request(base_url=base_url, path="/threads/search", method="POST", payload={}, headers=bob)
     assert isinstance(other_threads, list)
     assert all(item["thread_id"] != thread_id for item in other_threads)
 
