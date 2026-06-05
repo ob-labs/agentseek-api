@@ -119,10 +119,10 @@ def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: Test
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
 
-    missing_assistant_list = auth_client.get("/assistants")
+    missing_assistant_list = auth_client.post("/assistants/search", json={})
     assert missing_assistant_list.status_code == 401
 
-    assistant_list = auth_client.get("/assistants", headers={"X-API-Key": "secret"})
+    assistant_list = auth_client.post("/assistants/search", json={}, headers={"X-API-Key": "secret"})
     assert assistant_list.status_code == 200
     assert any(item["assistant_id"] == assistant_id for item in assistant_list.json())
 
@@ -135,7 +135,7 @@ def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: Test
         headers={"X-API-Key": "secret"},
     )
     assert valid_thread.status_code == 200
-    assert valid_thread.json()["user_id"] == "api-user"
+    assert "thread_id" in valid_thread.json()
     thread_id = valid_thread.json()["thread_id"]
 
     missing_thread_run = auth_client.post(
@@ -174,7 +174,7 @@ def test_studio_requests_bypass_api_key_auth_in_local_dev(local_dev_auth_client:
         headers={"x-auth-scheme": "langsmith"},
     )
     assert thread.status_code == 200
-    assert thread.json()["user_id"] == "langgraph-studio-user"
+    assert "thread_id" in thread.json()
     thread_id = thread.json()["thread_id"]
 
     run = local_dev_auth_client.post(

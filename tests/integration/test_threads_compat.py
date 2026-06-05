@@ -6,11 +6,8 @@ def _create_thread(
     *,
     user_id: str,
     metadata: dict[str, object],
-    config: dict[str, object] | None = None,
 ) -> str:
     payload: dict[str, object] = {"metadata": metadata}
-    if config is not None:
-        payload["config"] = config
     response = client.post("/threads", json=payload, headers={"x-user-id": user_id})
     assert response.status_code == 200
     return response.json()["thread_id"]
@@ -25,7 +22,6 @@ def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
         client,
         user_id="u1",
         metadata={"topic": "alpha", "tag": "keep"},
-        config={"retention": "short"},
     )
     _create_thread(client, user_id="u1", metadata={"topic": "beta"})
     _create_thread(client, user_id="u2", metadata={"topic": "alpha"})
@@ -49,8 +45,8 @@ def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
 
     patched = client.patch(f"/threads/{thread_id}", json={"metadata": {"tag": "patched"}}, headers={"x-user-id": "u1"})
     assert patched.status_code == 200
-    assert patched.json()["metadata"] == {"topic": "alpha", "tag": "patched"}
-    assert patched.json()["config"] == {"retention": "short"}
+    assert patched.json()["metadata"] == {"topic": "alpha", "tag": "patched", "graph_id": "default"}
+    assert patched.json()["config"] == {}
 
     unsupported_patch = client.patch(
         f"/threads/{thread_id}",

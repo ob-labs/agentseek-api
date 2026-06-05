@@ -172,12 +172,11 @@ def _assert_custom_auth_default_identity(
         payload={"metadata": {"suite": "docker-auth-default"}},
     )
     assert isinstance(created_thread, dict)
-    assert created_thread["user_id"] == "default_user"
     thread_id = str(created_thread["thread_id"])
 
-    _, default_threads, _ = _request(base_url=base_url, path="/threads")
+    _, default_threads, _ = _request(base_url=base_url, path="/threads/search", method="POST", payload={})
     assert isinstance(default_threads, list)
-    assert any(item["thread_id"] == thread_id and item["user_id"] == "default_user" for item in default_threads)
+    assert any(item["thread_id"] == thread_id for item in default_threads)
 
     _, hidden_from_other_user, _ = _request(
         base_url=base_url,
@@ -202,7 +201,7 @@ def _assert_common_flow(base_url: str) -> None:
     assert info["flags"]["runs"] is True
     assert isinstance(info["version"], str) and info["version"]
 
-    _, assistants, _ = _request(base_url=base_url, path="/assistants")
+    _, assistants, _ = _request(base_url=base_url, path="/assistants/search", method="POST", payload={})
     assert isinstance(assistants, list)
 
     _assert_custom_auth_default_identity(base_url=base_url, other_headers=alice)
@@ -220,7 +219,7 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(fetched_assistant, dict)
     assert fetched_assistant["assistant_id"] == assistant_id
 
-    _, listed_assistants, _ = _request(base_url=base_url, path="/assistants")
+    _, listed_assistants, _ = _request(base_url=base_url, path="/assistants/search", method="POST", payload={})
     assert isinstance(listed_assistants, list)
     assert any(item["assistant_id"] == assistant_id for item in listed_assistants)
 
@@ -233,18 +232,16 @@ def _assert_common_flow(base_url: str) -> None:
     )
     assert isinstance(created_thread, dict)
     thread_id = str(created_thread["thread_id"])
-    assert created_thread["user_id"] == "alice"
 
-    _, listed_threads, _ = _request(base_url=base_url, path="/threads", headers=alice)
+    _, listed_threads, _ = _request(base_url=base_url, path="/threads/search", method="POST", payload={}, headers=alice)
     assert isinstance(listed_threads, list)
     assert any(item["thread_id"] == thread_id for item in listed_threads)
 
     _, fetched_thread, _ = _request(base_url=base_url, path=f"/threads/{thread_id}", headers=alice)
     assert isinstance(fetched_thread, dict)
     assert fetched_thread["thread_id"] == thread_id
-    assert fetched_thread["user_id"] == "alice"
 
-    _, other_threads, _ = _request(base_url=base_url, path="/threads", headers=bob)
+    _, other_threads, _ = _request(base_url=base_url, path="/threads/search", method="POST", payload={}, headers=bob)
     assert isinstance(other_threads, list)
     assert all(item["thread_id"] != thread_id for item in other_threads)
 
@@ -474,7 +471,6 @@ def _assert_smoke_flow(base_url: str) -> None:
         headers=headers,
     )
     assert isinstance(created_thread, dict)
-    assert created_thread["user_id"] == "autobuild"
     thread_id = str(created_thread["thread_id"])
 
     _, waited_run, _ = _request(

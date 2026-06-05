@@ -100,6 +100,36 @@ curl http://127.0.0.1:2024/health
 curl http://127.0.0.1:2024/info
 curl http://127.0.0.1:2024/openapi.json
 ```
+### 5. 使用 LangGraph SDK 进行测试
+
+```python
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:2024/")
+
+async def main():
+    # 列出所有 assistant
+    assistants = await client.assistants.search(graph_id="agent")
+
+    # 我们会为你在配置中注册的每个图自动创建一个 assistant。
+    agent = assistants[0]
+
+    # 创建一个新的 thread
+    thread = await client.threads.create()
+
+    # 启动一个流式 run
+    input = {"messages": [{"role": "human", "content": "hello?"}]}
+    async for chunk in client.runs.stream(
+        thread["thread_id"], agent["assistant_id"], input=input
+    ):
+        print(chunk)
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(main())
+```
 
 ## 🧰 CLI
 

@@ -25,14 +25,14 @@ def test_create_assistant_persists_langsmith_fields(client: TestClient) -> None:
             "name": "rich",
             "graph_id": "default",
             "metadata": {"suite": "compat"},
-            "config": {"temperature": 0},
+            "config": {"configurable": {"temperature": 0}},
             "context": {"tenant": "mysql-family"},
             "description": "assistant description",
         },
     )
     assert created.status_code == 200
     assert created.json()["metadata"] == {"suite": "compat"}
-    assert created.json()["config"] == {"temperature": 0}
+    assert created.json()["config"] == {"tags": [], "configurable": {"temperature": 0}}
     assert created.json()["context"] == {"tenant": "mysql-family"}
     assert created.json()["description"] == "assistant description"
 

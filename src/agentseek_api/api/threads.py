@@ -1,19 +1,20 @@
 import asyncio
+import logging
 from copy import deepcopy
 from datetime import UTC, datetime
 import json
 from collections.abc import AsyncIterator
 from typing import Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
-from agentseek_api.models.api import ThreadCreate, ThreadPatch, ThreadPruneRequest, ThreadRead, ThreadSearchRequest
+from agentseek_api.models.api import ThreadCountRequest, ThreadCreate, ThreadPatch, ThreadPruneRequest, ThreadPruneResponse, ThreadRead, ThreadSearchRequest
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolCommandRequest, ProtocolEventStreamRequest
 from agentseek_api.services.run_preparation import (
@@ -36,6 +37,7 @@ from agentseek_api.services.thread_checkpoint_store import (
     prune_checkpoints,
 )
 from agentseek_api.services.thread_protocol import thread_protocol_broker
+from agentseek_api.services.thread_service import create_thread_for_user, to_read_model
 from agentseek_api.settings import settings
 
 router = APIRouter(prefix="/threads", tags=["Threads"])
@@ -58,23 +60,28 @@ async def _best_effort_checkpointer_call(method_name: str, *args: object, **kwar
         return
 
 
-def _to_read_model(row: Thread) -> ThreadRead:
-    return ThreadRead(
-        thread_id=row.thread_id,
-        user_id=row.user_id,
-        metadata=row.metadata_json,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
-        state_updated_at=row.state_updated_at,
-        config=_public_thread_config(row.config_json),
-        status=row.status,
-    )
+logger = logging.getLogger(__name__)
 
 
-def _public_thread_config(config: dict[str, object] | None) -> dict[str, object]:
-    if not isinstance(config, dict):
-        return {}
-    return dict(config)
+async def _enrich_thread_state(thread_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    try:
+        checkpoints = await list_checkpoints(thread_id)
+    except Exception:
+        logger.warning("Failed to load checkpoint state for thread %s", thread_id, exc_info=True)
+        return {}, None
+    if not checkpoints:
+        return {}, None
+    payload = checkpoint_to_payload(checkpoints[0])
+    values = payload.get("values", {})
+    if not isinstance(values, dict):
+        values = {}
+    interrupts = payload.get("interrupts")
+    if isinstance(interrupts, list):
+        interrupts = {str(i): item for i, item in enumerate(interrupts)} if interrupts else None
+    elif not isinstance(interrupts, dict):
+        interrupts = None
+    return values, interrupts
+
 
 
 def _uses_redis_executor() -> bool:
@@ -131,20 +138,6 @@ async def _iter_persisted_thread_events(
 
         await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
 
-
-def _filtered_thread_rows(rows: list[Thread], payload: ThreadSearchRequest) -> list[Thread]:
-    def matches(row: Thread) -> bool:
-        if payload.ids is not None and row.thread_id not in payload.ids:
-            return False
-        if payload.status is not None and row.status != payload.status:
-            return False
-        if payload.metadata is not None:
-            for key, value in payload.metadata.items():
-                if row.metadata_json.get(key) != value:
-                    return False
-        return True
-
-    return [row for row in rows if matches(row)]
 
 
 def _checkpoint_lookup_payload(payload: dict[str, object] | None) -> str | None:
@@ -299,53 +292,72 @@ async def _get_thread_state_payload(
         return _empty_thread_state_payload(thread)
 
 
-@router.post("", response_model=ThreadRead)
+@router.post("", response_model=ThreadRead, response_model_exclude_none=True)
 async def create_thread(payload: ThreadCreate, user: User = Depends(get_current_user)) -> ThreadRead:
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        row = Thread(user_id=user.identity, metadata_json=payload.metadata, config_json=payload.config)
-        session.add(row)
-        await session.commit()
-        await session.refresh(row)
-        return _to_read_model(row)
+    if payload.ttl is not None:
+        raise HTTPException(status_code=422, detail="'ttl' is not supported yet")
+    if payload.supersteps is not None:
+        raise HTTPException(status_code=422, detail="'supersteps' is not supported yet")
+
+    return await create_thread_for_user(payload=payload, user=user)
 
 
-@router.get("", response_model=list[ThreadRead])
-async def list_threads(user: User = Depends(get_current_user)) -> list[ThreadRead]:
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        rows = (
-            await session.scalars(select(Thread).where(Thread.user_id == user.identity).order_by(Thread.created_at.desc()))
-        ).all()
-        return [_to_read_model(row) for row in rows]
-
-
-@router.post("/search", response_model=list[ThreadRead])
+@router.post("/search", response_model=list[ThreadRead], response_model_exclude_none=True)
 async def search_threads(payload: ThreadSearchRequest, user: User = Depends(get_current_user)) -> list[ThreadRead]:
+    if payload.values is not None:
+        raise HTTPException(status_code=422, detail="'values' filter is not supported yet")
+    if payload.extract is not None:
+        raise HTTPException(status_code=422, detail="'extract' is not supported yet")
+
+    sort_by = payload.sort_by or "created_at"
+    sort_order = payload.sort_order or "desc"
+    sort_column = getattr(Thread, sort_by, Thread.created_at)
+    order_clause = sort_column.desc() if sort_order == "desc" else sort_column.asc()
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        rows = (
-            await session.scalars(select(Thread).where(Thread.user_id == user.identity).order_by(Thread.created_at.desc()))
-        ).all()
+        stmt = select(Thread).where(Thread.user_id == user.identity)
+        if payload.ids is not None:
+            stmt = stmt.where(Thread.thread_id.in_(payload.ids))
+        if payload.status is not None:
+            stmt = stmt.where(Thread.status == payload.status)
+        if payload.metadata is not None:
+            for key, value in payload.metadata.items():
+                stmt = stmt.where(Thread.metadata_json[key].as_string() == str(value))
+        stmt = stmt.order_by(order_clause).offset(payload.offset).limit(payload.limit)
+        rows = (await session.scalars(stmt)).all()
 
-    filtered = _filtered_thread_rows(rows, payload)
-    start = max(payload.offset, 0)
-    end = start + max(payload.limit, 0)
-    return [_to_read_model(row) for row in filtered[start:end]]
+    selected_fields = set(payload.select) if payload.select else None
+
+    need_state = selected_fields is None or "values" in selected_fields or "interrupts" in selected_fields
+    if need_state:
+        states = await asyncio.gather(*[_enrich_thread_state(row.thread_id) for row in rows])
+        return [
+            to_read_model(row, select=selected_fields, values=values, interrupts=interrupts)
+            for row, (values, interrupts) in zip(rows, states)
+        ]
+    return [to_read_model(row, select=selected_fields) for row in rows]
 
 
 @router.post("/count", response_model=int)
-async def count_threads(payload: ThreadSearchRequest, user: User = Depends(get_current_user)) -> int:
+async def count_threads(payload: ThreadCountRequest, user: User = Depends(get_current_user)) -> int:
+    if payload.values is not None:
+        raise HTTPException(status_code=422, detail="'values' filter is not supported yet")
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        rows = (
-            await session.scalars(select(Thread).where(Thread.user_id == user.identity).order_by(Thread.created_at.desc()))
-        ).all()
-    return len(_filtered_thread_rows(rows, payload))
+        stmt = select(func.count()).select_from(Thread).where(Thread.user_id == user.identity)
+        if payload.status is not None:
+            stmt = stmt.where(Thread.status == payload.status)
+        if payload.metadata is not None:
+            for key, value in payload.metadata.items():
+                stmt = stmt.where(Thread.metadata_json[key].as_string() == str(value))
+        result = await session.scalar(stmt)
+        return result or 0
 
 
-@router.post("/prune")
-async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_current_user)) -> dict[str, int]:
+@router.post("/prune", response_model=ThreadPruneResponse)
+async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_current_user)) -> ThreadPruneResponse:
     session_factory = db_manager.get_session_factory()
     pruned_run_ids: list[str] = []
     async with session_factory() as session:
@@ -377,8 +389,6 @@ async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_cu
             if stale_run_ids:
                 pruned_run_ids = stale_run_ids
                 await session.execute(delete(Run).where(Run.run_id.in_(stale_run_ids), Run.user_id == user.identity))
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported prune strategy: {payload.strategy}")
         await session.commit()
     await prune_checkpoints(thread_ids, strategy=payload.strategy)
     if pruned_run_ids:
@@ -387,17 +397,18 @@ async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_cu
         for thread_id in thread_ids:
             thread_protocol_broker.delete_thread(thread_id)
             await delete_thread_stream_events(thread_id)
-    return {"pruned_count": len(thread_ids)}
+    return ThreadPruneResponse(pruned_count=len(thread_ids))
 
 
-@router.get("/{thread_id}", response_model=ThreadRead)
+@router.get("/{thread_id}", response_model=ThreadRead, response_model_exclude_none=True)
 async def get_thread(thread_id: str, user: User = Depends(get_current_user)) -> ThreadRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
         if row is None:
             raise HTTPException(status_code=404, detail="Thread not found")
-        return _to_read_model(row)
+        values, interrupts = await _enrich_thread_state(thread_id)
+        return to_read_model(row, values=values, interrupts=interrupts)
 
 
 async def _get_thread_row(*, thread_id: str, user: User) -> Thread:
@@ -409,7 +420,7 @@ async def _get_thread_row(*, thread_id: str, user: User) -> Thread:
         return row
 
 
-@router.patch("/{thread_id}", response_model=ThreadRead)
+@router.patch("/{thread_id}", response_model=ThreadRead, response_model_exclude_none=True)
 async def patch_thread(thread_id: str, payload: ThreadPatch, user: User = Depends(get_current_user)) -> ThreadRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -420,7 +431,7 @@ async def patch_thread(thread_id: str, payload: ThreadPatch, user: User = Depend
             row.metadata_json = {**row.metadata_json, **payload.metadata}
         await session.commit()
         await session.refresh(row)
-        return _to_read_model(row)
+        return to_read_model(row)
 
 
 @router.delete("/{thread_id}", status_code=204)
@@ -445,7 +456,7 @@ async def delete_thread(thread_id: str, user: User = Depends(get_current_user)) 
     return Response(status_code=204)
 
 
-@router.post("/{thread_id}/copy", response_model=ThreadRead)
+@router.post("/{thread_id}/copy", response_model=ThreadRead, response_model_exclude_none=True)
 async def copy_thread(thread_id: str, user: User = Depends(get_current_user)) -> ThreadRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -486,12 +497,20 @@ async def copy_thread(thread_id: str, user: User = Depends(get_current_user)) ->
         await session.commit()
         await session.refresh(copied)
     await copy_checkpoints(thread_id, copied.thread_id)
-    return _to_read_model(copied)
+    return to_read_model(copied)
 
 
 @router.get("/{thread_id}/state")
-async def get_thread_state(thread_id: str, user: User = Depends(get_current_user)) -> dict[str, object]:
-    return await _get_thread_state_payload(thread_id=thread_id, user=user)
+async def get_thread_state(
+    thread_id: str,
+    subgraphs: bool = Query(False, description="Whether to include subgraphs in the response"),
+    checkpoint_ns: str | None = Query(None, description="Checkpoint namespace to scope lookup"),
+    user: User = Depends(get_current_user),
+) -> dict[str, object]:
+    if subgraphs is True:
+        raise HTTPException(status_code=422, detail="'subgraphs' is not supported yet")
+    ns = checkpoint_ns if isinstance(checkpoint_ns, str) else None
+    return await _get_thread_state_payload(thread_id=thread_id, user=user, checkpoint_ns=ns)
 
 
 @router.get("/{thread_id}/history")
@@ -547,8 +566,12 @@ async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str,
 async def get_thread_state_at_checkpoint(
     thread_id: str,
     checkpoint_id: str,
+    subgraphs: bool = Query(False, description="Whether to include subgraphs in the response"),
+    checkpoint_ns: str | None = Query(None, description="Checkpoint namespace to scope lookup"),
     user: User = Depends(get_current_user),
 ) -> dict[str, object]:
+    if subgraphs is True:
+        raise HTTPException(status_code=422, detail="'subgraphs' is not supported yet")
     return await _get_thread_state_at_checkpoint(thread_id=thread_id, checkpoint_id=checkpoint_id, user=user)
 
 

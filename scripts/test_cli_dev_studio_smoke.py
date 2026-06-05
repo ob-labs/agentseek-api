@@ -153,7 +153,7 @@ def main() -> int:
         assert unauthorized.status_code == 401, unauthorized.text
         assert assistant.status_code == 200, assistant.text
         assert thread.status_code == 200, thread.text
-        assert thread.json()["user_id"] == "langgraph-studio-user"
+        assert "thread_id" in thread.json()
 
         logs = log_path.read_text(encoding="utf-8", errors="replace")
         assert "> Ready!" in logs, logs

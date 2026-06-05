@@ -1,12 +1,37 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
 from langgraph.checkpoint.base import CheckpointTuple, create_checkpoint, empty_checkpoint
+from langgraph.types import Send
 
 from agentseek_api.core.database import db_manager
+
+
+def _make_serializable(obj: Any) -> Any:
+    """Recursively convert LangGraph internal types to JSON-safe representations."""
+    if obj is None or isinstance(obj, (str, int, float, bool)):
+        return obj
+    if isinstance(obj, Send):
+        return {"__type__": "Send", "node": obj.node, "arg": _make_serializable(obj.arg)}
+    if isinstance(obj, dict):
+        return {k: _make_serializable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_make_serializable(item) for item in obj]
+    if isinstance(obj, (set, frozenset)):
+        return [_make_serializable(item) for item in obj]
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return _make_serializable(obj.model_dump())
+    if hasattr(obj, "_asdict") and callable(obj._asdict):
+        return {k: _make_serializable(v) for k, v in obj._asdict().items()}
+    try:
+        json.dumps(obj)
+        return obj
+    except (TypeError, ValueError):
+        return repr(obj)
 
 
 def _config(
@@ -75,7 +100,7 @@ def checkpoint_to_payload(checkpoint_tuple: CheckpointTuple) -> dict[str, Any]:
             "checkpoint_id": str(parent_configurable.get("checkpoint_id", "")),
         }
     return {
-        "values": deepcopy(checkpoint.get("channel_values", {})),
+        "values": _make_serializable(deepcopy(checkpoint.get("channel_values", {}))),
         "next": [],
         "tasks": [],
         "checkpoint": {

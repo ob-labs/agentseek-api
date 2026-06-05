@@ -80,11 +80,8 @@ async def _create_thread(
     *,
     user_id: str,
     metadata: dict[str, object],
-    config: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {"metadata": metadata}
-    if config is not None:
-        payload["config"] = config
     response = await client.post("/threads", json=payload, headers=_user_headers(user_id))
     assert response.status_code == 200
     return response.json()
@@ -156,21 +153,15 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
             name="live-default",
             graph_id="default",
             metadata={"suite": "live-create"},
-            config={"temperature": 0},
+            config={"configurable": {"temperature": 0}},
             context={"tenant": "mysql-family"},
             description="live assistant create",
         )
         react_assistant = await _create_assistant(client, name="live-react", graph_id="react_agent")
         assert default_assistant["metadata"] == {"suite": "live-create"}
-        assert default_assistant["config"] == {"temperature": 0}
+        assert default_assistant["config"] == {"tags": [], "configurable": {"temperature": 0}}
         assert default_assistant["context"] == {"tenant": "mysql-family"}
         assert default_assistant["description"] == "live assistant create"
-
-        listed = await client.get("/assistants")
-        assert listed.status_code == 200
-        listed_ids = {item["assistant_id"] for item in listed.json()}
-        assert default_assistant["assistant_id"] in listed_ids
-        assert react_assistant["assistant_id"] in listed_ids
 
         searched = await client.post("/assistants/search", json={"graph_id": "default", "limit": 20, "offset": 0})
         assert searched.status_code == 200
@@ -190,7 +181,7 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
                 "name": "live-default-patched",
                 "graph_id": "stress_test",
                 "metadata": {"suite": "live"},
-                "config": {"temperature": 0},
+                "config": {"configurable": {"temperature": 0}},
                 "context": {"tenant": "mysql-family"},
                 "description": "live assistant",
             },
@@ -232,7 +223,7 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         unsupported_delete = await client.delete(
             f"/assistants/{default_assistant['assistant_id']}?delete_threads=true",
         )
-        assert unsupported_delete.status_code == 400
+        assert unsupported_delete.status_code == 422
 
         deleted = await client.delete(f"/assistants/{react_assistant['assistant_id']}")
         assert deleted.status_code == 204
@@ -455,7 +446,6 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
             client,
             user_id=user_id,
             metadata={"topic": "alpha", "tag": "keep", "suite": suite_id},
-            config={"retention": "short"},
         )
         beta_thread = await _create_thread(client, user_id=user_id, metadata={"topic": "beta"})
         _ = await _create_thread(client, user_id="thread-live-other", metadata={"topic": "alpha"})
@@ -474,7 +464,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
             user_id=user_id,
         )
 
-        listed = await client.get("/threads", headers=_user_headers(user_id))
+        listed = await client.post("/threads/search", json={}, headers=_user_headers(user_id))
         assert listed.status_code == 200
         listed_ids = {item["thread_id"] for item in listed.json()}
         assert str(alpha_thread["thread_id"]) in listed_ids
@@ -499,7 +489,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         fetched = await client.get(f"/threads/{alpha_thread['thread_id']}", headers=_user_headers(user_id))
         assert fetched.status_code == 200
         assert fetched.json()["thread_id"] == alpha_thread["thread_id"]
-        assert fetched.json()["config"] == {"retention": "short"}
+        assert fetched.json()["config"] == {}
 
         patched = await client.patch(
             f"/threads/{alpha_thread['thread_id']}",

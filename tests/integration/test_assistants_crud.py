@@ -2,7 +2,7 @@ from fastapi.testclient import TestClient
 
 
 def test_list_assistants_empty(client: TestClient) -> None:
-    response = client.get("/assistants")
+    response = client.post("/assistants/search", json={})
     assert response.status_code == 200
     assert response.json() == []
 
@@ -25,7 +25,7 @@ def test_get_assistant_not_found(client: TestClient) -> None:
 
 
 def test_create_assistant_validation_error(client: TestClient) -> None:
-    response = client.post("/assistants", json={"graph_id": "default"})
+    response = client.post("/assistants", json={})
     assert response.status_code == 422
 
 
@@ -35,7 +35,7 @@ def test_list_assistants_returns_multiple_items(client: TestClient) -> None:
     assert first.status_code == 200
     assert second.status_code == 200
 
-    listed = client.get("/assistants")
+    listed = client.post("/assistants/search", json={})
     assert listed.status_code == 200
     items = listed.json()
     assert len(items) == 2

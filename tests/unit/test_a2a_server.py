@@ -5,7 +5,7 @@ import pytest
 from langchain_core.messages import HumanMessage
 from starlette.responses import StreamingResponse
 
-from agentseek_api.models.api import AssistantRead
+from agentseek_api.models.api import AssistantConfigRead, AssistantRead
 from agentseek_api.models.auth import User
 from agentseek_api.services.langgraph_service import GraphEntry
 from agentseek_api.a2a_server import (
@@ -43,7 +43,7 @@ def _assistant(*, name: str = "assistant-name", description: str | None = "assis
         created_at=now,
         updated_at=now,
         metadata={"scope": "test"},
-        config={},
+        config=AssistantConfigRead(),
         context={},
         version=1,
         description=description,
@@ -805,7 +805,7 @@ async def test_handle_a2a_request_rejects_cross_assistant_task_id_reuse(monkeypa
         created_at=assistant_a.created_at,
         updated_at=assistant_a.updated_at,
         metadata={"scope": "test"},
-        config={},
+        config=AssistantConfigRead(),
         context={},
         version=1,
         description="assistant-b",
