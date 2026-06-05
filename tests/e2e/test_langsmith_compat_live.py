@@ -223,7 +223,7 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         unsupported_delete = await client.delete(
             f"/assistants/{default_assistant['assistant_id']}?delete_threads=true",
         )
-        assert unsupported_delete.status_code == 400
+        assert unsupported_delete.status_code == 422
 
         deleted = await client.delete(f"/assistants/{react_assistant['assistant_id']}")
         assert deleted.status_code == 204

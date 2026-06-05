@@ -13,7 +13,7 @@ async def test_real_api_flow(e2e_base_url: str) -> None:
         assert assistant_create.status_code == 200
         assistant_id = assistant_create.json()["assistant_id"]
 
-        assistants_list = await client.get("/assistants")
+        assistants_list = await client.post("/assistants/search", json={})
         assert assistants_list.status_code == 200
         assert any(item["assistant_id"] == assistant_id for item in assistants_list.json())
 
