@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 from sqlalchemy import func, select
@@ -75,12 +76,23 @@ def _to_read_model(row: Assistant) -> AssistantRead:
     )
 
 
+async def _get_assistant_by_id(assistant_id: str) -> AssistantRead:
+    resolved_id = resolve_assistant_id(assistant_id)
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == resolved_id))
+        if row is None:
+            raise HTTPException(status_code=404, detail="Assistant not found")
+        return _to_read_model(row)
+
+
 def _build_filter_query(payload: AssistantCountRequest | AssistantSearchRequest):
     query = select(Assistant)
     if payload.graph_id is not None:
         query = query.where(Assistant.graph_id == payload.graph_id)
     if payload.name is not None:
-        query = query.where(Assistant.name.ilike(f"%{payload.name}%"))
+        escaped = re.sub(r"([%_\\])", r"\\\1", payload.name)
+        query = query.where(Assistant.name.ilike(f"%{escaped}%"))
     if payload.metadata is not None:
         for key, value in payload.metadata.items():
             query = query.where(
@@ -89,7 +101,7 @@ def _build_filter_query(payload: AssistantCountRequest | AssistantSearchRequest)
     return query
 
 
-@router.post("", response_model=AssistantRead)
+@router.post("", response_model=AssistantRead, response_model_exclude_none=True)
 async def create_assistant(payload: AssistantCreate, user: User = Depends(get_current_user)) -> AssistantRead:
     _validate_graph_id(payload.graph_id)
 
@@ -120,8 +132,8 @@ async def create_assistant(payload: AssistantCreate, user: User = Depends(get_cu
         return _to_read_model(row)
 
 
-@router.post("/search", response_model=list[AssistantRead])
-async def search_assistants(payload: AssistantSearchRequest, user: User = Depends(get_current_user)):
+@router.post("/search", response_model=list[AssistantRead], response_model_exclude_none=True)
+async def search_assistants(payload: AssistantSearchRequest, user: User = Depends(get_current_user)) -> list[AssistantRead] | JSONResponse:
     query = _build_filter_query(payload)
 
     sort_column = getattr(Assistant, payload.sort_by, Assistant.created_at) if payload.sort_by else Assistant.created_at
@@ -149,18 +161,12 @@ async def count_assistants(payload: AssistantCountRequest, user: User = Depends(
     return count or 0
 
 
-@router.get("/{assistant_id}", response_model=AssistantRead)
+@router.get("/{assistant_id}", response_model=AssistantRead, response_model_exclude_none=True)
 async def get_assistant(assistant_id: str, user: User = Depends(get_current_user)) -> AssistantRead:
-    resolved_id = resolve_assistant_id(assistant_id)
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        row = await session.scalar(select(Assistant).where(Assistant.assistant_id == resolved_id))
-        if row is None:
-            raise HTTPException(status_code=404, detail="Assistant not found")
-        return _to_read_model(row)
+    return await _get_assistant_by_id(assistant_id)
 
 
-@router.patch("/{assistant_id}", response_model=AssistantRead)
+@router.patch("/{assistant_id}", response_model=AssistantRead, response_model_exclude_none=True)
 async def patch_assistant(assistant_id: str, payload: AssistantPatch, user: User = Depends(get_current_user)) -> AssistantRead:
     resolved_id = resolve_assistant_id(assistant_id)
     session_factory = db_manager.get_session_factory()
@@ -216,7 +222,7 @@ async def get_assistant_graph(
     ),
     user: User = Depends(get_current_user),
 ) -> dict[str, object]:
-    assistant = await get_assistant(assistant_id)
+    assistant = await _get_assistant_by_id(assistant_id)
     entry = get_langgraph_service().get_entry(assistant.graph_id)
     graph = entry.build_graph()
     if isinstance(xray, int) and not isinstance(xray, bool) and xray <= 0:
@@ -240,7 +246,7 @@ async def get_assistant_graph(
     },
 )
 async def get_assistant_schemas(assistant_id: str, user: User = Depends(get_current_user)) -> dict[str, object]:
-    assistant = await get_assistant(assistant_id)
+    assistant = await _get_assistant_by_id(assistant_id)
     entry = get_langgraph_service().get_entry(assistant.graph_id)
     graph = entry.build_graph()
     return {"graph_id": assistant.graph_id, **_extract_graph_schemas(graph)}
@@ -281,7 +287,7 @@ def _extract_graph_schemas(graph) -> dict[str, object | None]:
 
 
 async def _collect_subgraphs(assistant_id: str, *, namespace: str | None, recurse: bool) -> dict[str, dict[str, object | None]]:
-    assistant = await get_assistant(assistant_id)
+    assistant = await _get_assistant_by_id(assistant_id)
     entry = get_langgraph_service().get_entry(assistant.graph_id)
     graph = entry.build_graph()
     aget_subgraphs = getattr(graph, "aget_subgraphs", None)
@@ -337,7 +343,7 @@ async def get_assistant_subgraphs_by_namespace(
     },
 )
 async def get_assistant_versions(assistant_id: str, user: User = Depends(get_current_user)) -> AssistantVersionInfo:
-    assistant = await get_assistant(assistant_id)
+    assistant = await _get_assistant_by_id(assistant_id)
     return AssistantVersionInfo(
         assistant_id=assistant.assistant_id,
         current_version=assistant.version,
@@ -360,5 +366,5 @@ async def get_assistant_versions(assistant_id: str, user: User = Depends(get_cur
     },
 )
 async def set_latest_assistant_version(assistant_id: str, user: User = Depends(get_current_user)) -> None:
-    _ = await get_assistant(assistant_id)
+    _ = await _get_assistant_by_id(assistant_id)
     raise HTTPException(status_code=409, detail=ASSISTANT_VERSION_PROMOTION_UNSUPPORTED)

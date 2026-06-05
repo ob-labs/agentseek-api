@@ -60,7 +60,7 @@ def test_assistant_routes_cover_list_patch_and_missing_paths(client: TestClient)
     assert patched_body["name"] == "after"
     assert patched_body["graph_id"] == "react_agent"
     assert patched_body["metadata"] == {"team": "api"}
-    assert patched_body["config"] == {"tags": [], "recursion_limit": None, "configurable": {"temperature": 0}}
+    assert patched_body["config"] == {"tags": [], "configurable": {"temperature": 0}}
     assert patched_body["context"] == {"tenant": "compat"}
     assert patched_body["description"] == "updated"
 

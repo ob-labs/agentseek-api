@@ -32,7 +32,7 @@ def test_create_assistant_persists_langsmith_fields(client: TestClient) -> None:
     )
     assert created.status_code == 200
     assert created.json()["metadata"] == {"suite": "compat"}
-    assert created.json()["config"] == {"tags": [], "recursion_limit": None, "configurable": {"temperature": 0}}
+    assert created.json()["config"] == {"tags": [], "configurable": {"temperature": 0}}
     assert created.json()["context"] == {"tenant": "mysql-family"}
     assert created.json()["description"] == "assistant description"
 

@@ -37,7 +37,7 @@ from agentseek_api.services.thread_checkpoint_store import (
     prune_checkpoints,
 )
 from agentseek_api.services.thread_protocol import thread_protocol_broker
-from agentseek_api.services.thread_service import to_read_model
+from agentseek_api.services.thread_service import create_thread_for_user, to_read_model
 from agentseek_api.settings import settings
 
 router = APIRouter(prefix="/threads", tags=["Threads"])
@@ -299,29 +299,7 @@ async def create_thread(payload: ThreadCreate, user: User = Depends(get_current_
     if payload.supersteps is not None:
         raise HTTPException(status_code=422, detail="'supersteps' is not supported yet")
 
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        if payload.thread_id is not None:
-            existing = await session.scalar(
-                select(Thread).where(Thread.thread_id == payload.thread_id, Thread.user_id == user.identity)
-            )
-            if existing is not None:
-                if payload.if_exists == "raise":
-                    raise HTTPException(status_code=409, detail="Thread already exists")
-                return to_read_model(existing)
-
-        kwargs: dict[str, object] = {
-            "user_id": user.identity,
-            "metadata_json": payload.metadata,
-        }
-        if payload.thread_id is not None:
-            kwargs["thread_id"] = payload.thread_id
-
-        row = Thread(**kwargs)
-        session.add(row)
-        await session.commit()
-        await session.refresh(row)
-        return to_read_model(row)
+    return await create_thread_for_user(payload=payload, user=user)
 
 
 @router.post("/search", response_model=list[ThreadRead], response_model_exclude_none=True)

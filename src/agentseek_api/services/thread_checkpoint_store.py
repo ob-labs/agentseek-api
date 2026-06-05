@@ -13,7 +13,7 @@ from agentseek_api.core.database import db_manager
 
 def _make_serializable(obj: Any) -> Any:
     """Recursively convert LangGraph internal types to JSON-safe representations."""
-    if obj is None or isinstance(obj, (str, int, float, bool, int, float)):
+    if obj is None or isinstance(obj, (str, int, float, bool)):
         return obj
     if isinstance(obj, Send):
         return {"__type__": "Send", "node": obj.node, "arg": _make_serializable(obj.arg)}
