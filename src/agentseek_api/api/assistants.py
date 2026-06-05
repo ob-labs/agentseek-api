@@ -188,6 +188,7 @@ async def patch_assistant(assistant_id: str, payload: AssistantPatch, user: User
 
 @router.delete(
     "/{assistant_id}",
+    status_code=204,
     responses={
         404: _detail_response(description="Assistant not found", detail="Assistant not found"),
         422: _detail_response(description="Unsupported option", detail=DELETE_THREADS_UNSUPPORTED),
@@ -204,7 +205,6 @@ async def delete_assistant(assistant_id: str, delete_threads: bool = False, user
             raise HTTPException(status_code=404, detail="Assistant not found")
         await session.delete(row)
         await session.commit()
-    return {}
 
 
 @router.get("/{assistant_id}/graph")
