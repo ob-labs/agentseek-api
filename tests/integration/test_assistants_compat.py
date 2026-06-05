@@ -55,7 +55,7 @@ def test_patch_and_delete_assistant(client: TestClient) -> None:
     assert patched.json()["metadata"] == {"existing": True, "team": "api"}
 
     deleted = client.delete(f"/assistants/{assistant_id}")
-    assert deleted.status_code == 200
+    assert deleted.status_code == 204
 
     fetched = client.get(f"/assistants/{assistant_id}")
     assert fetched.status_code == 404

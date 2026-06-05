@@ -161,7 +161,7 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
     assert patched.description == "patched"
 
     deleted = await assistants_module.delete_assistant("assistant-delete")
-    assert deleted == {}
+    assert deleted is None
     assert delete_session.deleted == [delete_target]
 
 

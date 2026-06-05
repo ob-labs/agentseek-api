@@ -35,7 +35,7 @@ def test_agents_alias_crud_matches_assistants_resource(client: TestClient) -> No
     assert count.json() == 1
 
     deleted = client.delete(f"/agents/{assistant_id}")
-    assert deleted.status_code == 200
+    assert deleted.status_code == 204
     assert client.get(f"/assistants/{assistant_id}").status_code == 404
 
 
