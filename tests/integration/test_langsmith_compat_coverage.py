@@ -90,7 +90,7 @@ def test_thread_routes_cover_search_prune_delete_and_missing_paths(client: TestC
     )
     assert created_run.status_code == 200
 
-    listed = client.get("/threads", headers={"x-user-id": "u1"})
+    listed = client.post("/threads/search", json={}, headers={"x-user-id": "u1"})
     assert listed.status_code == 200
     assert {item["thread_id"] for item in listed.json()} == {keep_thread["thread_id"], delete_thread["thread_id"]}
 

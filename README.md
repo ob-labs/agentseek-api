@@ -103,6 +103,37 @@ curl http://127.0.0.1:2024/info
 curl http://127.0.0.1:2024/openapi.json
 ```
 
+### 5. Test by using LangGraph SDK
+
+```python
+from langgraph_sdk import get_client
+
+client = get_client(url="http://localhost:2024/")
+
+async def main():
+    # List all assistants
+    assistants = await client.assistants.search(graph_id="agent")
+
+    # We auto-create an assistant for each graph you register in config.
+    agent = assistants[0]
+
+    # Start a new thread
+    thread = await client.threads.create()
+
+    # Start a streaming run
+    input = {"messages": [{"role": "human", "content": "hello?"}]}
+    async for chunk in client.runs.stream(
+        thread["thread_id"], agent["assistant_id"], input=input
+    ):
+        print(chunk)
+
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(main())
+```
+
 ## 🧰 CLI
 
 The package installs `agentseek-api` as the standalone executable. It does not

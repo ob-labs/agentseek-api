@@ -73,6 +73,26 @@ def _resolve_seekdb_url() -> str:
     ).render_as_string(hide_password=False)
 
 
+def _resolve_connection_args() -> dict[str, str]:
+    url = make_url(_resolve_seekdb_url())
+    is_mysql = (url.get_backend_name() or "").startswith("mysql")
+    if is_mysql and url.host:
+        return {
+            "host": url.host,
+            "port": str(url.port or settings.OCEANBASE_PORT),
+            "user": url.username or settings.OCEANBASE_USER,
+            "password": url.password or settings.OCEANBASE_PASSWORD,
+            "db_name": url.database or settings.OCEANBASE_DB_NAME,
+        }
+    return {
+        "host": settings.OCEANBASE_HOST,
+        "port": str(settings.OCEANBASE_PORT),
+        "user": settings.OCEANBASE_USER,
+        "password": settings.OCEANBASE_PASSWORD,
+        "db_name": settings.OCEANBASE_DB_NAME,
+    }
+
+
 def _resolve_base_metadata_url() -> str:
     return settings.METADATA_DB_URL or _resolve_seekdb_url()
 
@@ -115,14 +135,9 @@ class DatabaseManager:
         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
         async with self.engine.begin() as conn:
             await conn.run_sync(Base.metadata.create_all)
+        conn_args = _resolve_connection_args()
         self._checkpointer = OceanBaseCheckpointSaver(
-            connection_args={
-                "host": settings.OCEANBASE_HOST,
-                "port": settings.OCEANBASE_PORT,
-                "user": settings.OCEANBASE_USER,
-                "password": settings.OCEANBASE_PASSWORD,
-                "db_name": settings.OCEANBASE_DB_NAME,
-            }
+            connection_args=conn_args
         )
         if metadata_backend == "sqlite":
             self._langgraph_checkpointer = InMemorySaver()
@@ -133,22 +148,10 @@ class DatabaseManager:
             )
         else:
             self._langgraph_checkpointer = LangGraphOceanBaseCheckpointSaver(
-                connection_args={
-                    "host": settings.OCEANBASE_HOST,
-                    "port": settings.OCEANBASE_PORT,
-                    "user": settings.OCEANBASE_USER,
-                    "password": settings.OCEANBASE_PASSWORD,
-                    "db_name": settings.OCEANBASE_DB_NAME,
-                }
+                connection_args=conn_args
             )
             self._store = OceanBaseStore(
-                connection_args={
-                    "host": settings.OCEANBASE_HOST,
-                    "port": settings.OCEANBASE_PORT,
-                    "user": settings.OCEANBASE_USER,
-                    "password": settings.OCEANBASE_PASSWORD,
-                    "db_name": settings.OCEANBASE_DB_NAME,
-                },
+                connection_args=conn_args,
                 index=runtime_index,
                 ttl_config=runtime_ttl,
             )

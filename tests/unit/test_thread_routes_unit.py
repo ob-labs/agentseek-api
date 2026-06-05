@@ -5,8 +5,9 @@ from fastapi import HTTPException
 
 from agentseek_api.api import threads as threads_module
 from agentseek_api.core.orm import Run, Thread
-from agentseek_api.models.api import ThreadPatch, ThreadPruneRequest, ThreadSearchRequest
+from agentseek_api.models.api import ThreadCountRequest, ThreadPatch, ThreadPruneRequest, ThreadSearchRequest
 from agentseek_api.models.auth import User
+from agentseek_api.services.thread_service import _public_thread_config
 
 
 class FakeScalarResult:
@@ -159,8 +160,8 @@ async def test_best_effort_checkpointer_call_covers_missing_and_not_implemented(
 
 
 def test_thread_helper_functions_cover_public_config_and_checkpoint_lookup() -> None:
-    assert threads_module._public_thread_config({"visible": True}) == {"visible": True}
-    assert threads_module._public_thread_config(None) == {}
+    assert _public_thread_config({"visible": True}) == {"visible": True}
+    assert _public_thread_config(None) == {}
 
     assert threads_module._checkpoint_lookup_payload({"checkpoint_id": "cp-1"}) == "cp-1"
     assert threads_module._checkpoint_lookup_payload({"checkpoint": {"checkpoint_id": "cp-2"}}) == "cp-2"
@@ -222,7 +223,7 @@ async def test_get_thread_state_at_checkpoint_returns_checkpoint_payload(monkeyp
     payload = await threads_module.get_thread_state_at_checkpoint(
         thread.thread_id,
         "cp-1",
-        User(identity=thread.user_id, is_authenticated=True),
+        user=User(identity=thread.user_id, is_authenticated=True),
     )
     assert payload["values"] == {"manual": True}
 
@@ -246,7 +247,7 @@ async def test_get_thread_state_at_checkpoint_returns_empty_payload_for_syntheti
     payload = await threads_module.get_thread_state_at_checkpoint(
         thread.thread_id,
         thread.thread_id,
-        User(identity=thread.user_id, is_authenticated=True),
+        user=User(identity=thread.user_id, is_authenticated=True),
     )
 
     assert payload["values"] == {}
@@ -279,7 +280,7 @@ async def test_get_thread_state_prefers_latest_checkpoint_when_store_order_varie
 
     payload = await threads_module.get_thread_state(
         thread.thread_id,
-        User(identity=thread.user_id, is_authenticated=True),
+        user=User(identity=thread.user_id, is_authenticated=True),
     )
 
     assert payload["checkpoint"]["checkpoint_id"] == "cp-new"
@@ -401,22 +402,21 @@ async def test_get_thread_state_at_checkpoint_raises_when_missing(monkeypatch: p
         await threads_module.get_thread_state_at_checkpoint(
             thread.thread_id,
             "missing",
-            User(identity=thread.user_id, is_authenticated=True),
+            user=User(identity=thread.user_id, is_authenticated=True),
         )
     assert error.value.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_count_threads_returns_exact_count_beyond_page_limit(monkeypatch: pytest.MonkeyPatch) -> None:
-    threads = [_thread(thread_id=f"thread-{index}") for index in range(10_001)]
-    session_factory = FakeSessionFactory([FakeSession(scalars_rows=[threads])])
+    session_factory = FakeSessionFactory([FakeSession(scalar_rows=[10_001])])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: session_factory,
     )
 
     count = await threads_module.count_threads(
-        ThreadSearchRequest(),
+        ThreadCountRequest(),
         User(identity="user-1", is_authenticated=True),
     )
 
@@ -447,6 +447,6 @@ async def test_prune_threads_keep_latest_uses_checkpoint_pruner(monkeypatch: pyt
         User(identity=thread.user_id, is_authenticated=True),
     )
 
-    assert result == {"pruned_count": 1}
+    assert result.pruned_count == 1
     assert len(session.executed) == 1
     assert prune_calls == [([thread.thread_id], "keep_latest")]

@@ -1,8 +1,8 @@
 from fastapi.testclient import TestClient
 
 
-def test_list_threads_empty_for_user(client: TestClient) -> None:
-    response = client.get("/threads", headers={"x-user-id": "u1"})
+def test_search_threads_empty_for_user(client: TestClient) -> None:
+    response = client.post("/threads/search", json={}, headers={"x-user-id": "u1"})
     assert response.status_code == 200
     assert response.json() == []
 
@@ -26,14 +26,14 @@ def test_get_thread_not_found_for_other_user(client: TestClient) -> None:
     assert forbidden.status_code == 404
 
 
-def test_list_threads_is_user_scoped(client: TestClient) -> None:
+def test_search_threads_is_user_scoped(client: TestClient) -> None:
     t1 = client.post("/threads", json={"metadata": {"id": 1}}, headers={"x-user-id": "u1"})
     t2 = client.post("/threads", json={"metadata": {"id": 2}}, headers={"x-user-id": "u2"})
     assert t1.status_code == 200
     assert t2.status_code == 200
 
-    u1_list = client.get("/threads", headers={"x-user-id": "u1"})
-    u2_list = client.get("/threads", headers={"x-user-id": "u2"})
+    u1_list = client.post("/threads/search", json={}, headers={"x-user-id": "u1"})
+    u2_list = client.post("/threads/search", json={}, headers={"x-user-id": "u2"})
     assert u1_list.status_code == 200
     assert u2_list.status_code == 200
     assert len(u1_list.json()) == 1

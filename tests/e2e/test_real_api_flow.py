@@ -25,7 +25,7 @@ async def test_real_api_flow(e2e_base_url: str) -> None:
         assert thread_create.status_code == 200
         thread_id = thread_create.json()["thread_id"]
 
-        thread_list = await client.get("/threads")
+        thread_list = await client.post("/threads/search", json={})
         assert thread_list.status_code == 200
         assert any(item["thread_id"] == thread_id for item in thread_list.json())
 

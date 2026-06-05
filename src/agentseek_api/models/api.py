@@ -83,21 +83,62 @@ class ErrorDetailResponse(BaseModel):
     detail: str
 
 
-class ThreadCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class Send(BaseModel):
+    node: str
+    input: Any
 
+
+class Command(BaseModel):
+    update: dict[str, Any] | list | None = None
+    resume: Any = None
+    goto: Send | list[Send] | str | list[str] | None = None
+
+
+class ThreadSuperstepUpdate(BaseModel):
+    values: list[dict[str, Any]] | dict[str, Any] | None = None
+    command: Command | None = None
+    as_node: str
+
+
+class ThreadTTL(BaseModel):
+    strategy: Literal["delete", "keep_latest"] = "delete"
+    ttl: float
+
+
+ThreadStatus = Literal["idle", "busy", "interrupted", "error"]
+
+
+class ThreadSuperstep(BaseModel):
+    updates: list[ThreadSuperstepUpdate]
+
+
+class ThreadCreate(BaseModel):
+    thread_id: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
-    config: dict[str, Any] = Field(default_factory=dict)
+    if_exists: Literal["raise", "do_nothing"] = "raise"
+    ttl: ThreadTTL | None = None
+    supersteps: list[ThreadSuperstep] | None = None
+
+
+ThreadSearchSortBy = Literal["thread_id", "status", "created_at", "updated_at", "state_updated_at"]
+ThreadSearchSortOrder = Literal["asc", "desc"]
+ThreadSearchSelectField = Literal[
+    "thread_id", "created_at", "updated_at", "state_updated_at",
+    "metadata", "config", "status", "values", "interrupts",
+]
 
 
 class ThreadSearchRequest(BaseModel):
     ids: list[str] | None = None
     metadata: dict[str, Any] | None = None
-    status: str | None = None
-    limit: int = 10
-    offset: int = 0
-    sort_by: str = "created_at"
-    sort_order: str = "desc"
+    values: dict[str, Any] | None = None
+    status: ThreadStatus | None = None
+    limit: int = Field(default=10, ge=1, le=1000)
+    offset: int = Field(default=0, ge=0)
+    sort_by: ThreadSearchSortBy | None = None
+    sort_order: ThreadSearchSortOrder | None = None
+    select: list[ThreadSearchSelectField] | None = None
+    extract: dict[str, str] | None = None
 
 
 class ThreadPatch(BaseModel):
@@ -106,20 +147,71 @@ class ThreadPatch(BaseModel):
     metadata: dict[str, Any] | None = None
 
 
+class ThreadCountRequest(BaseModel):
+    metadata: dict[str, Any] | None = None
+    values: dict[str, Any] | None = None
+    status: ThreadStatus | None = None
+
+
 class ThreadPruneRequest(BaseModel):
     thread_ids: list[str]
-    strategy: str = "keep_latest"
+    strategy: Literal["delete", "keep_latest"] = "delete"
+
+
+class ThreadPruneResponse(BaseModel):
+    pruned_count: int
+
+
+class ThreadTTLInfo(BaseModel):
+    strategy: Literal["delete", "keep_latest"]
+    ttl_minutes: float
+    expires_at: datetime | None = None
 
 
 class ThreadRead(BaseModel):
     thread_id: str
-    user_id: str
-    metadata: dict[str, Any]
     created_at: datetime
-    updated_at: datetime | None = None
+    updated_at: datetime
+    metadata: dict[str, Any]
+    status: ThreadStatus = "idle"
     state_updated_at: datetime | None = None
     config: dict[str, Any] = Field(default_factory=dict)
-    status: str = "idle"
+    values: dict[str, Any] = Field(default_factory=dict)
+    interrupts: dict[str, Any] | None = None
+    ttl: ThreadTTLInfo | None = None
+    extracted: dict[str, Any] | None = None
+
+
+class CheckpointConfig(BaseModel):
+    thread_id: str | None = None
+    checkpoint_ns: str | None = None
+    checkpoint_id: str | None = None
+    checkpoint_map: dict[str, Any] | None = None
+
+
+class Interrupt(BaseModel):
+    value: dict[str, Any]
+    id: str | None = None
+
+
+class ThreadStateTask(BaseModel):
+    id: str
+    name: str
+    error: str | None = None
+    interrupts: list[Interrupt] | None = None
+    checkpoint: CheckpointConfig | None = None
+    state: Any | None = None
+
+
+class ThreadState(BaseModel):
+    values: list[dict[str, Any]] | dict[str, Any]
+    next: list[str]
+    tasks: list[ThreadStateTask] = Field(default_factory=list)
+    checkpoint: CheckpointConfig
+    metadata: dict[str, Any]
+    created_at: str | datetime
+    parent_checkpoint: dict[str, Any] | None = None
+    interrupts: list[Interrupt] | None = None
 
 
 RunStreamMode = Literal[

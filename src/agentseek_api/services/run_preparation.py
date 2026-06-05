@@ -189,6 +189,8 @@ async def _prepare_run(
             raise ValueError("Assistant not found")
         assistant_id = resolved_assistant_id
         graph_id = assistant.graph_id
+        if thread.metadata_json.get("graph_id") != graph_id:
+            thread.metadata_json = {**thread.metadata_json, "graph_id": graph_id}
         claimed_at = datetime.now(UTC)
         if not await _claim_thread_for_run(
             session=session,

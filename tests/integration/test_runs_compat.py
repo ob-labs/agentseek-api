@@ -252,7 +252,7 @@ def test_cancel_routes(client: TestClient, monkeypatch) -> None:
 def test_create_run_stream_rejects_unsupported_stream_modes(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs/stream",
@@ -269,13 +269,13 @@ def test_create_run_stream_rejects_unsupported_stream_modes(client: TestClient) 
     )
     assert stateless_response.status_code == 422
     assert "Unsupported stream_mode value(s): events" in stateless_response.json()["detail"]
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_wait_rejects_unsupported_stream_modes_before_side_effects(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs/wait",
@@ -292,7 +292,7 @@ def test_create_run_wait_rejects_unsupported_stream_modes_before_side_effects(cl
     )
     assert stateless_response.status_code == 422
     assert "Unsupported stream_mode value(s): events" in stateless_response.json()["detail"]
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_stream_messages_mode_emits_message_events(client: TestClient) -> None:
@@ -395,7 +395,7 @@ def test_create_run_wait_and_stream_accept_official_contract_fields(client: Test
 def test_create_run_rejects_unsupported_official_control_fields_before_side_effects(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs",
@@ -428,13 +428,13 @@ def test_create_run_rejects_unsupported_official_control_fields_before_side_effe
     assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
     assert "durability" in stateless_response.json()["detail"]
     assert "on_completion" in stateless_response.json()["detail"]
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_wait_rejects_unsupported_official_control_fields_before_side_effects(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs/wait",
@@ -461,13 +461,13 @@ def test_create_run_wait_rejects_unsupported_official_control_fields_before_side
     assert stateless_response.status_code == 422
     assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
     assert "stream_resumable" in stateless_response.json()["detail"]
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_stream_rejects_unsupported_official_control_fields_before_side_effects(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs/stream",
@@ -494,13 +494,13 @@ def test_create_run_stream_rejects_unsupported_official_control_fields_before_si
     assert stateless_response.status_code == 422
     assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
     assert "on_completion" in stateless_response.json()["detail"]
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs",
@@ -524,13 +524,13 @@ def test_create_run_rejects_unknown_control_fields_before_side_effects(client: T
     )
 
     assert stateless_response.status_code == 422
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_wait_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs/wait",
@@ -554,13 +554,13 @@ def test_create_run_wait_rejects_unknown_control_fields_before_side_effects(clie
     )
 
     assert stateless_response.status_code == 422
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_stream_rejects_unknown_control_fields_before_side_effects(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
-    before_threads = client.get("/threads").json()
+    before_threads = client.post("/threads/search", json={}).json()
 
     response = client.post(
         f"/threads/{thread_id}/runs/stream",
@@ -584,7 +584,7 @@ def test_create_run_stream_rejects_unknown_control_fields_before_side_effects(cl
     )
 
     assert stateless_response.status_code == 422
-    assert client.get("/threads").json() == before_threads
+    assert client.post("/threads/search", json={}).json() == before_threads
 
 
 def test_create_run_stream_filters_protocol_events_to_created_run(client: TestClient, monkeypatch) -> None:

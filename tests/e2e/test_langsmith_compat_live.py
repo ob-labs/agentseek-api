@@ -80,11 +80,8 @@ async def _create_thread(
     *,
     user_id: str,
     metadata: dict[str, object],
-    config: dict[str, object] | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {"metadata": metadata}
-    if config is not None:
-        payload["config"] = config
     response = await client.post("/threads", json=payload, headers=_user_headers(user_id))
     assert response.status_code == 200
     return response.json()
@@ -449,7 +446,6 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
             client,
             user_id=user_id,
             metadata={"topic": "alpha", "tag": "keep", "suite": suite_id},
-            config={"retention": "short"},
         )
         beta_thread = await _create_thread(client, user_id=user_id, metadata={"topic": "beta"})
         _ = await _create_thread(client, user_id="thread-live-other", metadata={"topic": "alpha"})
@@ -468,7 +464,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
             user_id=user_id,
         )
 
-        listed = await client.get("/threads", headers=_user_headers(user_id))
+        listed = await client.post("/threads/search", json={}, headers=_user_headers(user_id))
         assert listed.status_code == 200
         listed_ids = {item["thread_id"] for item in listed.json()}
         assert str(alpha_thread["thread_id"]) in listed_ids
@@ -493,7 +489,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         fetched = await client.get(f"/threads/{alpha_thread['thread_id']}", headers=_user_headers(user_id))
         assert fetched.status_code == 200
         assert fetched.json()["thread_id"] == alpha_thread["thread_id"]
-        assert fetched.json()["config"] == {"retention": "short"}
+        assert fetched.json()["config"] == {}
 
         patched = await client.patch(
             f"/threads/{alpha_thread['thread_id']}",

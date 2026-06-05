@@ -19,7 +19,7 @@ def test_thread_and_run_not_visible_cross_user_matrix(client: TestClient) -> Non
     run_id = owner_run.json()["run_id"]
 
     # Other user cannot list owner's thread
-    other_threads = client.get("/threads", headers={"x-user-id": "other"})
+    other_threads = client.post("/threads/search", json={}, headers={"x-user-id": "other"})
     assert other_threads.status_code == 200
     assert all(item["thread_id"] != thread_id for item in other_threads.json())
 
