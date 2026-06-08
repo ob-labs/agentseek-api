@@ -529,6 +529,8 @@ async def create_run(thread_id: str, payload: RunCreateStateful, user: User = De
     durability = getattr(payload, "durability", "async")
     if durability != "async":
         run_kwargs["durability"] = durability
+    if getattr(payload, "stream_subgraphs", False):
+        run_kwargs["stream_subgraphs"] = True
     try:
         row = await prepare_and_submit_run(
             thread_id=thread_id,
@@ -788,10 +790,7 @@ async def stream_run(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     stream_mode: Annotated[list[str] | None, Query()] = None,
 ) -> StreamingResponse:
-    try:
-        parsed_last_event_id = parse_last_event_id(last_event_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    parsed_last_event_id = parse_last_event_id(last_event_id)
     after_seq = parsed_last_event_id or 0
     replay_existing = parsed_last_event_id is not None
     session_factory = db_manager.get_session_factory()

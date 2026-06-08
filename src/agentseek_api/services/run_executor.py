@@ -9,6 +9,7 @@ from langgraph.types import Command
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.runtime_store import UserScopedStore
+from agentseek_api.models.auth import User
 from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import next_run_stream_seq, persist_run_stream_event
@@ -782,6 +783,9 @@ async def execute_run(
         {
             "thread_id": thread_id,
             "checkpoint_ns": run_id,
+            "graph_id": graph_id or "default",
+            "assistant_id": graph_id or "default",
+            "langgraph_auth_user": User(identity=user_id),
             CONFIG_KEY_CHECKPOINTER: db_manager.get_langgraph_checkpointer(),
             "store": runtime_store,
         }
@@ -829,6 +833,8 @@ async def execute_run(
     _durability = run_kwargs.get("durability")
     if _durability:
         _astream_kwargs["durability"] = _durability
+    if run_kwargs.get("stream_subgraphs"):
+        _astream_kwargs["subgraphs"] = True
     async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):

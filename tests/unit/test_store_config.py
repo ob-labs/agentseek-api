@@ -14,7 +14,8 @@ from agentseek_api.core.store_config import (
 
 def test_load_store_config_reads_ttl_and_python_embedding_function(tmp_path, monkeypatch) -> None:
     monkeypatch.syspath_prepend(str(tmp_path))
-    helper_file = tmp_path / "embedding_helpers.py"
+    helper_mod_name = f"embedding_helpers_{id(tmp_path):x}"
+    helper_file = tmp_path / f"{helper_mod_name}.py"
     helper_file.write_text(
         """
 def vector_for_text(text: str) -> list[float]:
@@ -24,8 +25,8 @@ def vector_for_text(text: str) -> list[float]:
     )
     embeddings_file = tmp_path / "embeddings.py"
     embeddings_file.write_text(
-        """
-from embedding_helpers import vector_for_text
+        f"""
+from {helper_mod_name} import vector_for_text
 
 
 def embed_texts(texts: list[str]) -> list[list[float]]:

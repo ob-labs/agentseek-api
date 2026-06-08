@@ -617,10 +617,7 @@ async def stream_thread(
     user: User = Depends(get_current_user),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
-    try:
-        after_seq = parse_last_event_id(last_event_id) or 0
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    after_seq = parse_last_event_id(last_event_id) or 0
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
@@ -814,10 +811,7 @@ async def stream_thread_protocol_events(
     user: User = Depends(get_current_user),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
-    try:
-        header_since = parse_last_event_id(last_event_id) or 0
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    header_since = parse_last_event_id(last_event_id) or 0
     after_seq = max(header_since, payload.since or 0)
     await _get_thread_row(thread_id=thread_id, user=user)
 
