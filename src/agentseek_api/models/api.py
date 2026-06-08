@@ -234,6 +234,7 @@ RunIfNotExists = Literal["create", "reject"]
 
 
 class RunCreateStateful(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
     assistant_id: str
     checkpoint: dict[str, Any] | None = None
@@ -253,6 +254,7 @@ class RunCreateStateful(BaseModel):
     if_not_exists: RunIfNotExists = "reject"
     after_seconds: float | None = None
     durability: RunDurability = "async"
+    checkpoint_during: bool = False
 
 
 class RunCreateStreamingStateful(RunCreateStateful):
@@ -276,6 +278,7 @@ class RunCreateStateless(BaseModel):
     on_completion: RunOnCompletion = "keep"
     after_seconds: float | None = None
     durability: RunDurability = "async"
+    checkpoint_during: bool = False
 
 
 class RunCreateStreamingStateless(RunCreateStateless):
