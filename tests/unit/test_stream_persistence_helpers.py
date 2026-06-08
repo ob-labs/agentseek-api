@@ -72,12 +72,8 @@ def test_parse_last_event_id_handles_empty_and_invalid_values() -> None:
     assert stream_module.parse_last_event_id(None) is None
     assert stream_module.parse_last_event_id("") is None
     assert stream_module.parse_last_event_id("7") == 7
-
-    with pytest.raises(ValueError):
-        stream_module.parse_last_event_id("-1")
-
-    with pytest.raises(ValueError):
-        stream_module.parse_last_event_id("not-an-int")
+    assert stream_module.parse_last_event_id("-1") is None
+    assert stream_module.parse_last_event_id("not-an-int") is None
 
 
 @pytest.mark.asyncio

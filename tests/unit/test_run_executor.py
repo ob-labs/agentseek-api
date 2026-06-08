@@ -1,3 +1,5 @@
+from typing import Any
+
 import pytest
 from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
@@ -16,7 +18,7 @@ class FakeGraph:
     def __init__(self) -> None:
         self.configs: list[dict] = []
 
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_chain_end",
@@ -150,8 +152,103 @@ async def test_execute_run_merges_user_config_and_context_into_graph_config(monk
     assert config[CONF]["thread_id"] == "t1"
 
 
+class FakeKwargsCapturingGraph(FakeGraph):
+    def __init__(self) -> None:
+        super().__init__()
+        self.stream_kwargs: list[dict] = []
+        self.inputs: list[Any] = []
+
+    async def astream_events(self, prepared_input, config: dict, version: str = "v2", **kwargs):
+        self.configs.append(config)
+        self.stream_kwargs.append(kwargs)
+        self.inputs.append(prepared_input)
+        yield {
+            "event": "on_chain_end",
+            "name": "fake-graph",
+            "run_id": "langgraph-run",
+            "parent_ids": [],
+            "metadata": {},
+            "tags": [],
+            "data": {"output": {"output": {"ok": True}}},
+        }
+
+
+class FakeKwargsCapturingEntry:
+    graph = FakeKwargsCapturingGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None, store=None):
+        return FakeKwargsCapturingEntry.graph
+
+    @staticmethod
+    def prepare_input(payload: dict) -> dict:
+        return {"input": payload}
+
+    @staticmethod
+    def extract_output(result: dict, _payload: dict) -> dict:
+        return result.get("output", {})
+
+
+class FakeKwargsCapturingLangGraphService:
+    def get_entry(self, _graph_id: str | None):
+        return FakeKwargsCapturingEntry()
+
+    def get_graph(self, _graph_id: str | None = None):
+        return FakeKwargsCapturingEntry.graph
+
+
+@pytest.mark.asyncio
+async def test_execute_run_forwards_command_as_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeKwargsCapturingLangGraphService())
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    from langgraph.types import Command
+
+    result = await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"msg": "hi"},
+        user_id="user-1",
+        kwargs={"command": {"resume": "yes_continue", "goto": ["nodeB"]}},
+    )
+
+    assert isinstance(result, RunExecutionResult)
+    invocation = FakeKwargsCapturingEntry.graph.inputs[0]
+    assert isinstance(invocation, Command)
+    assert invocation.resume == "yes_continue"
+    assert invocation.goto == ["nodeB"]
+
+
+@pytest.mark.asyncio
+async def test_execute_run_forwards_interrupt_and_stream_mode_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeKwargsCapturingLangGraphService())
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"msg": "hi"},
+        user_id="user-1",
+        kwargs={
+            "interrupt_before": ["node_a"],
+            "interrupt_after": ["node_b"],
+            "stream_modes": ["values", "updates", "debug"],
+        },
+    )
+
+    kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
+    assert "node_a" in kwargs["interrupt_before"]
+    assert "node_b" in kwargs["interrupt_after"]
+    assert "values" in kwargs["stream_mode"]
+    assert "debug" in kwargs["stream_mode"]
+
+
 class FakeInterruptGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_chain_stream",
@@ -250,7 +347,7 @@ def test_translate_stream_events_maps_chat_model_stream_to_message_chunk() -> No
 
 
 class FakeProtocolStreamingGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_chat_model_stream",
@@ -291,7 +388,7 @@ class FakeProtocolStreamingGraph(FakeGraph):
 
 
 class FakeProtocolLlmStreamingGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_llm_stream",
@@ -349,7 +446,7 @@ class FakeProtocolLlmStreamingLangGraphService(FakeLangGraphService):
 
 
 class FakeProtocolNamespaceGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_tool_start",
@@ -424,7 +521,7 @@ class FakeProtocolNamespaceLangGraphService(FakeLangGraphService):
 
 
 class FakeProtocolStructuredMessageGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_chat_model_stream",
@@ -480,7 +577,7 @@ class FakeProtocolStructuredMessageLangGraphService(FakeLangGraphService):
 
 
 class FakeProtocolToolCallChunkGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_chat_model_stream",
@@ -539,7 +636,7 @@ class FakeProtocolToolCallChunkLangGraphService(FakeLangGraphService):
 
 
 class FakeProtocolMixedStructuredGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_chat_model_stream",
@@ -589,7 +686,7 @@ class FakeProtocolMixedStructuredLangGraphService(FakeLangGraphService):
 
 
 class FakeProtocolMultiMessageGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2"):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
         self.configs.append(config)
         yield {
             "event": "on_chain_stream",

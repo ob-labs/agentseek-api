@@ -17,12 +17,14 @@ from agentseek_api.services.thread_protocol import (
     apublish_content_block_finish,
     apublish_content_block_start,
     apublish_input_requested,
+    apublish_stream_mode_event,
     apublish_message_complete,
     apublish_message_start,
     apublish_message_transcript,
     apublish_messages_complete,
     apublish_messages_metadata,
     apublish_messages_partial,
+    apublish_messages_tuple,
     apublish_tool_event,
     apublish_updates_event,
     apublish_values_event,
@@ -70,7 +72,11 @@ def _normalize_stream_value(value: Any) -> Any:
             "value": _normalize_stream_value(getattr(value, "value")),
             "id": _normalize_stream_value(getattr(value, "id")),
         }
-    return repr(value)
+    try:
+        return value.model_dump()
+    except (AttributeError, Exception):
+        pass
+    return None
 
 
 def _extract_chunk_messages(chunk: Any) -> list[BaseMessage]:
@@ -781,10 +787,20 @@ async def execute_run(
     if "context" in run_kwargs:
         configurable["context"] = run_kwargs["context"]
     config[CONF] = configurable
-    if resume is UNSET:
-        invocation = entry.prepare_input(payload)
-    else:
+    command_payload = run_kwargs.get("command")
+    if resume is not UNSET:
         invocation = Command(resume=resume)
+    elif command_payload is not None:
+        cmd_kwargs: dict[str, Any] = {}
+        if "resume" in command_payload:
+            cmd_kwargs["resume"] = command_payload["resume"]
+        if "update" in command_payload:
+            cmd_kwargs["update"] = command_payload["update"]
+        if "goto" in command_payload:
+            cmd_kwargs["goto"] = command_payload["goto"]
+        invocation = Command(**cmd_kwargs) if cmd_kwargs else entry.prepare_input(payload)
+    else:
+        invocation = entry.prepare_input(payload)
 
     result: Any = None
     interrupt_chunk: Any = None
@@ -795,7 +811,23 @@ async def execute_run(
     # ``messages/metadata`` once per message_id.
     messages_partial_acc: dict[str, BaseMessage] = {}
     messages_metadata_seen: set[str] = set()
-    async for stream_event in graph.astream_events(invocation, config, version="v2"):
+    _emitted_values_via_stream = False
+    _requested_stream_modes = run_kwargs.get("stream_modes") or []
+    _want_messages_tuple = "messages-tuple" in _requested_stream_modes
+    _extra_stream_modes = [m for m in _requested_stream_modes if m not in ("messages", "messages-tuple", "updates")]
+    _astream_kwargs: dict[str, Any] = {}
+    if _extra_stream_modes:
+        _astream_kwargs["stream_mode"] = list(set(_extra_stream_modes) | {"updates"})
+    _interrupt_before = run_kwargs.get("interrupt_before")
+    if _interrupt_before:
+        _astream_kwargs["interrupt_before"] = _interrupt_before
+    _interrupt_after = run_kwargs.get("interrupt_after")
+    if _interrupt_after:
+        _astream_kwargs["interrupt_after"] = _interrupt_after
+    _durability = run_kwargs.get("durability")
+    if _durability:
+        _astream_kwargs["durability"] = _durability
+    async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):
             seq = await next_run_stream_seq(run_id)
@@ -834,19 +866,28 @@ async def execute_run(
                         namespace=protocol_namespace,
                         run_id=run_id,
                     )
-                if role == "tool":
-                    # Tool messages arrive complete (not streamed) — emit once as
-                    # ``messages/complete`` matching official LangGraph protocol.
+                if role in ("tool", "human", "system"):
                     if first_seen:
-                        tool_dump = _normalize_stream_value(message)
-                        if isinstance(tool_dump, dict):
+                        msg_dump = _normalize_stream_value(message)
+                        if isinstance(msg_dump, dict):
                             await apublish_messages_complete(
                                 thread_id,
-                                messages=[tool_dump],
+                                messages=[msg_dump],
                                 namespace=protocol_namespace,
                                 run_id=run_id,
                             )
                     continue
+                if _want_messages_tuple:
+                    chunk_dump = _normalize_stream_value(message)
+                    if isinstance(chunk_dump, dict):
+                        event_metadata = _normalize_stream_value(stream_event.get("metadata", {})) or {}
+                        await apublish_messages_tuple(
+                            thread_id,
+                            chunk=chunk_dump,
+                            metadata=event_metadata,
+                            namespace=protocol_namespace,
+                            run_id=run_id,
+                        )
                 existing = messages_partial_acc.get(message_id)
                 if existing is None:
                     accumulated = message
@@ -908,22 +949,66 @@ async def execute_run(
                 output_payload=_normalize_stream_value(data.get("output")) if isinstance(data, dict) and "output" in data else None,
                 namespace=protocol_namespace,
             )
+        if raw_event_name == "on_custom_event":
+            data = stream_event.get("data")
+            await apublish_stream_mode_event(
+                thread_id,
+                method="custom",
+                data=_normalize_stream_value(data),
+                namespace=protocol_namespace,
+                run_id=run_id,
+            )
         if stream_event.get("event") == "on_chain_stream":
             data = stream_event.get("data", {})
             chunk = data.get("chunk") if isinstance(data, dict) else None
-            if isinstance(chunk, dict) and "__interrupt__" in chunk:
-                interrupt_chunk = chunk["__interrupt__"]
-                interrupt_namespace = protocol_namespace
-            normalized_chunk = _normalize_stream_value(chunk)
-            if isinstance(normalized_chunk, dict):
-                normalized_chunk.pop("__interrupt__", None)
-                if normalized_chunk:
-                    await apublish_updates_event(
+            if isinstance(chunk, tuple) and len(chunk) == 2:
+                stream_mode_name, stream_mode_data = chunk
+                if stream_mode_name in ("custom", "debug", "tasks", "checkpoints", "events"):
+                    await apublish_stream_mode_event(
                         thread_id,
-                        values=normalized_chunk,
+                        method=stream_mode_name,
+                        data=_normalize_stream_value(stream_mode_data),
                         namespace=protocol_namespace,
                         run_id=run_id,
                     )
+                elif stream_mode_name == "values":
+                    normalized_values = _normalize_stream_value(stream_mode_data)
+                    if normalized_values:
+                        _emitted_values_via_stream = True
+                        await apublish_values_event(
+                            thread_id,
+                            values=normalized_values,
+                            namespace=protocol_namespace,
+                            run_id=run_id,
+                        )
+                elif stream_mode_name == "updates" and isinstance(stream_mode_data, dict):
+                    if "__interrupt__" in stream_mode_data:
+                        interrupt_chunk = stream_mode_data["__interrupt__"]
+                        interrupt_namespace = protocol_namespace
+                    normalized_chunk = _normalize_stream_value(stream_mode_data)
+                    if isinstance(normalized_chunk, dict):
+                        normalized_chunk.pop("__interrupt__", None)
+                        if normalized_chunk:
+                            await apublish_updates_event(
+                                thread_id,
+                                values=normalized_chunk,
+                                namespace=protocol_namespace,
+                                run_id=run_id,
+                            )
+            elif isinstance(chunk, dict):
+                if "__interrupt__" in chunk:
+                    interrupt_chunk = chunk["__interrupt__"]
+                    interrupt_namespace = protocol_namespace
+                normalized_chunk = _normalize_stream_value(chunk)
+                if isinstance(normalized_chunk, dict):
+                    normalized_chunk.pop("__interrupt__", None)
+                    if normalized_chunk:
+                        await apublish_updates_event(
+                            thread_id,
+                            values=normalized_chunk,
+                            namespace=protocol_namespace,
+                            run_id=run_id,
+                        )
         if stream_event.get("event") == "on_chain_end" and _is_root_stream_event(stream_event):
             data = stream_event.get("data", {})
             if isinstance(data, dict) and "output" in data:
@@ -937,12 +1022,13 @@ async def execute_run(
                         else:
                             await apublish_message_transcript(thread_id, run_id=run_id, messages=messages)
                     await protocol_messages.afinish_all()
-                    await apublish_values_event(
-                        thread_id,
-                        values=normalized_result,
-                        namespace=protocol_namespace,
-                        run_id=run_id,
-                    )
+                    if not _emitted_values_via_stream:
+                        await apublish_values_event(
+                            thread_id,
+                            values=normalized_result,
+                            namespace=protocol_namespace,
+                            run_id=run_id,
+                        )
 
     if interrupt_chunk is not None:
         if isinstance(result, dict):
