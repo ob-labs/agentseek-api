@@ -253,8 +253,8 @@ class RunCreateStateful(BaseModel):
     multitask_strategy: RunMultitaskStrategy = "enqueue"
     if_not_exists: RunIfNotExists = "reject"
     after_seconds: float | None = None
-    checkpoint_during: bool = False
     durability: RunDurability = "async"
+    checkpoint_during: bool = False
 
 
 class RunCreateStreamingStateful(RunCreateStateful):
@@ -277,8 +277,8 @@ class RunCreateStateless(BaseModel):
     stream_resumable: bool = False
     on_completion: RunOnCompletion = "keep"
     after_seconds: float | None = None
-    checkpoint_during: bool = False
     durability: RunDurability = "async"
+    checkpoint_during: bool = False
 
 
 class RunCreateStreamingStateless(RunCreateStateless):

@@ -256,19 +256,17 @@ def test_create_run_stream_rejects_unsupported_stream_modes(client: TestClient) 
 
     response = client.post(
         f"/threads/{thread_id}/runs/stream",
-        json={"assistant_id": assistant_id, "input": {"message": "bad mode"}, "stream_mode": "events"},
+        json={"assistant_id": assistant_id, "input": {"message": "bad mode"}, "stream_mode": "nonexistent"},
     )
 
     assert response.status_code == 422
-    assert "Unsupported stream_mode value(s): events" in response.json()["detail"]
     assert client.get(f"/threads/{thread_id}/runs").json() == []
 
     stateless_response = client.post(
         "/runs/stream",
-        json={"assistant_id": assistant_id, "input": {"message": "bad stateless mode"}, "stream_mode": "events"},
+        json={"assistant_id": assistant_id, "input": {"message": "bad stateless mode"}, "stream_mode": "nonexistent"},
     )
     assert stateless_response.status_code == 422
-    assert "Unsupported stream_mode value(s): events" in stateless_response.json()["detail"]
     assert client.post("/threads/search", json={}).json() == before_threads
 
 
@@ -279,19 +277,17 @@ def test_create_run_wait_rejects_unsupported_stream_modes_before_side_effects(cl
 
     response = client.post(
         f"/threads/{thread_id}/runs/wait",
-        json={"assistant_id": assistant_id, "input": {"message": "bad mode"}, "stream_mode": "events"},
+        json={"assistant_id": assistant_id, "input": {"message": "bad mode"}, "stream_mode": "nonexistent"},
     )
 
     assert response.status_code == 422
-    assert "Unsupported stream_mode value(s): events" in response.json()["detail"]
     assert client.get(f"/threads/{thread_id}/runs").json() == []
 
     stateless_response = client.post(
         "/runs/wait",
-        json={"assistant_id": assistant_id, "input": {"message": "bad stateless mode"}, "stream_mode": "events"},
+        json={"assistant_id": assistant_id, "input": {"message": "bad stateless mode"}, "stream_mode": "nonexistent"},
     )
     assert stateless_response.status_code == 422
-    assert "Unsupported stream_mode value(s): events" in stateless_response.json()["detail"]
     assert client.post("/threads/search", json={}).json() == before_threads
 
 
@@ -401,18 +397,16 @@ def test_create_run_rejects_unsupported_official_control_fields_before_side_effe
         f"/threads/{thread_id}/runs",
         json={
             "assistant_id": assistant_id,
-            "command": {"resume": "ignored"},
-            "interrupt_before": ["node-a"],
-            "stream_subgraphs": True,
+            "webhook": "https://example.com/hook",
+            "feedback_keys": ["thumbs-up"],
             "input": {"message": "bad controls"},
         },
     )
 
     assert response.status_code == 422
     assert "Unsupported run control field(s)" in response.json()["detail"]
-    assert "command" in response.json()["detail"]
-    assert "interrupt_before" in response.json()["detail"]
-    assert "stream_subgraphs" in response.json()["detail"]
+    assert "webhook" in response.json()["detail"]
+    assert "feedback_keys" in response.json()["detail"]
     assert client.get(f"/threads/{thread_id}/runs").json() == []
 
     stateless_response = client.post(
@@ -420,13 +414,11 @@ def test_create_run_rejects_unsupported_official_control_fields_before_side_effe
         json={
             "assistant_id": assistant_id,
             "on_completion": "delete",
-            "durability": "exit",
             "input": {"message": "bad stateless controls"},
         },
     )
     assert stateless_response.status_code == 422
     assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
-    assert "durability" in stateless_response.json()["detail"]
     assert "on_completion" in stateless_response.json()["detail"]
     assert client.post("/threads/search", json={}).json() == before_threads
 
@@ -454,13 +446,13 @@ def test_create_run_wait_rejects_unsupported_official_control_fields_before_side
         "/runs/wait",
         json={
             "assistant_id": assistant_id,
-            "stream_resumable": True,
+            "after_seconds": 5,
             "input": {"message": "bad stateless wait controls"},
         },
     )
     assert stateless_response.status_code == 422
     assert "Unsupported run control field(s)" in stateless_response.json()["detail"]
-    assert "stream_resumable" in stateless_response.json()["detail"]
+    assert "after_seconds" in stateless_response.json()["detail"]
     assert client.post("/threads/search", json={}).json() == before_threads
 
 

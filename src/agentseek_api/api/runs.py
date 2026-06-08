@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
@@ -38,8 +38,8 @@ router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Runs"])
 TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
 REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
-SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages","debug"}
-RUN_STREAM_MODE_ALIASES = {"messages-tuple": "messages"}
+SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages", "messages-tuple", "debug", "events", "tasks", "checkpoints", "custom"}
+RUN_STREAM_MODE_ALIASES: dict[str, str] = {}
 RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
 
 
@@ -133,30 +133,14 @@ def _parse_stream_mode_query_param(stream_mode: list[str] | None) -> list[str] |
 def _validate_supported_run_controls(payload: Any, *, stateless: bool) -> None:
     unsupported_controls: list[str] = []
 
-    if getattr(payload, "checkpoint", None) is not None:
-        unsupported_controls.append("checkpoint")
-    if getattr(payload, "command", None) is not None:
-        unsupported_controls.append("command")
     if getattr(payload, "webhook", None) is not None:
         unsupported_controls.append("webhook")
-    if getattr(payload, "interrupt_before", None) is not None:
-        unsupported_controls.append("interrupt_before")
-    if getattr(payload, "interrupt_after", None) is not None:
-        unsupported_controls.append("interrupt_after")
-    if bool(getattr(payload, "stream_subgraphs", False)):
-        unsupported_controls.append("stream_subgraphs")
-    if bool(getattr(payload, "stream_resumable", False)):
-        unsupported_controls.append("stream_resumable")
     if getattr(payload, "feedback_keys", None):
         unsupported_controls.append("feedback_keys")
     if getattr(payload, "if_not_exists", "reject") != "reject":
         unsupported_controls.append("if_not_exists")
     if getattr(payload, "after_seconds", None) is not None:
         unsupported_controls.append("after_seconds")
-    if bool(getattr(payload, "checkpoint_during", False)):
-        unsupported_controls.append("checkpoint_during")
-    if getattr(payload, "durability", "async") != "async":
-        unsupported_controls.append("durability")
     if stateless and getattr(payload, "on_completion", "keep") != "keep":
         unsupported_controls.append("on_completion")
 
@@ -336,9 +320,15 @@ async def _iter_persisted_protocol_run_events(
         await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
 
 
+_SSE_EVENT_NAME_MAP: dict[str, str] = {
+    "messages-tuple": "messages",
+}
+
+
 def _protocol_event_sse(*, event_name: str, data: Any, seq: int | None = None) -> str:
     prefix = f"id: {seq}\n" if seq is not None else ""
-    return f"{prefix}event: {event_name}\ndata: {json.dumps(data)}\n\n"
+    wire_name = _SSE_EVENT_NAME_MAP.get(event_name, event_name)
+    return f"{prefix}event: {wire_name}\ndata: {json.dumps(data)}\n\n"
 
 
 def _build_create_run_stream_response(
@@ -523,6 +513,24 @@ async def _iter_persisted_run_records(
 @router.post("", response_model=RunRead)
 async def create_run(thread_id: str, payload: RunCreateStateful, user: User = Depends(get_current_user)) -> RunRead:
     _validate_supported_run_controls(payload, stateless=False)
+    run_kwargs: dict[str, Any] = {"config": payload.config, "context": payload.context}
+    stream_modes = _normalize_stream_modes(payload.stream_mode)
+    if stream_modes:
+        run_kwargs["stream_modes"] = stream_modes
+    interrupt_before = getattr(payload, "interrupt_before", None)
+    if interrupt_before:
+        run_kwargs["interrupt_before"] = interrupt_before
+    interrupt_after = getattr(payload, "interrupt_after", None)
+    if interrupt_after:
+        run_kwargs["interrupt_after"] = interrupt_after
+    command = getattr(payload, "command", None)
+    if command is not None:
+        run_kwargs["command"] = command
+    durability = getattr(payload, "durability", "async")
+    if durability != "async":
+        run_kwargs["durability"] = durability
+    if getattr(payload, "stream_subgraphs", False):
+        run_kwargs["stream_subgraphs"] = True
     try:
         row = await prepare_and_submit_run(
             thread_id=thread_id,
@@ -530,7 +538,7 @@ async def create_run(thread_id: str, payload: RunCreateStateful, user: User = De
             payload=payload.input,
             user=user,
             metadata=payload.metadata,
-            kwargs={"config": payload.config, "context": payload.context},
+            kwargs=run_kwargs,
             multitask_strategy=getattr(payload, "multitask_strategy", "enqueue"),
         )
     except ValueError as exc:
@@ -540,16 +548,36 @@ async def create_run(thread_id: str, payload: RunCreateStateful, user: User = De
     return _to_read_model(row)
 
 
+_VALID_RUN_STATUSES = {"pending", "running", "error", "success", "timeout", "interrupted"}
+_VALID_RUN_SELECT_FIELDS = {
+    "run_id", "thread_id", "assistant_id", "created_at", "updated_at",
+    "status", "metadata", "kwargs", "multitask_strategy",
+}
+
+
 @router.get("", response_model=list[RunRead])
-async def list_runs(thread_id: str, user: User = Depends(get_current_user)) -> list[RunRead]:
+async def list_runs(
+    thread_id: str,
+    user: User = Depends(get_current_user),
+    limit: int = Query(default=10, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = Query(default=None),
+    select_fields: Annotated[list[str] | None, Query(alias="select")] = None,
+) -> Any:
+    if status is not None and status not in _VALID_RUN_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Invalid status filter: {status}")
+    query = select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity)
+    if status is not None:
+        query = query.where(Run.status == status)
+    query = query.order_by(Run.created_at.desc()).limit(limit).offset(offset)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        rows = (
-            await session.scalars(
-                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.desc())
-            )
-        ).all()
-        return [_to_read_model(row) for row in rows]
+        rows = (await session.scalars(query)).all()
+    if select_fields:
+        fields = set(select_fields) & _VALID_RUN_SELECT_FIELDS
+        data = [_to_read_model(row).model_dump(include=fields) for row in rows]
+        return JSONResponse(content=jsonable_encoder(data))
+    return [_to_read_model(row) for row in rows]
 
 
 @router.get("/{run_id}", response_model=RunRead)
@@ -762,10 +790,7 @@ async def stream_run(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     stream_mode: Annotated[list[str] | None, Query()] = None,
 ) -> StreamingResponse:
-    try:
-        parsed_last_event_id = parse_last_event_id(last_event_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    parsed_last_event_id = parse_last_event_id(last_event_id)
     after_seq = parsed_last_event_id or 0
     replay_existing = parsed_last_event_id is not None
     session_factory = db_manager.get_session_factory()

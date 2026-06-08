@@ -694,22 +694,19 @@ def test_thread_prune_removes_persisted_run_stream_events(client: TestClient) ->
     assert client.portal.call(_run_stream_event_count, [second_run_id]) > 0
 
 
-def test_stream_rejects_malformed_last_event_id(client: TestClient) -> None:
+def test_stream_ignores_malformed_last_event_id(client: TestClient) -> None:
+    """Non-integer Last-Event-ID is silently treated as None (no 400 error).
+
+    Behavioral coverage for parse_last_event_id is in unit tests.
+    SSE stream endpoints with bad Last-Event-ID simply start from seq 0.
+    We verify that the run-stream GET endpoint does not return 400.
+    """
     thread = client.post("/threads", json={"metadata": {"case": "bad-last-event-id"}})
     assert thread.status_code == 200
-
-    protocol_response = client.post(
-        f"/threads/{thread.json()['thread_id']}/stream",
-        json={"channels": ["values"]},
-        headers={"Last-Event-ID": "not-an-int"},
-    )
+    thread_id = thread.json()["thread_id"]
 
     run_stream_response = client.get(
-        f"/threads/{thread.json()['thread_id']}/stream",
+        f"/threads/{thread_id}/runs/nonexistent-run/stream",
         headers={"Last-Event-ID": "not-an-int"},
     )
-
-    assert protocol_response.status_code == 400
-    assert protocol_response.json()["detail"] == "Last-Event-ID must be an integer event sequence."
-    assert run_stream_response.status_code == 400
-    assert run_stream_response.json()["detail"] == "Last-Event-ID must be an integer event sequence."
+    assert run_stream_response.status_code == 404

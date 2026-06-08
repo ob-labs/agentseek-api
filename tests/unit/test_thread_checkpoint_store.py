@@ -16,6 +16,7 @@ class FakeCheckpointTuple:
         created_at: datetime,
         parent_id: str | None = None,
         checkpoint_ns: str = "",
+        pending_writes: list | None = None,
     ) -> None:
         self.config = {
             "configurable": {
@@ -34,6 +35,7 @@ class FakeCheckpointTuple:
                 }
             }
         self.metadata = {}
+        self.pending_writes = pending_writes or []
         self.checkpoint = {
             "id": checkpoint_id,
             "ts": created_at.isoformat(),
@@ -190,3 +192,82 @@ def test_checkpoint_created_at_fallback_on_bad_timestamp() -> None:
 
     result = store._checkpoint_created_at({})
     assert result.tzinfo is not None
+
+
+def test_checkpoint_created_at_with_naive_datetime() -> None:
+    result = store._checkpoint_created_at({"ts": "2026-01-15T10:30:00"})
+    assert result.tzinfo is UTC
+
+
+def test_checkpoint_created_at_with_tz_aware_datetime() -> None:
+    result = store._checkpoint_created_at({"ts": "2026-01-15T10:30:00+00:00"})
+    assert result.tzinfo is not None
+    assert result.year == 2026
+
+
+def test_checkpoint_id_from_configurable() -> None:
+    fake = FakeCheckpointTuple(
+        checkpoint_id="cp-123",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    assert store._checkpoint_id(fake) == "cp-123"
+
+
+def test_parent_checkpoint_id_none_when_no_parent() -> None:
+    fake = FakeCheckpointTuple(
+        checkpoint_id="cp-1",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    assert store._parent_checkpoint_id(fake) is None
+
+
+def test_parent_checkpoint_id_from_parent_config() -> None:
+    fake = FakeCheckpointTuple(
+        checkpoint_id="cp-2",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        parent_id="cp-1",
+    )
+    assert store._parent_checkpoint_id(fake) == "cp-1"
+
+
+def test_filter_internal_channels() -> None:
+    values = {
+        "messages": [{"role": "user"}],
+        "__start__": "input",
+        "__pregel_tasks": [],
+        "branch:to:agent": True,
+        "output": "result",
+    }
+    filtered = store._filter_internal_channels(values)
+    assert "messages" in filtered
+    assert "output" in filtered
+    assert "__start__" not in filtered
+    assert "__pregel_tasks" not in filtered
+    assert "branch:to:agent" not in filtered
+
+
+def test_derive_next_and_tasks_with_input_source() -> None:
+    fake = FakeCheckpointTuple(
+        checkpoint_id="cp-1",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        pending_writes=[("task-1", "__start__", {"text": "hello"})],
+    )
+    fake.metadata = {"source": "input"}
+    fake.checkpoint["channel_values"] = {"__start__": {"text": "hello"}}
+    next_nodes, tasks = store._derive_next_and_tasks(fake)
+    assert next_nodes == ["__start__"]
+    assert len(tasks) == 1
+    assert tasks[0]["name"] == "__start__"
+    assert tasks[0]["id"] == "task-1"
+
+
+def test_derive_next_and_tasks_empty_pending_writes() -> None:
+    fake = FakeCheckpointTuple(
+        checkpoint_id="cp-1",
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    fake.metadata = {"source": "loop"}
+    fake.checkpoint["channel_values"] = {}
+    next_nodes, tasks = store._derive_next_and_tasks(fake)
+    assert next_nodes == []
+    assert tasks == []

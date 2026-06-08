@@ -402,6 +402,30 @@ async def apublish_updates_event(
     )
 
 
+async def apublish_stream_mode_event(
+    thread_id: str,
+    *,
+    method: str,
+    data: Any,
+    namespace: list[str] | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": data,
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
+    return await _apublish_thread_event(
+        thread_id,
+        {
+            "method": method,
+            "params": params,
+        },
+    )
+
+
 def publish_input_requested(
     thread_id: str,
     *,
@@ -804,6 +828,31 @@ async def apublish_messages_complete(
         thread_id,
         {
             "method": "messages/complete",
+            "params": params,
+        },
+    )
+
+
+async def apublish_messages_tuple(
+    thread_id: str,
+    *,
+    chunk: dict[str, Any],
+    metadata: dict[str, Any],
+    namespace: list[str] | None = None,
+    run_id: str | None = None,
+) -> None:
+    """Emit ``messages`` event in messages-tuple format: [chunk_dict, metadata_dict]."""
+    params: dict[str, Any] = {
+        "namespace": namespace or [],
+        "timestamp": protocol_timestamp_ms(),
+        "data": [chunk, metadata],
+    }
+    if run_id is not None:
+        params["run_id"] = run_id
+    await _apublish_thread_event(
+        thread_id,
+        {
+            "method": "messages-tuple",
             "params": params,
         },
     )

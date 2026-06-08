@@ -54,10 +54,10 @@ def parse_last_event_id(raw_value: str | None) -> int | None:
         return None
     try:
         value = int(raw_value)
-    except ValueError as exc:
-        raise ValueError("Last-Event-ID must be an integer event sequence.") from exc
+    except (ValueError, TypeError):
+        return None
     if value < 0:
-        raise ValueError("Last-Event-ID must be an integer event sequence.")
+        return None
     return value
 
 
