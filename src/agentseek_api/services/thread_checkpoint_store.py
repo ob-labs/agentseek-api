@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from langgraph.checkpoint.base import CheckpointTuple, create_checkpoint, empty_checkpoint
-from langgraph.types import Send
+from langgraph.types import PregelTask, Send, StateSnapshot
 
 from agentseek_api.core.database import db_manager
 
@@ -84,6 +84,87 @@ def _parent_checkpoint_id(checkpoint_tuple: CheckpointTuple) -> str | None:
     return None
 
 
+_INTERNAL_CHANNEL_PREFIXES = ("__", "branch:")
+
+
+def _filter_internal_channels(values: dict[str, Any]) -> dict[str, Any]:
+    """Remove internal LangGraph channels from checkpoint values."""
+    return {
+        k: v for k, v in values.items()
+        if not any(k.startswith(prefix) for prefix in _INTERNAL_CHANNEL_PREFIXES)
+    }
+
+
+def _derive_next_and_tasks(checkpoint_tuple: CheckpointTuple) -> tuple[list[str], list[dict[str, Any]]]:
+    """Derive next nodes and tasks from checkpoint state and pending_writes."""
+    pending_writes = checkpoint_tuple.pending_writes or []
+    metadata = checkpoint_tuple.metadata if isinstance(checkpoint_tuple.metadata, dict) else {}
+    checkpoint = checkpoint_tuple.checkpoint
+    channel_values = checkpoint.get("channel_values", {})
+    source = metadata.get("source")
+
+    if source == "input":
+        start_val = channel_values.get("__start__")
+        result = _make_serializable(start_val) if start_val is not None else None
+        task_id = pending_writes[0][0] if pending_writes else "start"
+        return ["__start__"], [{
+            "id": task_id,
+            "name": "__start__",
+            "path": ["__pregel_pull", "__start__"],
+            "error": None,
+            "interrupts": [],
+            "checkpoint": None,
+            "state": None,
+            "result": result,
+        }]
+
+    if not pending_writes:
+        return [], []
+
+    next_nodes: list[str] = []
+    pregel_tasks = channel_values.get("__pregel_tasks")
+    if isinstance(pregel_tasks, list):
+        for task in pregel_tasks:
+            if isinstance(task, Send):
+                next_nodes.append(task.node)
+    if not next_nodes:
+        for key in channel_values:
+            if key.startswith("branch:to:"):
+                next_nodes.append(key[len("branch:to:"):])
+
+    if not next_nodes:
+        return [], []
+
+    task_results: dict[str, dict[str, Any]] = {}
+    for task_id, channel, value in pending_writes:
+        if channel.startswith("__") or channel.startswith("branch:"):
+            continue
+        if task_id not in task_results:
+            task_results[task_id] = {}
+        task_results[task_id][channel] = _make_serializable(value)
+
+    tasks: list[dict[str, Any]] = []
+    seen_task_ids: set[str] = set()
+    for task_id, _, _ in pending_writes:
+        if task_id in seen_task_ids:
+            continue
+        seen_task_ids.add(task_id)
+        node_name = next_nodes[len(tasks)] if len(tasks) < len(next_nodes) else next_nodes[-1]
+        result = task_results.get(task_id)
+        tasks.append({
+            "id": task_id,
+            "name": node_name,
+            "path": ["__pregel_pull", node_name],
+            "error": None,
+            "interrupts": [],
+            "checkpoint": None,
+            "state": None,
+            "result": result,
+        })
+
+    return next_nodes, tasks
+
+
 def checkpoint_to_payload(checkpoint_tuple: CheckpointTuple) -> dict[str, Any]:
     configurable = checkpoint_tuple.config.get("configurable", {})
     checkpoint = checkpoint_tuple.checkpoint
@@ -92,17 +173,25 @@ def checkpoint_to_payload(checkpoint_tuple: CheckpointTuple) -> dict[str, Any]:
     thread_id = str(configurable.get("thread_id", ""))
     metadata = deepcopy(checkpoint_tuple.metadata) if isinstance(checkpoint_tuple.metadata, dict) else {}
     parent_checkpoint = None
+    parent_checkpoint_id: str | None = None
     if checkpoint_tuple.parent_config is not None:
         parent_configurable = checkpoint_tuple.parent_config.get("configurable", {})
+        parent_checkpoint_id = str(parent_configurable.get("checkpoint_id", ""))
         parent_checkpoint = {
             "thread_id": str(parent_configurable.get("thread_id", thread_id)),
             "checkpoint_ns": str(parent_configurable.get("checkpoint_ns", "")),
-            "checkpoint_id": str(parent_configurable.get("checkpoint_id", "")),
+            "checkpoint_id": parent_checkpoint_id,
         }
+    raw_values = _make_serializable(deepcopy(checkpoint.get("channel_values", {})))
+    if isinstance(raw_values, dict):
+        raw_values = _filter_internal_channels(raw_values)
+
+    next_nodes, tasks = _derive_next_and_tasks(checkpoint_tuple)
+
     return {
-        "values": _make_serializable(deepcopy(checkpoint.get("channel_values", {}))),
-        "next": [],
-        "tasks": [],
+        "values": raw_values,
+        "next": next_nodes,
+        "tasks": tasks,
         "checkpoint": {
             "thread_id": thread_id,
             "checkpoint_ns": checkpoint_ns,
@@ -112,6 +201,63 @@ def checkpoint_to_payload(checkpoint_tuple: CheckpointTuple) -> dict[str, Any]:
         "created_at": _checkpoint_created_at(checkpoint),
         "parent_checkpoint": parent_checkpoint,
         "interrupts": [],
+        "checkpoint_id": checkpoint_id,
+        "parent_checkpoint_id": parent_checkpoint_id,
+    }
+
+
+def _task_to_dict(task: PregelTask) -> dict[str, Any]:
+    return {
+        "id": task.id,
+        "name": task.name,
+        "path": list(task.path),
+        "error": str(task.error) if task.error else None,
+        "interrupts": [_make_serializable(i) for i in task.interrupts] if task.interrupts else [],
+        "checkpoint": None,
+        "state": None,
+        "result": _make_serializable(task.result) if task.result is not None else None,
+    }
+
+
+def snapshot_to_payload(snapshot: StateSnapshot) -> dict[str, Any]:
+    """Convert a StateSnapshot (from aget_state_history) to official API format."""
+    configurable = snapshot.config.get("configurable", {})
+    thread_id = str(configurable.get("thread_id", ""))
+    checkpoint_ns = str(configurable.get("checkpoint_ns", ""))
+    checkpoint_id = str(configurable.get("checkpoint_id", ""))
+
+    parent_checkpoint = None
+    parent_checkpoint_id: str | None = None
+    if snapshot.parent_config is not None:
+        parent_configurable = snapshot.parent_config.get("configurable", {})
+        parent_checkpoint_id = str(parent_configurable.get("checkpoint_id", ""))
+        parent_checkpoint = {
+            "thread_id": str(parent_configurable.get("thread_id", thread_id)),
+            "checkpoint_ns": str(parent_configurable.get("checkpoint_ns", "")),
+            "checkpoint_id": parent_checkpoint_id,
+        }
+
+    values = _make_serializable(snapshot.values) if snapshot.values else {}
+    if isinstance(values, dict):
+        values = _filter_internal_channels(values)
+
+    metadata = dict(snapshot.metadata) if snapshot.metadata else {}
+
+    return {
+        "values": values,
+        "next": list(snapshot.next),
+        "tasks": [_task_to_dict(t) for t in snapshot.tasks],
+        "checkpoint": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_id": checkpoint_id,
+        },
+        "metadata": metadata,
+        "created_at": snapshot.created_at,
+        "parent_checkpoint": parent_checkpoint,
+        "interrupts": [_make_serializable(i) for i in snapshot.interrupts] if snapshot.interrupts else [],
+        "checkpoint_id": checkpoint_id,
+        "parent_checkpoint_id": parent_checkpoint_id,
     }
 
 

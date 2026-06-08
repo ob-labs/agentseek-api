@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
@@ -553,15 +553,15 @@ _VALID_RUN_SELECT_FIELDS = {
 }
 
 
-@router.get("")
+@router.get("", response_model=list[RunRead])
 async def list_runs(
     thread_id: str,
     user: User = Depends(get_current_user),
-    limit: int = Query(default=10, ge=1, le=100),
+    limit: int = Query(default=10, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
     status: str | None = Query(default=None),
     select_fields: Annotated[list[str] | None, Query(alias="select")] = None,
-) -> list[dict[str, Any]] | list[RunRead]:
+) -> Any:
     if status is not None and status not in _VALID_RUN_STATUSES:
         raise HTTPException(status_code=422, detail=f"Invalid status filter: {status}")
     query = select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity)
@@ -573,7 +573,8 @@ async def list_runs(
         rows = (await session.scalars(query)).all()
     if select_fields:
         fields = set(select_fields) & _VALID_RUN_SELECT_FIELDS
-        return [_to_read_model(row).model_dump(include=fields) for row in rows]
+        data = [_to_read_model(row).model_dump(include=fields) for row in rows]
+        return JSONResponse(content=jsonable_encoder(data))
     return [_to_read_model(row) for row in rows]
 
 

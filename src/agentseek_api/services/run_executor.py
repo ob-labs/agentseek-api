@@ -74,9 +74,9 @@ def _normalize_stream_value(value: Any) -> Any:
         }
     try:
         return value.model_dump()
-    except (AttributeError, Exception):
+    except Exception:
         pass
-    return None
+    return str(value)
 
 
 def _extract_chunk_messages(chunk: Any) -> list[BaseMessage]:
@@ -91,6 +91,8 @@ def _extract_chunk_messages(chunk: Any) -> list[BaseMessage]:
             if value is nested_messages:
                 continue
             messages.extend(_extract_chunk_messages(value))
+    elif isinstance(chunk, tuple) and len(chunk) == 2 and isinstance(chunk[0], str):
+        pass
     elif isinstance(chunk, (list, tuple)):
         for item in chunk:
             messages.extend(_extract_chunk_messages(item))
