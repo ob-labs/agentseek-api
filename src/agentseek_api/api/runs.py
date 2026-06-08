@@ -546,16 +546,35 @@ async def create_run(thread_id: str, payload: RunCreateStateful, user: User = De
     return _to_read_model(row)
 
 
-@router.get("", response_model=list[RunRead])
-async def list_runs(thread_id: str, user: User = Depends(get_current_user)) -> list[RunRead]:
+_VALID_RUN_STATUSES = {"pending", "running", "error", "success", "timeout", "interrupted"}
+_VALID_RUN_SELECT_FIELDS = {
+    "run_id", "thread_id", "assistant_id", "created_at", "updated_at",
+    "status", "metadata", "kwargs", "multitask_strategy",
+}
+
+
+@router.get("")
+async def list_runs(
+    thread_id: str,
+    user: User = Depends(get_current_user),
+    limit: int = Query(default=10, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    status: str | None = Query(default=None),
+    select_fields: Annotated[list[str] | None, Query(alias="select")] = None,
+) -> list[dict[str, Any]] | list[RunRead]:
+    if status is not None and status not in _VALID_RUN_STATUSES:
+        raise HTTPException(status_code=422, detail=f"Invalid status filter: {status}")
+    query = select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity)
+    if status is not None:
+        query = query.where(Run.status == status)
+    query = query.order_by(Run.created_at.desc()).limit(limit).offset(offset)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        rows = (
-            await session.scalars(
-                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.desc())
-            )
-        ).all()
-        return [_to_read_model(row) for row in rows]
+        rows = (await session.scalars(query)).all()
+    if select_fields:
+        fields = set(select_fields) & _VALID_RUN_SELECT_FIELDS
+        return [_to_read_model(row).model_dump(include=fields) for row in rows]
+    return [_to_read_model(row) for row in rows]
 
 
 @router.get("/{run_id}", response_model=RunRead)
