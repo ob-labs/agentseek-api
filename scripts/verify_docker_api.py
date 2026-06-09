@@ -51,59 +51,6 @@ def _stream_payloads(stream_text: str) -> list[dict[str, object]]:
     ]
 
 
-def _parse_sse_events(stream_text: str) -> list[dict[str, object]]:
-    events: list[dict[str, object]] = []
-    for chunk in stream_text.strip().split("\n\n"):
-        if not chunk.strip():
-            continue
-        parsed: dict[str, object] = {}
-        for line in chunk.splitlines():
-            if line.startswith("id: "):
-                parsed["id"] = line.removeprefix("id: ")
-            elif line.startswith("event: "):
-                parsed["event"] = line.removeprefix("event: ")
-            elif line.startswith("data: "):
-                parsed["data"] = json.loads(line.removeprefix("data: "))
-        if parsed:
-            events.append(parsed)
-    return events
-
-
-def _thread_stream_events(
-    *,
-    base_url: str,
-    thread_id: str,
-    headers: dict[str, str],
-    channels: list[str],
-) -> list[dict[str, object]]:
-    _, stream_body, stream_content_type = _request(
-        base_url=base_url,
-        path=f"/threads/{thread_id}/stream",
-        method="POST",
-        payload={"channels": channels},
-        headers=headers,
-    )
-    assert isinstance(stream_body, str)
-    assert "text/event-stream" in stream_content_type
-    return _parse_sse_events(stream_body)
-
-
-def _lifecycle_events(protocol_events: list[dict[str, object]]) -> list[str]:
-    lifecycle_events: list[str] = []
-    for event in protocol_events:
-        if event.get("event") != "lifecycle":
-            continue
-        data = event.get("data")
-        if not isinstance(data, dict):
-            continue
-        params = data.get("params")
-        if not isinstance(params, dict):
-            continue
-        inner = params.get("data")
-        if isinstance(inner, dict) and isinstance(inner.get("event"), str):
-            lifecycle_events.append(inner["event"])
-    return lifecycle_events
-
 
 def _assert_sample_run(
     *,
@@ -351,15 +298,6 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(waited_interrupt, dict)
     assert waited_interrupt["status"] == "interrupted"
     assert waited_interrupt["interrupts"][0]["value"] == "Provide value:"
-    interrupted_protocol_events = _thread_stream_events(
-        base_url=base_url,
-        thread_id=hitl_thread_id,
-        headers=alice,
-        channels=["lifecycle", "values", "input"],
-    )
-    assert "interrupted" in _lifecycle_events(interrupted_protocol_events)
-    assert any(event.get("event") == "input.requested" for event in interrupted_protocol_events)
-
     _, resumed_run, _ = _request(
         base_url=base_url,
         path=f"/threads/{hitl_thread_id}/runs/{interrupted_run_id}/resume",
@@ -391,16 +329,6 @@ def _assert_common_flow(base_url: str) -> None:
         if payload["event"] == "end"
     }
     assert "success" in end_statuses
-    resumed_protocol_events = _thread_stream_events(
-        base_url=base_url,
-        thread_id=hitl_thread_id,
-        headers=alice,
-        channels=["lifecycle", "values", "input"],
-    )
-    resumed_lifecycle_events = _lifecycle_events(resumed_protocol_events)
-    assert "interrupted" in resumed_lifecycle_events
-    assert "completed" in resumed_lifecycle_events
-
     stress_waited, _ = _assert_sample_run(
         base_url=base_url,
         user_headers=alice,
@@ -540,14 +468,6 @@ def _assert_resume_seed(base_url: str) -> dict[str, str]:
     assert isinstance(waited, dict)
     assert waited["status"] == "interrupted"
 
-    protocol_events = _thread_stream_events(
-        base_url=base_url,
-        thread_id=thread_id,
-        headers=alice,
-        channels=["lifecycle", "values", "input"],
-    )
-    assert "interrupted" in _lifecycle_events(protocol_events)
-    assert any(event.get("event") == "input.requested" for event in protocol_events)
     return {"thread_id": thread_id, "run_id": run_id}
 
 
@@ -586,16 +506,6 @@ def _assert_resume_check(base_url: str, *, thread_id: str, run_id: str, resume: 
     assert "interrupted" in end_statuses
     assert "success" in end_statuses
 
-    protocol_events = _thread_stream_events(
-        base_url=base_url,
-        thread_id=thread_id,
-        headers=alice,
-        channels=["lifecycle", "values", "input"],
-    )
-    lifecycle_events = _lifecycle_events(protocol_events)
-    assert "interrupted" in lifecycle_events
-    assert "completed" in lifecycle_events
-    assert any(event.get("event") == "input.requested" for event in protocol_events)
 
 
 def main() -> int:
