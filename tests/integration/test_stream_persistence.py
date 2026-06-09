@@ -5,6 +5,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
 from agentseek_api.api import runs as runs_api
+from agentseek_api.api import streaming as streaming_api
 from agentseek_api.api import threads as threads_api
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, RunStreamEvent, Thread
@@ -415,14 +416,14 @@ def test_thread_protocol_stream_polls_persisted_events_in_redis_mode(client: Tes
 
         return _iter()
 
-    monkeypatch.setattr(threads_api.settings, "EXECUTOR_BACKEND", "redis")
-    monkeypatch.setattr(threads_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
-    monkeypatch.setattr(threads_api, "load_thread_stream_events", fake_load_thread_stream_events)
-    monkeypatch.setattr(threads_api, "_thread_has_active_runs", fake_thread_has_active_runs)
-    monkeypatch.setattr(threads_api.thread_protocol_broker, "stream", unexpected_thread_stream)
+    monkeypatch.setattr(streaming_api.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(streaming_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
+    monkeypatch.setattr(streaming_api, "load_thread_stream_events", fake_load_thread_stream_events)
+    monkeypatch.setattr(streaming_api, "_thread_has_active_runs", fake_thread_has_active_runs)
+    monkeypatch.setattr(streaming_api.thread_protocol_broker, "stream", unexpected_thread_stream)
 
     response = client.portal.call(
-        threads_api.stream_thread_protocol_events,
+        streaming_api.stream_thread_protocol_events,
         thread_id,
         ProtocolEventStreamRequest(channels=["lifecycle", "values"]),
         User(identity="default_user", is_authenticated=True),
@@ -449,11 +450,11 @@ def test_thread_protocol_stream_sends_keepalive_while_inline_broker_is_idle(clie
         }
 
     monkeypatch.setattr(sse_module, "DEFAULT_SSE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
-    monkeypatch.setattr(threads_api.settings, "EXECUTOR_BACKEND", "inline")
-    monkeypatch.setattr(threads_api.thread_protocol_broker, "stream", delayed_stream)
+    monkeypatch.setattr(streaming_api.settings, "EXECUTOR_BACKEND", "inline")
+    monkeypatch.setattr(streaming_api.thread_protocol_broker, "stream", delayed_stream)
 
     response = client.portal.call(
-        threads_api.stream_thread_protocol_events,
+        streaming_api.stream_thread_protocol_events,
         thread_id,
         ProtocolEventStreamRequest(channels=["lifecycle"]),
         User(identity="default_user", is_authenticated=True),

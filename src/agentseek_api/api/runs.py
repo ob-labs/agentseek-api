@@ -16,7 +16,8 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
 from agentseek_api.models.auth import User
-from agentseek_api.api.threads import _find_thread_state_payload, _get_thread_state_at_checkpoint, get_thread_state
+from agentseek_api.api.threads import get_thread_state_internal
+from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
@@ -33,7 +34,7 @@ from agentseek_api.services.sse import iter_with_sse_keepalives, safe_json_dumps
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.settings import settings
 
-router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Runs"])
+router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Thread Runs"])
 
 TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
 REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
@@ -155,18 +156,50 @@ def _validate_supported_run_controls(payload: Any, *, stateless: bool) -> None:
         )
 
 
+async def _get_run_state(*, thread_id: str, run_id: str, user: User, checkpoint_id: str | None = None) -> dict[str, object] | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        if thread is None:
+            return None
+
+    graph_id = (thread.metadata_json or {}).get("graph_id")
+    if not graph_id:
+        return None
+
+    entry = get_langgraph_service().get_entry(graph_id)
+    checkpointer = db_manager.get_langgraph_checkpointer()
+    graph = entry.build_graph(checkpointer)
+    if getattr(graph, "checkpointer", None) is None:
+        graph.checkpointer = checkpointer
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    if checkpoint_id is not None:
+        config["configurable"]["checkpoint_id"] = checkpoint_id
+    else:
+        config["configurable"]["checkpoint_ns"] = run_id
+
+    snapshot = await graph.aget_state(config)
+    if snapshot is None or snapshot.config is None:
+        return None
+    from agentseek_api.api.threads import _snapshot_to_payload
+    return _snapshot_to_payload(snapshot, thread_id)
+
+
 async def _wait_response_payload(run: RunRead, *, user: User) -> Any:
     if run.status == "interrupted" and run.interrupts:
         return {"__interrupt__": run.interrupts}
     if run.status == "error":
         return {"__error__": run.last_error} if run.last_error else {}
     checkpoint_id = await _load_run_checkpoint_id(run_id=run.run_id, thread_id=run.thread_id, user_id=user.identity)
-    if checkpoint_id is not None:
-        state = await _get_thread_state_at_checkpoint(thread_id=run.thread_id, checkpoint_id=checkpoint_id, user=user)
-    else:
-        state = await _find_thread_state_payload(thread_id=run.thread_id, user=user, checkpoint_ns=run.run_id)
-        if state is None:
-            state = await get_thread_state(run.thread_id, user)
+    state = await _get_run_state(
+        thread_id=run.thread_id,
+        run_id=run.run_id,
+        user=user,
+        checkpoint_id=checkpoint_id,
+    )
+    if state is None:
+        state = await get_thread_state_internal(run.thread_id, user)
     if isinstance(state, dict) and "values" in state:
         values = state["values"]
         if isinstance(values, dict):

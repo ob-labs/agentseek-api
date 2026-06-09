@@ -24,13 +24,18 @@ from agentseek_api.api.crons import router as crons_router
 from agentseek_api.api.runs import router as runs_router
 from agentseek_api.api.stateless_runs import router as stateless_runs_router
 from agentseek_api.api.store import router as store_router
+from agentseek_api.api.streaming import router as streaming_router
 from agentseek_api.api.threads import router as threads_router
 from agentseek_api.core.app_loader import load_custom_app
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.auth_middleware import get_config_auth_openapi
 from agentseek_api.core.a2a_config import is_a2a_enabled
 from agentseek_api.core.content_type_fix import ContentTypeFixMiddleware
-from agentseek_api.core.cors_config import DEFAULT_EXPOSE_HEADERS, CorsConfig, get_cors_config
+from agentseek_api.core.cors_config import (
+    DEFAULT_EXPOSE_HEADERS,
+    CorsConfig,
+    get_cors_config,
+)
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.http_config import get_config_dir, get_http_config
 from agentseek_api.core.mcp_config import is_mcp_enabled
@@ -39,9 +44,12 @@ from agentseek_api.services.default_assistants import ensure_default_assistants
 from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.settings import settings
 
-_FASTAPI_DEFAULT_PATHS = frozenset(
-    {"/openapi.json", "/docs", "/docs/oauth2-redirect", "/redoc"}
-)
+_FASTAPI_DEFAULT_PATHS = frozenset({
+    "/openapi.json",
+    "/docs",
+    "/docs/oauth2-redirect",
+    "/redoc",
+})
 
 
 @asynccontextmanager
@@ -218,7 +226,9 @@ def _merge_custom_app(app: FastAPI) -> None:
         if path in _FASTAPI_DEFAULT_PATHS:
             continue
         if path in existing_paths:
-            logger.warning("Custom route path '%s' conflicts with a built-in route, skipping", path)
+            logger.warning(
+                "Custom route path '%s' conflicts with a built-in route, skipping", path
+            )
             continue
         app.router.routes.append(route)
 
@@ -237,13 +247,13 @@ def create_app() -> FastAPI:
         )
         _register_mcp_routes(app, app.state.mcp_mount)
 
-    @app.get("/health")
-    async def health() -> dict[str, str]:
+    @app.get("/health", tags=["System"])
+    async def health_check() -> dict[str, str]:
         db_manager.get_engine()
         db_manager.get_checkpointer()
         return {"status": "healthy"}
 
-    @app.get("/ok")
+    @app.get("/ok", tags=["System"])
     async def ok() -> dict[str, bool]:
         return {"ok": True}
 
@@ -255,8 +265,8 @@ def create_app() -> FastAPI:
             persist_auth=True,
         )
 
-    @app.get("/info")
-    async def info() -> dict[str, object]:
+    @app.get("/info", tags=["System"])
+    async def server_information() -> dict[str, object]:
         return {
             "version": __version__,
             "langgraph_py_version": _langgraph_py_version(),
@@ -267,40 +277,38 @@ def create_app() -> FastAPI:
             "metadata": _server_metadata(),
         }
 
-    @app.get("/metrics", response_model=None)
-    async def metrics(format: str = Query(default="prometheus")) -> PlainTextResponse | JSONResponse:
+    @app.get("/metrics", response_model=None, tags=["System"])
+    async def system_metrics(
+        format: str = Query(default="prometheus"),
+    ) -> PlainTextResponse | JSONResponse:
         db_manager.get_engine()
         db_manager.get_checkpointer()
         if format == "json":
-            return JSONResponse(
-                {
-                    "app_name": settings.APP_NAME,
-                    "version": __version__,
-                    "langgraph_py_version": _langgraph_py_version(),
-                    "checks": {
-                        "database": "ok",
-                        "checkpointer": "ok",
-                    },
-                    "flags": _feature_flags(
-                        a2a_enabled=app.state.a2a_enabled,
-                        mcp_enabled=app.state.mcp_enabled,
-                    ),
-                }
-            )
-
-        body = "\n".join(
-            [
-                "# HELP agentseek_api_info AgentSeek API build information.",
-                "# TYPE agentseek_api_info gauge",
-                (
-                    f'agentseek_api_info{{version="{__version__}",'
-                    f'langgraph_py_version="{_langgraph_py_version()}"}} 1'
+            return JSONResponse({
+                "app_name": settings.APP_NAME,
+                "version": __version__,
+                "langgraph_py_version": _langgraph_py_version(),
+                "checks": {
+                    "database": "ok",
+                    "checkpointer": "ok",
+                },
+                "flags": _feature_flags(
+                    a2a_enabled=app.state.a2a_enabled,
+                    mcp_enabled=app.state.mcp_enabled,
                 ),
-                "# HELP agentseek_api_database_up Database connectivity status.",
-                "# TYPE agentseek_api_database_up gauge",
-                "agentseek_api_database_up 1",
-            ]
-        )
+            })
+
+        body = "\n".join([
+            "# HELP agentseek_api_info AgentSeek API build information.",
+            "# TYPE agentseek_api_info gauge",
+            (
+                f'agentseek_api_info{{version="{__version__}",'
+                f'langgraph_py_version="{_langgraph_py_version()}"}} 1'
+            ),
+            "# HELP agentseek_api_database_up Database connectivity status.",
+            "# TYPE agentseek_api_database_up gauge",
+            "agentseek_api_database_up 1",
+        ])
         return PlainTextResponse(body + "\n")
 
     if app.state.a2a_enabled:
@@ -314,7 +322,9 @@ def create_app() -> FastAPI:
             assistant = await load_assistant(assistant_id)
             entry = get_langgraph_service().get_entry(assistant.graph_id)
             if not is_a2a_compatible_entry(entry):
-                raise HTTPException(status_code=400, detail="Assistant graph is not A2A-compatible")
+                raise HTTPException(
+                    status_code=400, detail="Assistant graph is not A2A-compatible"
+                )
             return build_agent_card(
                 base_url=str(request.base_url).rstrip("/"),
                 assistant=assistant,
@@ -338,6 +348,7 @@ def create_app() -> FastAPI:
     app.include_router(assistants_api_router, prefix="/assistants", tags=["Assistants"])
     app.include_router(assistants_api_router, prefix="/agents", tags=["Agents"])
     app.include_router(threads_router)
+    app.include_router(streaming_router)
     app.include_router(crons_router)
     app.include_router(runs_router)
     app.include_router(stateless_runs_router)

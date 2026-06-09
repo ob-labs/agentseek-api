@@ -1,9 +1,10 @@
-import json
 from datetime import UTC, datetime
 from typing import Any
 
 import pymysql
 from pymysql.connections import Connection
+
+from agentseek_api.services.sse import safe_json_dumps
 
 
 class OceanBaseCheckpointSaver:
@@ -46,5 +47,5 @@ class OceanBaseCheckpointSaver:
                     INSERT INTO agentseek_checkpoints (thread_id, run_id, checkpoint, created_at)
                     VALUES (%s, %s, %s, %s)
                     """,
-                    (thread_id, run_id, json.dumps(payload, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o)), datetime.now(UTC).replace(tzinfo=None)),
+                    (thread_id, run_id, safe_json_dumps(payload), datetime.now(UTC).replace(tzinfo=None)),
                 )

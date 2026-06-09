@@ -1,25 +1,35 @@
 import asyncio
+import functools
 import logging
+from collections.abc import AsyncIterator
 from copy import deepcopy
 from datetime import UTC, datetime
-from collections.abc import AsyncIterator
 from typing import Any
 
-from sqlalchemy import delete, func, select
-
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import StreamingResponse
+from sqlalchemy import delete, func, select
 
 from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
-from agentseek_api.models.api import ThreadCountRequest, ThreadCreate, ThreadPatch, ThreadPruneRequest, ThreadPruneResponse, ThreadRead, ThreadSearchRequest
+from agentseek_api.models.api import (
+    ThreadCountRequest,
+    ThreadCreate,
+    ThreadPatch,
+    ThreadPruneRequest,
+    ThreadPruneResponse,
+    ThreadRead,
+    ThreadSearchRequest,
+    ThreadStateSearch,
+)
 from agentseek_api.models.auth import User
-from agentseek_api.models.protocol import ProtocolCommandRequest, ProtocolEventStreamRequest
-from agentseek_api.services.run_preparation import (
-    ActiveThreadRunConflictError,
-    prepare_and_submit_run,
-    resume_run,
+from agentseek_api.models.protocol import ProtocolEventStreamRequest
+from agentseek_api.services.langgraph_service import get_langgraph_service
+from agentseek_api.services.sse import (
+    iter_with_sse_keepalives,
+    safe_json_dumps,
+    sse_keepalive_comment,
 )
 from agentseek_api.services.stream_persistence import (
     delete_run_stream_events,
@@ -27,15 +37,14 @@ from agentseek_api.services.stream_persistence import (
     load_thread_stream_events,
     parse_last_event_id,
 )
-from agentseek_api.services.sse import iter_with_sse_keepalives, safe_json_dumps, sse_keepalive_comment
 from agentseek_api.services.thread_checkpoint_store import (
+    _filter_internal_channels,
+    _make_serializable,
     checkpoint_to_payload,
     copy_checkpoints,
-    list_checkpoints,
-    put_checkpoint,
     prune_checkpoints,
+    put_checkpoint,
 )
-from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.services.thread_service import create_thread_for_user, to_read_model
 from agentseek_api.settings import settings
@@ -62,25 +71,37 @@ async def _best_effort_checkpointer_call(method_name: str, *args: object, **kwar
 
 logger = logging.getLogger(__name__)
 
+@functools.lru_cache(maxsize=None)
+def _build_compiled_graph(graph_id: str) -> Any:
+    entry = get_langgraph_service().get_entry(graph_id)
+    checkpointer = db_manager.get_langgraph_checkpointer()
+    graph = entry.build_graph(checkpointer)
+    if getattr(graph, "checkpointer", None) is None:
+        graph.checkpointer = checkpointer
+    return graph
 
-async def _enrich_thread_state(thread_id: str) -> tuple[dict[str, Any], dict[str, Any] | None]:
+
+async def _enrich_thread_state(thread_id: str, graph: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
     try:
-        checkpoints = await list_checkpoints(thread_id)
+        config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+        snapshot = await graph.aget_state(config)
+        if not snapshot or not snapshot.values:
+            return {}, None
+        raw_values = _make_serializable(snapshot.values)
+        values = _filter_internal_channels(raw_values) if isinstance(raw_values, dict) else {}
+        interrupts: dict[str, Any] | None = None
+        if snapshot.tasks:
+            interrupt_list = [
+                {"value": getattr(i, "value", None)}
+                for task in snapshot.tasks
+                for i in (task.interrupts or ())
+            ]
+            if interrupt_list:
+                interrupts = {str(i): item for i, item in enumerate(interrupt_list)}
+        return values, interrupts
     except Exception:
-        logger.warning("Failed to load checkpoint state for thread %s", thread_id, exc_info=True)
+        logger.warning("Failed to load graph state for thread %s", thread_id, exc_info=True)
         return {}, None
-    if not checkpoints:
-        return {}, None
-    payload = checkpoint_to_payload(checkpoints[0])
-    values = payload.get("values", {})
-    if not isinstance(values, dict):
-        values = {}
-    interrupts = payload.get("interrupts")
-    if isinstance(interrupts, list):
-        interrupts = {str(i): item for i, item in enumerate(interrupts)} if interrupts else None
-    elif not isinstance(interrupts, dict):
-        interrupts = None
-    return values, interrupts
 
 
 
@@ -247,49 +268,6 @@ def _checkpoint_namespace(payload: dict[str, object]) -> str:
     return str(checkpoint_ns) if checkpoint_ns is not None else ""
 
 
-async def _find_thread_state_payload(
-    *,
-    thread_id: str,
-    user: User,
-    checkpoint_ns: str | None = None,
-) -> dict[str, object] | None:
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
-        if thread is None:
-            raise HTTPException(status_code=404, detail="Thread not found")
-        runs = (
-            await session.scalars(
-                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
-            )
-        ).all()
-    visible = _visible_checkpoint_payloads(
-        thread,
-        runs,
-        [checkpoint_to_payload(item) for item in await list_checkpoints(thread_id)],
-    )
-    if checkpoint_ns is not None:
-        visible = [payload for payload in visible if _checkpoint_namespace(payload) == checkpoint_ns]
-    if not visible:
-        return None
-    return visible[0]
-
-
-async def _get_thread_state_payload(
-    *,
-    thread_id: str,
-    user: User,
-    checkpoint_ns: str | None = None,
-) -> dict[str, object]:
-    payload = await _find_thread_state_payload(thread_id=thread_id, user=user, checkpoint_ns=checkpoint_ns)
-    if payload is not None:
-        return payload
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
-        if thread is None:
-            raise HTTPException(status_code=404, detail="Thread not found")
-        return _empty_thread_state_payload(thread)
 
 
 @router.post("", response_model=ThreadRead, response_model_exclude_none=True)
@@ -331,7 +309,19 @@ async def search_threads(payload: ThreadSearchRequest, user: User = Depends(get_
 
     need_state = selected_fields is None or "values" in selected_fields or "interrupts" in selected_fields
     if need_state:
-        states = await asyncio.gather(*[_enrich_thread_state(row.thread_id) for row in rows])
+        _STATE_BATCH_SIZE = 5
+
+        async def _get_state(row: Thread) -> tuple[dict[str, Any], dict[str, Any] | None]:
+            gid = (row.metadata_json or {}).get("graph_id")
+            if not gid:
+                return {}, None
+            return await _enrich_thread_state(row.thread_id, _build_compiled_graph(gid))
+
+        states: list[tuple[dict[str, Any], dict[str, Any] | None]] = []
+        for i in range(0, len(rows), _STATE_BATCH_SIZE):
+            batch = rows[i:i + _STATE_BATCH_SIZE]
+            batch_states = await asyncio.gather(*[_get_state(row) for row in batch])
+            states.extend(batch_states)
         return [
             to_read_model(row, select=selected_fields, values=values, interrupts=interrupts)
             for row, (values, interrupts) in zip(rows, states)
@@ -411,18 +401,13 @@ async def get_thread(
         row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
         if row is None:
             raise HTTPException(status_code=404, detail="Thread not found")
-        values, interrupts = await _enrich_thread_state(thread_id)
+        graph_id = (row.metadata_json or {}).get("graph_id")
+        if graph_id:
+            graph = _build_compiled_graph(graph_id)
+            values, interrupts = await _enrich_thread_state(thread_id, graph)
+        else:
+            values, interrupts = {}, None
         return to_read_model(row, values=values, interrupts=interrupts)
-
-
-async def _get_thread_row(*, thread_id: str, user: User) -> Thread:
-    session_factory = db_manager.get_session_factory()
-    async with session_factory() as session:
-        row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
-        if row is None:
-            raise HTTPException(status_code=404, detail="Thread not found")
-        return row
-
 
 @router.patch("/{thread_id}", response_model=ThreadRead, response_model_exclude_none=True)
 async def patch_thread(thread_id: str, payload: ThreadPatch, user: User = Depends(get_current_user)) -> ThreadRead:
@@ -504,6 +489,38 @@ async def copy_thread(thread_id: str, user: User = Depends(get_current_user)) ->
     return to_read_model(copied)
 
 
+async def get_thread_state_internal(
+    thread_id: str,
+    user: User,
+    checkpoint_ns: str | None = None,
+) -> dict[str, object] | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        if thread is None:
+            raise HTTPException(status_code=404, detail="Thread not found")
+
+    graph_id = (thread.metadata_json or {}).get("graph_id")
+    if not graph_id:
+        return None
+
+    entry = get_langgraph_service().get_entry(graph_id)
+    checkpointer = db_manager.get_langgraph_checkpointer()
+    graph = entry.build_graph(checkpointer)
+    if getattr(graph, "checkpointer", None) is None:
+        graph.checkpointer = checkpointer
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    if checkpoint_ns is not None:
+        config["configurable"]["checkpoint_ns"] = checkpoint_ns
+
+    snapshot = await graph.aget_state(config)
+    if snapshot is None or snapshot.config is None:
+        return None
+
+    return _snapshot_to_payload(snapshot, thread_id)
+
+
 @router.get("/{thread_id}/state")
 async def get_thread_state(
     thread_id: str,
@@ -513,8 +530,17 @@ async def get_thread_state(
 ) -> dict[str, object]:
     if subgraphs is True:
         raise HTTPException(status_code=422, detail="'subgraphs' is not supported yet")
-    ns = checkpoint_ns if isinstance(checkpoint_ns, str) else None
-    return await _get_thread_state_payload(thread_id=thread_id, user=user, checkpoint_ns=ns)
+
+    state = await get_thread_state_internal(thread_id, user, checkpoint_ns=checkpoint_ns)
+    if state is not None:
+        return state
+
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        if thread is None:
+            raise HTTPException(status_code=404, detail="Thread not found")
+    return _empty_thread_state_payload(thread)
 
 
 def _snapshot_to_payload(snapshot: Any, thread_id: str) -> dict[str, object]:
@@ -562,8 +588,11 @@ def _snapshot_to_payload(snapshot: Any, thread_id: str) -> dict[str, object]:
         except ValueError:
             pass
 
+    raw_values = _make_serializable(snapshot.values) if snapshot.values is not None else {}
+    values = _filter_internal_channels(raw_values) if isinstance(raw_values, dict) else raw_values
+
     return {
-        "values": snapshot.values if snapshot.values is not None else {},
+        "values": values,
         "next": list(snapshot.next) if snapshot.next else [],
         "tasks": tasks,
         "checkpoint": {
@@ -581,7 +610,12 @@ def _snapshot_to_payload(snapshot: Any, thread_id: str) -> dict[str, object]:
 
 
 @router.get("/{thread_id}/history")
-async def get_thread_history(thread_id: str, user: User = Depends(get_current_user)) -> list[dict[str, object]]:
+async def get_thread_history(
+    thread_id: str,
+    user: User = Depends(get_current_user),
+    limit: int = Query(default=10, ge=1),
+    before: str | None = Query(default=None),
+) -> list[dict[str, object]]:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
@@ -590,7 +624,7 @@ async def get_thread_history(thread_id: str, user: User = Depends(get_current_us
 
         graph_id = (thread.metadata_json or {}).get("graph_id")
         if not graph_id:
-            logger.info(f"history: no graph_id for thread {thread_id}")
+            logger.info("history: no graph_id for thread %s", thread_id)
             return []
 
         runs = (
@@ -606,16 +640,26 @@ async def get_thread_history(thread_id: str, user: User = Depends(get_current_us
         graph.checkpointer = checkpointer
 
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    history_kwargs: dict[str, Any] = {"limit": limit}
+    if before is not None:
+        history_kwargs["before"] = {"configurable": {"checkpoint_id": before}}
     payloads: list[dict[str, object]] = []
-    async for snapshot in graph.aget_state_history(config):
+    async for snapshot in graph.aget_state_history(config, **history_kwargs):
         payloads.append(_snapshot_to_payload(snapshot, thread_id))
 
     return _visible_checkpoint_payloads(thread, runs, payloads)
 
 
 @router.post("/{thread_id}/history")
-async def get_thread_history_post(thread_id: str, user: User = Depends(get_current_user)) -> list[dict[str, object]]:
-    return await get_thread_history(thread_id, user)
+async def get_thread_history_post(
+    thread_id: str,
+    payload: ThreadStateSearch,
+    user: User = Depends(get_current_user),
+) -> list[dict[str, object]]:
+    before_id: str | None = None
+    if payload.before is not None and payload.before.checkpoint_id:
+        before_id = payload.before.checkpoint_id
+    return await get_thread_history(thread_id, user, limit=payload.limit, before=before_id)
 
 
 async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str, user: User) -> dict[str, object]:
@@ -624,23 +668,27 @@ async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str,
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
-        runs = (
-            await session.scalars(
-                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
-            )
-        ).all()
-    visible = _visible_checkpoint_payloads(
-        thread,
-        runs,
-        [checkpoint_to_payload(item) for item in await list_checkpoints(thread_id)],
-    )
-    if checkpoint_id == thread.thread_id and not visible:
-        return _empty_thread_state_payload(thread)
-    for payload in visible:
-        checkpoint = payload.get("checkpoint")
-        if isinstance(checkpoint, dict) and checkpoint.get("checkpoint_id") == checkpoint_id:
-            return payload
-    raise HTTPException(status_code=404, detail="Checkpoint not found")
+
+    graph_id = (thread.metadata_json or {}).get("graph_id")
+    if not graph_id:
+        if checkpoint_id == thread.thread_id:
+            return _empty_thread_state_payload(thread)
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+
+    entry = get_langgraph_service().get_entry(graph_id)
+    checkpointer = db_manager.get_langgraph_checkpointer()
+    graph = entry.build_graph(checkpointer)
+    if getattr(graph, "checkpointer", None) is None:
+        graph.checkpointer = checkpointer
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
+    snapshot = await graph.aget_state(config)
+    if snapshot is None or snapshot.config is None:
+        if checkpoint_id == thread.thread_id:
+            return _empty_thread_state_payload(thread)
+        raise HTTPException(status_code=404, detail="Checkpoint not found")
+
+    return _snapshot_to_payload(snapshot, thread_id)
 
 
 @router.get("/{thread_id}/state/{checkpoint_id}")
@@ -680,7 +728,7 @@ async def update_thread_state(
     return _checkpoint_payload_with_thread_defaults(thread, checkpoint_to_payload(checkpoint))
 
 
-@router.post("/{thread_id}/state/checkpoint")
+@router.post("/{thread_id}/state/checkpoint",summary="Get Thread State At Checkpoint Post")
 async def checkpoint_thread_state(
     thread_id: str,
     payload: dict[str, object],
@@ -762,188 +810,3 @@ async def join_thread_stream(
     return StreamingResponse(_event_iter(), media_type="text/event-stream")
 
 
-def _protocol_error(*, request_id: int | None, code: str, message: str, status_code: int) -> JSONResponse:
-    return JSONResponse(
-        status_code=status_code,
-        content={
-            "type": "error",
-            "id": request_id,
-            "error": code,
-            "message": message,
-        },
-    )
-
-
-def _coerce_protocol_input(raw_input: Any) -> dict[str, Any]:
-    if isinstance(raw_input, dict):
-        return raw_input
-    if isinstance(raw_input, str):
-        return {"message": raw_input}
-    return {"value": raw_input}
-
-
-@router.post("/{thread_id}/commands",summary="Protocol v2 Command​")
-async def handle_protocol_command(
-    thread_id: str,
-    payload: ProtocolCommandRequest,
-    user: User = Depends(get_current_user),
-) -> JSONResponse:
-    await _get_thread_row(thread_id=thread_id, user=user)
-
-    if payload.method == "run.start":
-        assistant_id = payload.params.get("assistant_id")
-        if not isinstance(assistant_id, str) or not assistant_id:
-            return _protocol_error(
-                request_id=payload.id,
-                code="invalid_argument",
-                message="'assistant_id' is required for run.start",
-                status_code=400,
-            )
-
-        try:
-            run = await prepare_and_submit_run(
-                thread_id=thread_id,
-                assistant_id=assistant_id,
-                payload=_coerce_protocol_input(payload.params.get("input")),
-                user=user,
-            )
-        except ValueError as exc:
-            return _protocol_error(request_id=payload.id, code="invalid_argument", message=str(exc), status_code=404)
-        except ActiveThreadRunConflictError as exc:
-            return _protocol_error(request_id=payload.id, code="thread_busy", message=str(exc), status_code=409)
-
-        return JSONResponse(
-            content={
-                "type": "success",
-                "id": payload.id,
-                "result": {"run_id": run.run_id},
-                "meta": {"applied_through_seq": thread_protocol_broker.latest_seq(thread_id)},
-            }
-        )
-
-    if payload.method == "input.respond":
-        interrupt_id = payload.params.get("interrupt_id")
-        if not isinstance(interrupt_id, str) or not interrupt_id:
-            return _protocol_error(
-                request_id=payload.id,
-                code="invalid_argument",
-                message="'interrupt_id' is required for input.respond",
-                status_code=400,
-            )
-
-        session_factory = db_manager.get_session_factory()
-        async with session_factory() as session:
-            run = await session.scalar(
-                select(Run)
-                .where(Run.thread_id == thread_id, Run.user_id == user.identity, Run.status == "interrupted")
-                .order_by(Run.created_at.desc())
-            )
-            if run is None:
-                return _protocol_error(
-                    request_id=payload.id,
-                    code="no_such_interrupt",
-                    message="No interrupted run found for this thread",
-                    status_code=404,
-                )
-            interrupts = run.output_json.get("interrupts") if isinstance(run.output_json, dict) else None
-            if not isinstance(interrupts, list) or not any(item.get("id") == interrupt_id for item in interrupts if isinstance(item, dict)):
-                return _protocol_error(
-                    request_id=payload.id,
-                    code="no_such_interrupt",
-                    message=f"Interrupt '{interrupt_id}' was not found",
-                    status_code=404,
-                )
-            run_id = run.run_id
-
-        try:
-            await resume_run(
-                thread_id=thread_id,
-                run_id=run_id,
-                resume=payload.params.get("response"),
-                user=user,
-            )
-        except ActiveThreadRunConflictError as exc:
-            return _protocol_error(request_id=payload.id, code="thread_busy", message=str(exc), status_code=409)
-        except (ValueError, RuntimeError) as exc:
-            return _protocol_error(request_id=payload.id, code="unknown_error", message=str(exc), status_code=409)
-
-        return JSONResponse(
-            content={
-                "type": "success",
-                "id": payload.id,
-                "result": {},
-                "meta": {"applied_through_seq": thread_protocol_broker.latest_seq(thread_id)},
-            }
-        )
-
-    return _protocol_error(
-        request_id=payload.id,
-        code="unknown_command",
-        message=f"Unsupported command '{payload.method}'",
-        status_code=400,
-    )
-
-
-@router.post("/{thread_id}/stream")
-@router.post("/{thread_id}/stream/events",summary="Protocol v2 Command​")
-async def stream_thread_protocol_events(
-    thread_id: str,
-    payload: ProtocolEventStreamRequest,
-    user: User = Depends(get_current_user),
-    last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
-) -> StreamingResponse:
-    header_since = parse_last_event_id(last_event_id) or 0
-    after_seq = max(header_since, payload.since or 0)
-    await _get_thread_row(thread_id=thread_id, user=user)
-
-    async def _event_iter() -> AsyncIterator[str]:
-        current_seq = after_seq
-        for event in await load_thread_stream_events(
-            thread_id,
-            channels=payload.channels,
-            namespaces=payload.namespaces,
-            depth=payload.depth,
-            after_seq=after_seq,
-        ):
-            seq = int(event.get("seq", 0))
-            current_seq = max(current_seq, seq)
-            method = str(event.get("method", "event"))
-            body = safe_json_dumps(event)
-            yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
-
-        if _uses_redis_executor():
-            async for event in iter_with_sse_keepalives(
-                _iter_persisted_thread_events(
-                    thread_id=thread_id,
-                    payload=payload,
-                    user_id=user.identity,
-                    after_seq=current_seq,
-                )
-            ):
-                if event is None:
-                    yield sse_keepalive_comment()
-                    continue
-                seq = int(event.get("seq", 0))
-                method = str(event.get("method", "event"))
-                body = safe_json_dumps(event)
-                yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
-            return
-
-        async for event in iter_with_sse_keepalives(
-            thread_protocol_broker.stream(
-                thread_id,
-                channels=payload.channels,
-                namespaces=payload.namespaces,
-                depth=payload.depth,
-                since=current_seq,
-            )
-        ):
-            if event is None:
-                yield sse_keepalive_comment()
-                continue
-            seq = int(event.get("seq", 0))
-            method = str(event.get("method", "event"))
-            body = safe_json_dumps(event)
-            yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
-
-    return StreamingResponse(_event_iter(), media_type="text/event-stream")
