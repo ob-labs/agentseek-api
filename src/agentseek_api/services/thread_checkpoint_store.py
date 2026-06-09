@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from copy import deepcopy
 from datetime import UTC, datetime
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 from langgraph.checkpoint.base import CheckpointTuple, create_checkpoint, empty_checkpoint
 from langgraph.types import Send

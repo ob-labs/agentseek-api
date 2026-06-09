@@ -350,14 +350,14 @@ def test_protocol_stream_replays_persisted_events_after_broker_state_is_cleared(
     )
     assert command.status_code == 200
 
-    first = client.post(f"/threads/{thread_id}/stream", json={"channels": ["lifecycle", "values"]})
+    first = client.post(f"/threads/{thread_id}/stream/events", json={"channels": ["lifecycle", "values"]})
     assert first.status_code == 200
     first_events = _parse_sse(first.text)
     first_event_id = first_events[0]["id"]
     thread_protocol_broker.delete_thread(thread_id)
 
     replay = client.post(
-        f"/threads/{thread_id}/stream",
+        f"/threads/{thread_id}/stream/events",
         json={"channels": ["lifecycle", "values"]},
         headers={"Last-Event-ID": str(first_event_id)},
     )
@@ -575,7 +575,7 @@ def test_protocol_events_are_persisted_when_published(client: TestClient) -> Non
     publish_values_event(thread_id, values={"early": True})
     thread_protocol_broker.delete_thread(thread_id)
 
-    replay = client.post(f"/threads/{thread_id}/stream", json={"channels": ["values"]})
+    replay = client.post(f"/threads/{thread_id}/stream/events", json={"channels": ["values"]})
 
     assert replay.status_code == 200
     replay_events = _parse_sse(replay.text)
@@ -602,7 +602,7 @@ def test_thread_run_stream_uses_monotonic_ids_across_multiple_runs(client: TestC
     assert second.status_code == 200
 
     first_stream = client.portal.call(
-        threads_api.stream_thread,
+        threads_api.join_thread_stream,
         thread_id,
         User(identity="default_user", is_authenticated=True),
         None,
@@ -626,7 +626,7 @@ def test_thread_run_stream_uses_monotonic_ids_across_multiple_runs(client: TestC
     assert third.status_code == 200
 
     replay_stream = client.portal.call(
-        threads_api.stream_thread,
+        threads_api.join_thread_stream,
         thread_id,
         User(identity="default_user", is_authenticated=True),
         str(first_run_last_id),

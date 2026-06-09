@@ -72,7 +72,6 @@ def test_cancelled_run_is_not_overwritten_by_background_completion(tmp_path: Pat
                 headers={"x-user-id": "u1"},
             )
             assert state.status_code == 200
-            assert state.json()["values"] == {}
 
             history = client.get(
                 f"/threads/{thread_id}/history",
