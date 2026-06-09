@@ -348,7 +348,7 @@ Useful config fields:
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP
 Store API and the injected LangGraph `BaseStore` runtime for TTL and semantic
-search. This repo uses the published `langchain-oceanbase==0.5.1` package from
+search. This repo uses the published `langchain-oceanbase==0.5.2` package from
 PyPI.
 
 Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
