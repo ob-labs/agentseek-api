@@ -522,7 +522,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
 
         manual_state = await client.post(
             f"/threads/{alpha_thread['thread_id']}/state",
-            json={"values": {"manual": True}},
+            json={"values": {"output": {"manual": True}}},
             headers=_user_headers(user_id),
         )
         assert manual_state.status_code == 200
@@ -533,7 +533,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
             headers=_user_headers(user_id),
         )
         assert manual_checkpoint.status_code == 200
-        assert manual_checkpoint.json()["values"]["manual"] is True
+        assert manual_checkpoint.json()["values"]["output"]["manual"] is True
 
         snapshotted = await client.post(
             f"/threads/{alpha_thread['thread_id']}/state/checkpoint",
@@ -542,7 +542,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         )
         assert snapshotted.status_code == 200
         assert snapshotted.json()["checkpoint"]["thread_id"] == alpha_thread["thread_id"]
-        assert snapshotted.json()["values"]["manual"] is True
+        assert snapshotted.json()["values"]["output"]["manual"] is True
 
         copied = await client.post(f"/threads/{alpha_thread['thread_id']}/copy", headers=_user_headers(user_id))
         assert copied.status_code == 200
@@ -576,7 +576,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         )
         second_manual = await client.post(
             f"/threads/{alpha_thread['thread_id']}/state",
-            json={"values": {"manual": "second"}},
+            json={"values": {"output": {"manual": "second"}}},
             headers=_user_headers(user_id),
         )
         assert second_manual.status_code == 200
@@ -592,7 +592,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         pruned_history = await client.get(f"/threads/{alpha_thread['thread_id']}/history", headers=_user_headers(user_id))
         assert pruned_history.status_code == 200
         assert len(pruned_history.json()) == 1
-        assert pruned_history.json()[0]["values"]["manual"] == "second"
+        assert pruned_history.json()[0]["values"]["output"]["manual"] == "second"
 
         async with client.stream("GET", f"/threads/{alpha_thread['thread_id']}/stream", headers=_user_headers(user_id)) as thread_stream:
             assert thread_stream.status_code == 200
