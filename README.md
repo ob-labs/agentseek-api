@@ -4,7 +4,6 @@
 
 > [!WARNING]
 > This project is under active development and is **not production-ready**.
-> LangSmith Studio connection is not yet available.
 > Pull requests for bug fixes and enhancements are warmly welcomed!
 
 Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
@@ -50,6 +49,76 @@ ships.
 ```bash
 uv sync
 ```
+
+### Configure seekdb embed as the default backend (recommended)
+
+The fastest way to get a real backend running locally is **seekdb embed** — an
+in-process SeekDB instance, no Docker or separate process required:
+
+```bash
+uv sync --dev --extra embedded
+```
+
+Then start the API with embedded mode enabled:
+
+```bash
+SEEKDB_EMBED=true uv run agentseek-api dev
+```
+
+Data is stored in `~/.agentseek/seekdb_data` by default. Set `SEEKDB_EMBED_DIR`
+to change the location.
+
+<details>
+<summary>Using a seekdb Docker container instead</summary>
+
+```bash
+docker run -d --name seekdb-dev \
+  -p 2881:2881 -p 2886:2886 \
+  oceanbase/seekdb:latest
+```
+
+Wait for the container to become healthy, then export:
+
+```bash
+export OCEANBASE_HOST=127.0.0.1
+export OCEANBASE_PORT=2881
+export OCEANBASE_USER=root
+export OCEANBASE_PASSWORD=
+export OCEANBASE_DB_NAME=seekdb
+```
+
+</details>
+
+<details>
+<summary>Using an OceanBase instance instead</summary>
+
+Start an OceanBase-CE container in mini mode:
+
+```bash
+docker run -d --name ob-dev \
+  -e MODE=mini \
+  -p 2881:2881 \
+  oceanbase/oceanbase-ce:latest
+```
+
+OceanBase-CE in mini mode takes a few minutes to initialize. Wait for readiness,
+then export:
+
+```bash
+export OCEANBASE_HOST=127.0.0.1
+export OCEANBASE_PORT=2881
+export OCEANBASE_USER=root@test
+export OCEANBASE_PASSWORD=
+export OCEANBASE_DB_NAME=seekdb
+```
+
+Create the database:
+
+```bash
+mysql -h 127.0.0.1 -P 2881 -u root@test -e "CREATE DATABASE IF NOT EXISTS seekdb"
+```
+
+</details>
 
 ### 2. Create a config file
 
@@ -279,7 +348,7 @@ Useful config fields:
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP
 Store API and the injected LangGraph `BaseStore` runtime for TTL and semantic
-search. This repo uses the published `langchain-oceanbase==0.5.0` package from
+search. This repo uses the published `langchain-oceanbase==0.5.2` package from
 PyPI.
 
 Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:

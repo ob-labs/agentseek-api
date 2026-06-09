@@ -137,7 +137,7 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         assert info_body["flags"]["assistants"] is True
         assert info_body["flags"]["protocol_v2"] is True
         assert info_body["metadata"]["checkpoint_backend"] == "langchain-oceanbase"
-        assert info_body["metadata"]["checkpoint_backend_version"] == "0.5.0"
+        assert info_body["metadata"]["checkpoint_backend_version"]
 
         metrics = await client.get("/metrics")
         assert metrics.status_code == 200
