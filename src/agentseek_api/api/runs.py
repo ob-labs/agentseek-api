@@ -17,7 +17,7 @@ from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
 from agentseek_api.models.auth import User
 from agentseek_api.api.threads import get_thread_state_internal
-from agentseek_api.services.langgraph_service import get_langgraph_service
+from agentseek_api.services.thread_checkpoint_store import snapshot_to_payload
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
@@ -167,11 +167,8 @@ async def _get_run_state(*, thread_id: str, run_id: str, user: User, checkpoint_
     if not graph_id:
         return None
 
-    entry = get_langgraph_service().get_entry(graph_id)
-    checkpointer = db_manager.get_langgraph_checkpointer()
-    graph = entry.build_graph(checkpointer)
-    if getattr(graph, "checkpointer", None) is None:
-        graph.checkpointer = checkpointer
+    from agentseek_api.api.threads import _build_compiled_graph
+    graph = _build_compiled_graph(graph_id)
 
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
     if checkpoint_id is not None:
@@ -182,8 +179,7 @@ async def _get_run_state(*, thread_id: str, run_id: str, user: User, checkpoint_
     snapshot = await graph.aget_state(config)
     if snapshot is None or snapshot.config is None:
         return None
-    from agentseek_api.api.threads import _snapshot_to_payload
-    return _snapshot_to_payload(snapshot, thread_id)
+    return snapshot_to_payload(snapshot, thread_id)
 
 
 async def _wait_response_payload(run: RunRead, *, user: User) -> Any:

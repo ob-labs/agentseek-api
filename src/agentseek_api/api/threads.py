@@ -44,6 +44,7 @@ from agentseek_api.services.thread_checkpoint_store import (
     copy_checkpoints,
     prune_checkpoints,
     put_checkpoint,
+    snapshot_to_payload,
 )
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.services.thread_service import create_thread_for_user, to_read_model
@@ -71,13 +72,16 @@ async def _best_effort_checkpointer_call(method_name: str, *args: object, **kwar
 
 logger = logging.getLogger(__name__)
 
-@functools.lru_cache(maxsize=None)
-def _build_compiled_graph(graph_id: str) -> Any:
+@functools.lru_cache(maxsize=64)
+def _build_compiled_graph_cached(graph_id: str) -> Any:
     entry = get_langgraph_service().get_entry(graph_id)
+    return entry.build_graph(checkpointer=None)
+
+
+def _build_compiled_graph(graph_id: str) -> Any:
+    graph = _build_compiled_graph_cached(graph_id)
     checkpointer = db_manager.get_langgraph_checkpointer()
-    graph = entry.build_graph(checkpointer)
-    if getattr(graph, "checkpointer", None) is None:
-        graph.checkpointer = checkpointer
+    graph.checkpointer = checkpointer
     return graph
 
 
@@ -504,11 +508,7 @@ async def get_thread_state_internal(
     if not graph_id:
         return None
 
-    entry = get_langgraph_service().get_entry(graph_id)
-    checkpointer = db_manager.get_langgraph_checkpointer()
-    graph = entry.build_graph(checkpointer)
-    if getattr(graph, "checkpointer", None) is None:
-        graph.checkpointer = checkpointer
+    graph = _build_compiled_graph(graph_id)
 
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
     if checkpoint_ns is not None:
@@ -518,7 +518,7 @@ async def get_thread_state_internal(
     if snapshot is None or snapshot.config is None:
         return None
 
-    return _snapshot_to_payload(snapshot, thread_id)
+    return snapshot_to_payload(snapshot, thread_id)
 
 
 @router.get("/{thread_id}/state")
@@ -531,7 +531,8 @@ async def get_thread_state(
     if subgraphs is True:
         raise HTTPException(status_code=422, detail="'subgraphs' is not supported yet")
 
-    state = await get_thread_state_internal(thread_id, user, checkpoint_ns=checkpoint_ns)
+    ns = checkpoint_ns if isinstance(checkpoint_ns, str) else None
+    state = await get_thread_state_internal(thread_id, user, checkpoint_ns=ns)
     if state is not None:
         return state
 
@@ -541,72 +542,6 @@ async def get_thread_state(
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
     return _empty_thread_state_payload(thread)
-
-
-def _snapshot_to_payload(snapshot: Any, thread_id: str) -> dict[str, object]:
-    """Convert a LangGraph StateSnapshot to the same dict format as checkpoint_to_payload."""
-    config = snapshot.config or {}
-    configurable = config.get("configurable", {})
-    checkpoint_id = str(configurable.get("checkpoint_id", ""))
-    checkpoint_ns = str(configurable.get("checkpoint_ns", ""))
-
-    parent_checkpoint = None
-    parent_checkpoint_id = None
-    if snapshot.parent_config is not None:
-        parent_configurable = snapshot.parent_config.get("configurable", {})
-        parent_checkpoint_id = str(parent_configurable.get("checkpoint_id", ""))
-        parent_checkpoint = {
-            "thread_id": str(parent_configurable.get("thread_id", thread_id)),
-            "checkpoint_ns": str(parent_configurable.get("checkpoint_ns", "")),
-            "checkpoint_id": parent_checkpoint_id,
-        }
-
-    metadata = dict(snapshot.metadata) if snapshot.metadata else {}
-
-    tasks = []
-    for task in (snapshot.tasks or ()):
-        tasks.append({
-            "id": task.id,
-            "name": task.name,
-            "path": list(task.path) if task.path else [],
-            "error": str(task.error) if task.error else None,
-            "interrupts": [{"value": getattr(i, "value", None)} for i in (task.interrupts or ())],
-            "checkpoint": None,
-            "state": None,
-            "result": task.result,
-        })
-
-    interrupts = []
-    for task in (snapshot.tasks or ()):
-        for interrupt in (task.interrupts or ()):
-            interrupts.append({"value": getattr(interrupt, "value", None)})
-
-    created_at = snapshot.created_at
-    if isinstance(created_at, str):
-        try:
-            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-        except ValueError:
-            pass
-
-    raw_values = _make_serializable(snapshot.values) if snapshot.values is not None else {}
-    values = _filter_internal_channels(raw_values) if isinstance(raw_values, dict) else raw_values
-
-    return {
-        "values": values,
-        "next": list(snapshot.next) if snapshot.next else [],
-        "tasks": tasks,
-        "checkpoint": {
-            "thread_id": thread_id,
-            "checkpoint_ns": checkpoint_ns,
-            "checkpoint_id": checkpoint_id,
-        },
-        "metadata": metadata,
-        "created_at": created_at,
-        "parent_checkpoint": parent_checkpoint,
-        "interrupts": interrupts,
-        "checkpoint_id": checkpoint_id,
-        "parent_checkpoint_id": parent_checkpoint_id,
-    }
 
 
 @router.get("/{thread_id}/history")
@@ -633,11 +568,7 @@ async def get_thread_history(
             )
         ).all()
 
-    entry = get_langgraph_service().get_entry(graph_id)
-    checkpointer = db_manager.get_langgraph_checkpointer()
-    graph = entry.build_graph(checkpointer)
-    if getattr(graph, "checkpointer", None) is None:
-        graph.checkpointer = checkpointer
+    graph = _build_compiled_graph(graph_id)
 
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
     history_kwargs: dict[str, Any] = {"limit": limit}
@@ -645,7 +576,7 @@ async def get_thread_history(
         history_kwargs["before"] = {"configurable": {"checkpoint_id": before}}
     payloads: list[dict[str, object]] = []
     async for snapshot in graph.aget_state_history(config, **history_kwargs):
-        payloads.append(_snapshot_to_payload(snapshot, thread_id))
+        payloads.append(snapshot_to_payload(snapshot, thread_id))
 
     return _visible_checkpoint_payloads(thread, runs, payloads)
 
@@ -675,11 +606,7 @@ async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str,
             return _empty_thread_state_payload(thread)
         raise HTTPException(status_code=404, detail="Checkpoint not found")
 
-    entry = get_langgraph_service().get_entry(graph_id)
-    checkpointer = db_manager.get_langgraph_checkpointer()
-    graph = entry.build_graph(checkpointer)
-    if getattr(graph, "checkpointer", None) is None:
-        graph.checkpointer = checkpointer
+    graph = _build_compiled_graph(graph_id)
 
     config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id}}
     snapshot = await graph.aget_state(config)
@@ -688,7 +615,7 @@ async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str,
             return _empty_thread_state_payload(thread)
         raise HTTPException(status_code=404, detail="Checkpoint not found")
 
-    return _snapshot_to_payload(snapshot, thread_id)
+    return snapshot_to_payload(snapshot, thread_id)
 
 
 @router.get("/{thread_id}/state/{checkpoint_id}")

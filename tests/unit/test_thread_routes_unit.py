@@ -81,8 +81,11 @@ class FakeSessionFactory:
         return FakeSessionContext(self.sessions.pop(0))
 
 
-def _thread(*, thread_id: str = "thread-1", user_id: str = "user-1", config=None, status: str = "idle") -> Thread:
-    row = Thread(user_id=user_id, metadata_json={"topic": "alpha"}, config_json=config or {}, status=status)
+def _thread(*, thread_id: str = "thread-1", user_id: str = "user-1", config=None, status: str = "idle", graph_id: str | None = None) -> Thread:
+    metadata = {"topic": "alpha"}
+    if graph_id is not None:
+        metadata["graph_id"] = graph_id
+    row = Thread(user_id=user_id, metadata_json=metadata, config_json=config or {}, status=status)
     row.thread_id = thread_id
     row.created_at = datetime.now(UTC)
     row.updated_at = row.created_at
@@ -135,6 +138,35 @@ def _checkpoint_payload_in_namespace(
     payload = _checkpoint_payload(thread, checkpoint_id, values=values)
     payload["checkpoint"]["checkpoint_ns"] = checkpoint_ns
     return payload
+
+
+class FakeSnapshot:
+    def __init__(self, *, thread_id: str, checkpoint_id: str, values=None, checkpoint_ns: str = "",
+                 parent_config=None, metadata=None, tasks=(), created_at=None, next=()):
+        self.config = {"configurable": {"thread_id": thread_id, "checkpoint_id": checkpoint_id, "checkpoint_ns": checkpoint_ns}}
+        self.parent_config = parent_config
+        self.values = values or {}
+        self.metadata = metadata or {}
+        self.tasks = tasks
+        self.created_at = created_at or datetime.now(UTC).isoformat()
+        self.next = next
+
+
+class FakeGraph:
+    def __init__(self, snapshots=None):
+        self._snapshots = snapshots or {}
+        self.checkpointer = None
+
+    async def aget_state(self, config):
+        configurable = config.get("configurable", {})
+        checkpoint_id = configurable.get("checkpoint_id")
+        checkpoint_ns = configurable.get("checkpoint_ns", "")
+        key = checkpoint_id or checkpoint_ns or "__default__"
+        return self._snapshots.get(key)
+
+    async def aget_state_history(self, config, **kwargs):
+        for snapshot in self._snapshots.values():
+            yield snapshot
 
 
 @pytest.mark.asyncio
@@ -204,21 +236,16 @@ async def test_update_thread_state_persists_checkpoint(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_get_thread_state_at_checkpoint_returns_checkpoint_payload(monkeypatch: pytest.MonkeyPatch) -> None:
-    thread = _thread()
+    thread = _thread(graph_id="test-graph")
     session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
-    async def fake_list_checkpoints(*_args, **_kwargs):
-        return ["checkpoint-token"]
-
-    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
-    monkeypatch.setattr(
-        "agentseek_api.api.threads.checkpoint_to_payload",
-        lambda _checkpoint: _checkpoint_payload(thread, "cp-1", values={"manual": True}),
-    )
+    snapshot = FakeSnapshot(thread_id=thread.thread_id, checkpoint_id="cp-1", values={"manual": True})
+    fake_graph = FakeGraph(snapshots={"cp-1": snapshot})
+    monkeypatch.setattr("agentseek_api.api.threads._build_compiled_graph", lambda _gid: fake_graph)
 
     payload = await threads_module.get_thread_state_at_checkpoint(
         thread.thread_id,
@@ -232,17 +259,15 @@ async def test_get_thread_state_at_checkpoint_returns_checkpoint_payload(monkeyp
 async def test_get_thread_state_at_checkpoint_returns_empty_payload_for_synthetic_checkpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    thread = _thread()
+    thread = _thread(graph_id="test-graph")
     session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
-    async def fake_list_checkpoints(*_args, **_kwargs):
-        return []
-
-    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
+    fake_graph = FakeGraph(snapshots={})
+    monkeypatch.setattr("agentseek_api.api.threads._build_compiled_graph", lambda _gid: fake_graph)
 
     payload = await threads_module.get_thread_state_at_checkpoint(
         thread.thread_id,
@@ -258,25 +283,20 @@ async def test_get_thread_state_at_checkpoint_returns_empty_payload_for_syntheti
 async def test_get_thread_state_prefers_latest_checkpoint_when_store_order_varies(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    thread = _thread()
-    old_payload = _checkpoint_payload(thread, "cp-old", values={"manual": "old"})
-    old_payload["created_at"] = datetime(2026, 1, 1, tzinfo=UTC)
-    new_payload = _checkpoint_payload(thread, "cp-new", values={"manual": "new"})
-    new_payload["created_at"] = datetime(2026, 1, 2, tzinfo=UTC)
+    thread = _thread(graph_id="test-graph")
     session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
-    async def fake_list_checkpoints(*_args, **_kwargs):
-        return ["old", "new"]
-
-    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
-    monkeypatch.setattr(
-        "agentseek_api.api.threads.checkpoint_to_payload",
-        lambda token: old_payload if token == "old" else new_payload,
+    snapshot = FakeSnapshot(
+        thread_id=thread.thread_id,
+        checkpoint_id="cp-new",
+        values={"manual": "new"},
     )
+    fake_graph = FakeGraph(snapshots={"__default__": snapshot})
+    monkeypatch.setattr("agentseek_api.api.threads._build_compiled_graph", lambda _gid: fake_graph)
 
     payload = await threads_module.get_thread_state(
         thread.thread_id,
@@ -288,41 +308,26 @@ async def test_get_thread_state_prefers_latest_checkpoint_when_store_order_varie
 
 
 @pytest.mark.asyncio
-async def test_get_thread_state_payload_filters_to_requested_checkpoint_namespace(
+async def test_get_thread_state_internal_filters_to_requested_checkpoint_namespace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    thread = _thread()
-    session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
+    thread = _thread(graph_id="test-graph")
+    session = FakeSession(scalar_rows=[thread])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
-    other_payload = _checkpoint_payload_in_namespace(
-        thread,
-        "cp-other",
-        checkpoint_ns="run-other",
-        values={"output": {"echo": {"message": "other"}}},
-    )
-    other_payload["created_at"] = datetime(2026, 1, 2, tzinfo=UTC)
-    target_payload = _checkpoint_payload_in_namespace(
-        thread,
-        "cp-target",
+    target_snapshot = FakeSnapshot(
+        thread_id=thread.thread_id,
+        checkpoint_id="cp-target",
         checkpoint_ns="run-target",
         values={"output": {"echo": {"message": "target"}}},
     )
-    target_payload["created_at"] = datetime(2026, 1, 1, tzinfo=UTC)
+    fake_graph = FakeGraph(snapshots={"run-target": target_snapshot})
+    monkeypatch.setattr("agentseek_api.api.threads._build_compiled_graph", lambda _gid: fake_graph)
 
-    async def fake_list_checkpoints(*_args, **_kwargs):
-        return ["other", "target"]
-
-    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
-    monkeypatch.setattr(
-        "agentseek_api.api.threads.checkpoint_to_payload",
-        lambda token: other_payload if token == "other" else target_payload,
-    )
-
-    payload = await threads_module._get_thread_state_payload(
+    payload = await threads_module.get_thread_state_internal(
         thread_id=thread.thread_id,
         user=User(identity=thread.user_id, is_authenticated=True),
         checkpoint_ns="run-target",
@@ -386,17 +391,15 @@ async def test_patch_copy_and_delete_thread_routes_cover_new_paths(monkeypatch: 
 
 @pytest.mark.asyncio
 async def test_get_thread_state_at_checkpoint_raises_when_missing(monkeypatch: pytest.MonkeyPatch) -> None:
-    thread = _thread()
+    thread = _thread(graph_id="test-graph")
     session = FakeSession(scalar_rows=[thread], scalars_rows=[[]])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
         lambda: FakeSessionFactory([session]),
     )
 
-    async def fake_list_checkpoints(*_args, **_kwargs):
-        return []
-
-    monkeypatch.setattr("agentseek_api.api.threads.list_checkpoints", fake_list_checkpoints)
+    fake_graph = FakeGraph(snapshots={})
+    monkeypatch.setattr("agentseek_api.api.threads._build_compiled_graph", lambda _gid: fake_graph)
 
     with pytest.raises(HTTPException, match="Checkpoint not found") as error:
         await threads_module.get_thread_state_at_checkpoint(
