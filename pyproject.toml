@@ -45,6 +45,7 @@ dev = [
     "ruff>=0.6.0",
     "a2a-sdk>=1.0.3",
     "langgraph-cli[inmem]",
+    "deepagents>=0.6.8",
 ]
 
 [build-system]

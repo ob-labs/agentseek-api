@@ -693,11 +693,11 @@ def test_create_run_wait_preserves_non_dict_values(client: TestClient, monkeypat
     async def fake_create_run(*args, **kwargs):
         return created
 
-    async def fake_get_thread_state(*args, **kwargs):
+    async def fake_get_run_state(*args, **kwargs):
         return {"values": ["one", "two"]}
 
     monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
-    monkeypatch.setattr("agentseek_api.api.runs.get_thread_state", fake_get_thread_state)
+    monkeypatch.setattr("agentseek_api.api.runs._get_run_state", fake_get_run_state)
 
     response = client.post(
         f"/threads/{thread_id}/runs/wait",
@@ -727,15 +727,11 @@ def test_create_run_wait_preserves_empty_run_scoped_values(client: TestClient, m
     async def fake_create_run(*args, **kwargs):
         return created
 
-    async def fake_find_thread_state_payload(*args, **kwargs):
+    async def fake_get_run_state(*args, **kwargs):
         return {"values": {}}
 
-    async def fake_get_thread_state(*args, **kwargs):
-        raise AssertionError("empty run-scoped state must not fall back to latest thread state")
-
     monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
-    monkeypatch.setattr("agentseek_api.api.runs._find_thread_state_payload", fake_find_thread_state_payload)
-    monkeypatch.setattr("agentseek_api.api.runs.get_thread_state", fake_get_thread_state)
+    monkeypatch.setattr("agentseek_api.api.runs._get_run_state", fake_get_run_state)
 
     response = client.post(
         f"/threads/{thread_id}/runs/wait",
@@ -765,12 +761,12 @@ def test_create_run_wait_json_encodes_langchain_messages(client: TestClient, mon
     async def fake_create_run(*args, **kwargs):
         return created
 
-    async def fake_get_thread_state(*args, **kwargs):
+    async def fake_get_run_state(*args, **kwargs):
         return {"values": {"messages": [HumanMessage(content="hello from state")]}}
 
     monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
     monkeypatch.setattr("agentseek_api.api.stateless_runs.create_run", fake_create_run)
-    monkeypatch.setattr("agentseek_api.api.runs.get_thread_state", fake_get_thread_state)
+    monkeypatch.setattr("agentseek_api.api.runs._get_run_state", fake_get_run_state)
 
     response = client.post(
         f"/threads/{thread_id}/runs/wait",

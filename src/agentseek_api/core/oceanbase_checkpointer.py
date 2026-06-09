@@ -1,4 +1,3 @@
-import json
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -7,6 +6,8 @@ import pymysql
 from pymysql.connections import Connection
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
+
+from agentseek_api.services.sse import safe_json_dumps
 
 
 class OceanBaseCheckpointSaver:
@@ -89,7 +90,7 @@ class OceanBaseCheckpointSaver:
                     {
                         "thread_id": thread_id,
                         "run_id": run_id,
-                        "checkpoint": json.dumps(payload),
+                        "checkpoint": safe_json_dumps(payload),
                         "created_at": datetime.now(UTC).replace(tzinfo=None),
                     },
                 )
@@ -101,5 +102,5 @@ class OceanBaseCheckpointSaver:
                         INSERT INTO agentseek_checkpoints (thread_id, run_id, checkpoint, created_at)
                         VALUES (%s, %s, %s, %s)
                         """,
-                        (thread_id, run_id, json.dumps(payload), datetime.now(UTC).replace(tzinfo=None)),
+                        (thread_id, run_id, safe_json_dumps(payload), datetime.now(UTC).replace(tzinfo=None)),
                     )

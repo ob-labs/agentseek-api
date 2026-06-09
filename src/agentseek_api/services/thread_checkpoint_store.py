@@ -209,6 +209,72 @@ def checkpoint_to_payload(checkpoint_tuple: CheckpointTuple) -> dict[str, Any]:
     }
 
 
+def snapshot_to_payload(snapshot: Any, thread_id: str) -> dict[str, Any]:
+    """Convert a LangGraph StateSnapshot to the same dict format as checkpoint_to_payload."""
+    config = snapshot.config or {}
+    configurable = config.get("configurable", {})
+    checkpoint_id = str(configurable.get("checkpoint_id", ""))
+    checkpoint_ns = str(configurable.get("checkpoint_ns", ""))
+
+    parent_checkpoint = None
+    parent_checkpoint_id = None
+    if snapshot.parent_config is not None:
+        parent_configurable = snapshot.parent_config.get("configurable", {})
+        parent_checkpoint_id = str(parent_configurable.get("checkpoint_id", ""))
+        parent_checkpoint = {
+            "thread_id": str(parent_configurable.get("thread_id", thread_id)),
+            "checkpoint_ns": str(parent_configurable.get("checkpoint_ns", "")),
+            "checkpoint_id": parent_checkpoint_id,
+        }
+
+    metadata = dict(snapshot.metadata) if snapshot.metadata else {}
+
+    tasks = []
+    for task in (snapshot.tasks or ()):
+        tasks.append({
+            "id": task.id,
+            "name": task.name,
+            "path": list(task.path) if task.path else [],
+            "error": str(task.error) if task.error else None,
+            "interrupts": [{"value": getattr(i, "value", None)} for i in (task.interrupts or ())],
+            "checkpoint": None,
+            "state": None,
+            "result": task.result,
+        })
+
+    interrupts = []
+    for task in (snapshot.tasks or ()):
+        for interrupt in (task.interrupts or ()):
+            interrupts.append({"value": getattr(interrupt, "value", None)})
+
+    created_at = snapshot.created_at
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
+    raw_values = _make_serializable(snapshot.values) if snapshot.values is not None else {}
+    values = _filter_internal_channels(raw_values) if isinstance(raw_values, dict) else raw_values
+
+    return {
+        "values": values,
+        "next": list(snapshot.next) if snapshot.next else [],
+        "tasks": tasks,
+        "checkpoint": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_id": checkpoint_id,
+        },
+        "metadata": metadata,
+        "created_at": created_at,
+        "parent_checkpoint": parent_checkpoint,
+        "interrupts": interrupts,
+        "checkpoint_id": checkpoint_id,
+        "parent_checkpoint_id": parent_checkpoint_id,
+    }
+
+
 async def get_latest_checkpoint(thread_id: str) -> CheckpointTuple | None:
     return await db_manager.get_langgraph_checkpointer().aget_tuple(_config(thread_id))
 

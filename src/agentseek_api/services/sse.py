@@ -1,12 +1,33 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
-from typing import TypeVar
+from datetime import datetime
+from typing import Any, TypeVar
+from uuid import UUID
 
 T = TypeVar("T")
 
 DEFAULT_SSE_KEEPALIVE_INTERVAL_SECONDS = 15.0
+
+
+def _langchain_json_default(obj: Any) -> Any:
+    if hasattr(obj, "model_dump") and callable(obj.model_dump):
+        return obj.model_dump()
+    if isinstance(obj, datetime):
+        return obj.isoformat()
+    if isinstance(obj, UUID):
+        return str(obj)
+    if isinstance(obj, bytes):
+        return obj.decode("utf-8", errors="replace")
+    if isinstance(obj, (set, frozenset)):
+        return list(obj)
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+
+def safe_json_dumps(obj: Any, **kwargs: Any) -> str:
+    return json.dumps(obj, default=_langchain_json_default, **kwargs)
 
 
 def sse_keepalive_comment() -> str:

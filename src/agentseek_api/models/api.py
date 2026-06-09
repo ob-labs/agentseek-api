@@ -145,6 +145,7 @@ class ThreadPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metadata: dict[str, Any] | None = None
+    ttl: "ThreadTTL | None" = None
 
 
 class ThreadCountRequest(BaseModel):
@@ -212,6 +213,15 @@ class ThreadState(BaseModel):
     created_at: str | datetime
     parent_checkpoint: dict[str, Any] | None = None
     interrupts: list[Interrupt] | None = None
+
+
+class ThreadStateSearch(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    limit: int = Field(default=1, ge=1, le=1000)
+    before: CheckpointConfig | None = None
+    metadata: dict[str, Any] | None = None
+    checkpoint: CheckpointConfig | None = None
 
 
 RunStreamMode = Literal[

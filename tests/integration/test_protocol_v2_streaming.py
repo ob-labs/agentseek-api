@@ -54,7 +54,7 @@ def test_protocol_run_start_replays_messages_tools_values_and_lifecycle(client: 
     assert command_body["result"]["run_id"]
 
     stream = client.post(
-        f"/threads/{thread_id}/stream",
+        f"/threads/{thread_id}/stream/events",
         json={"channels": ["lifecycle", "messages", "tools", "values"]},
     )
     assert stream.status_code == 200
@@ -84,7 +84,7 @@ def test_protocol_run_start_replays_messages_tools_values_and_lifecycle(client: 
 
     last_seq = int([event for event in events if event["event"] == "values"][-1]["id"])
     replay = client.post(
-        f"/threads/{thread_id}/stream",
+        f"/threads/{thread_id}/stream/events",
         json={"channels": ["values"], "since": last_seq - 1},
     )
     assert replay.status_code == 200
@@ -167,7 +167,7 @@ def test_protocol_input_respond_resumes_interrupted_run(client: TestClient) -> N
     run_id = command.json()["result"]["run_id"]
 
     interrupted_stream = client.post(
-        f"/threads/{thread_id}/stream",
+        f"/threads/{thread_id}/stream/events",
         json={"channels": ["lifecycle", "input", "values"]},
     )
     assert interrupted_stream.status_code == 200
@@ -200,7 +200,7 @@ def test_protocol_input_respond_resumes_interrupted_run(client: TestClient) -> N
     assert respond.json()["id"] == 11
 
     resumed_stream = client.post(
-        f"/threads/{thread_id}/stream",
+        f"/threads/{thread_id}/stream/events",
         json={"channels": ["lifecycle", "values"], "since": last_seq},
     )
     assert resumed_stream.status_code == 200
@@ -240,7 +240,7 @@ def test_protocol_input_respond_maps_resume_conflict_to_thread_busy(client: Test
     assert command.status_code == 200
 
     interrupted_stream = client.post(
-        f"/threads/{thread_id}/stream",
+        f"/threads/{thread_id}/stream/events",
         json={"channels": ["input"]},
     )
     assert interrupted_stream.status_code == 200
@@ -251,7 +251,7 @@ def test_protocol_input_respond_maps_resume_conflict_to_thread_busy(client: Test
     async def fail_resume(**_kwargs) -> None:
         raise ActiveThreadRunConflictError("Another run is already active for this thread")
 
-    monkeypatch.setattr("agentseek_api.api.threads.resume_run", fail_resume)
+    monkeypatch.setattr("agentseek_api.api.streaming.resume_run", fail_resume)
 
     response = client.post(
         f"/threads/{thread_id}/commands",

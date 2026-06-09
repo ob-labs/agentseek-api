@@ -166,29 +166,29 @@ def test_checkpoint_state_thread_stream_and_protocol_endpoints(client: TestClien
     assert checkpoint_state.status_code == 200
     assert checkpoint_state.json()["checkpoint"]["checkpoint_id"] == checkpoint_id
 
-    updated_state = client.post(f"/threads/{thread_id}/state", json={"values": {"manual": True}})
+    updated_state = client.post(f"/threads/{thread_id}/state", json={"values": {"input": {"manual": True}}})
     assert updated_state.status_code == 200
-    assert updated_state.json()["values"]["manual"] is True
+    assert updated_state.json()["values"]["input"] == {"manual": True}
     manual_checkpoint_id = updated_state.json()["checkpoint"]["checkpoint_id"]
 
     latest_state = client.get(f"/threads/{thread_id}/state")
     assert latest_state.status_code == 200
-    assert latest_state.json()["values"]["manual"] is True
+    assert latest_state.json()["values"]["input"] == {"manual": True}
 
     manual_checkpoint = client.post(
         f"/threads/{thread_id}/state/checkpoint",
         json={"checkpoint_id": manual_checkpoint_id},
     )
     assert manual_checkpoint.status_code == 200
-    assert manual_checkpoint.json()["values"]["manual"] is True
+    assert manual_checkpoint.json()["values"]["input"] == {"manual": True}
 
     checkpointed = client.get(f"/threads/{thread_id}/state/{manual_checkpoint_id}")
     assert checkpointed.status_code == 200
     assert checkpointed.json()["checkpoint"]["thread_id"] == thread_id
-    assert checkpointed.json()["values"]["manual"] is True
+    assert checkpointed.json()["values"]["input"] == {"manual": True}
 
     thread_stream = client.portal.call(
-        threads_api.stream_thread,
+        threads_api.join_thread_stream,
         thread_id,
         User(identity="default_user", is_authenticated=True),
         None,
@@ -240,7 +240,7 @@ def test_thread_stream_stays_live_for_future_runs(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)
     response = client.portal.call(
-        threads_api.stream_thread,
+        threads_api.join_thread_stream,
         thread_id,
         User(identity="default_user", is_authenticated=True),
         None,
