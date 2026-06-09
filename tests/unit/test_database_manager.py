@@ -259,3 +259,51 @@ def test_resolve_metadata_db_url_raises_on_unknown_backend(monkeypatch: pytest.M
 
     with pytest.raises(ValueError, match="Unsupported METADATA_DB_BACKEND"):
         resolve_metadata_db_url()
+
+
+@pytest.mark.asyncio
+async def test_initialize_uses_embedded_seekdb_when_seekdb_embed_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    captured_checkpointer_args: list[dict] = []
+    captured_store_args: list[dict] = []
+
+    class FakeCheckpointer:
+        def __init__(self, connection_args: dict[str, str]) -> None:
+            captured_checkpointer_args.append(connection_args)
+
+        def setup(self) -> None:
+            return None
+
+    class FakeStore:
+        def __init__(self, connection_args: dict[str, str], **_kwargs) -> None:
+            captured_store_args.append(connection_args)
+
+        def setup(self) -> None:
+            return None
+
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr("agentseek_api.core.database.LangGraphOceanBaseCheckpointSaver", FakeCheckpointer)
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseStore", FakeStore)
+    monkeypatch.setattr("agentseek_api.core.database._ensure_embed_database", lambda *_args: None)
+    monkeypatch.setattr(settings, "SEEKDB_EMBED", True)
+    monkeypatch.setattr(settings, "SEEKDB_EMBED_DIR", str(tmp_path / "embed_data"))
+    monkeypatch.setattr(settings, "OCEANBASE_DB_NAME", "testdb")
+
+    manager = DatabaseManager()
+    await manager.initialize()
+
+    assert len(captured_checkpointer_args) == 2
+    assert captured_checkpointer_args[0]["path"] == str(tmp_path / "embed_data")
+    assert captured_checkpointer_args[0]["db_name"] == "testdb"
+    assert "host" not in captured_checkpointer_args[0]
+
+    assert len(captured_store_args) == 1
+    assert captured_store_args[0]["path"] == str(tmp_path / "embed_data")
+    assert captured_store_args[0]["db_name"] == "testdb"
+
+    assert (tmp_path / "embed_data").is_dir()
+    assert (tmp_path / "embed_data" / "metadata.db").exists()
+
+    await manager.close()

@@ -1,5 +1,8 @@
 import asyncio
+import logging
+import os
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from langgraph.checkpoint.memory import InMemorySaver
@@ -14,7 +17,38 @@ from agentseek_api.core.runtime_store import SqliteStore
 from agentseek_api.core.store_config import load_store_config
 from agentseek_api.settings import settings
 
+logger = logging.getLogger(__name__)
+
 DEFAULT_SEEKDB_URL = "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
+
+
+def _resolve_embed_dir() -> str:
+    raw = settings.SEEKDB_EMBED_DIR
+    if raw:
+        path = Path(raw).expanduser().resolve()
+    else:
+        path = Path.home() / ".agentseek" / "seekdb_data"
+    os.makedirs(path, exist_ok=True)
+    return str(path)
+
+
+def _ensure_embed_database(embed_dir: str, db_name: str) -> None:
+    """Bootstrap the target database inside embedded seekdb.
+
+    Embedded seekdb ships with a ``test`` database only.  Connect to it first,
+    run ``CREATE DATABASE IF NOT EXISTS``, then disconnect.
+    """
+    from pyobvector import ObVecClient  # type: ignore[import-untyped]
+    from sqlalchemy import text as sa_text
+
+    bootstrap = ObVecClient(path=embed_dir, db_name="test")
+    try:
+        with bootstrap.engine.connect() as conn:
+            conn.execute(sa_text(f"CREATE DATABASE IF NOT EXISTS `{db_name}`"))
+            conn.commit()
+        logger.info("Embedded seekdb: ensured database '%s' exists", db_name)
+    finally:
+        bootstrap.engine.dispose()
 
 
 class NullStore:
@@ -122,39 +156,66 @@ class DatabaseManager:
     async def initialize(self) -> None:
         if self.engine is not None:
             return
-        metadata_db_url = resolve_metadata_db_url()
-        parsed_url = make_url(_resolve_base_metadata_url())
-        metadata_backend = _resolve_metadata_backend(
-            configured_backend=settings.METADATA_DB_BACKEND,
-            url_drivername=parsed_url.drivername,
-        )
+
+        embed_mode = settings.SEEKDB_EMBED
         store_config = load_store_config(agentseek_graphs=settings.AGENTSEEK_GRAPHS)
         runtime_index = store_config.index.to_runtime_config()
         runtime_ttl = store_config.ttl.to_runtime_config()
-        self.engine = create_async_engine(metadata_db_url, pool_pre_ping=metadata_backend != "mysql")
-        self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
-        async with self.engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        conn_args = _resolve_connection_args()
-        self._checkpointer = OceanBaseCheckpointSaver(
-            connection_args=conn_args
-        )
-        if metadata_backend == "sqlite":
-            self._langgraph_checkpointer = InMemorySaver()
-            self._store = SqliteStore(
-                url=metadata_db_url,
+
+        if embed_mode:
+            embed_dir = _resolve_embed_dir()
+            db_name = settings.OCEANBASE_DB_NAME
+            await asyncio.to_thread(_ensure_embed_database, embed_dir, db_name)
+            metadata_db_path = os.path.join(embed_dir, "metadata.db")
+            metadata_db_url = f"sqlite+aiosqlite:///{metadata_db_path}"
+            self.engine = create_async_engine(metadata_db_url, pool_pre_ping=False)
+            self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            embed_conn_args = {"path": embed_dir, "db_name": settings.OCEANBASE_DB_NAME}
+            self._checkpointer = OceanBaseCheckpointSaver(
+                connection_args=embed_conn_args
+            )
+            self._langgraph_checkpointer = LangGraphOceanBaseCheckpointSaver(
+                connection_args=embed_conn_args
+            )
+            self._store = OceanBaseStore(
+                connection_args=embed_conn_args,
                 index=runtime_index,
                 ttl_config=runtime_ttl,
             )
         else:
-            self._langgraph_checkpointer = LangGraphOceanBaseCheckpointSaver(
+            metadata_db_url = resolve_metadata_db_url()
+            parsed_url = make_url(_resolve_base_metadata_url())
+            metadata_backend = _resolve_metadata_backend(
+                configured_backend=settings.METADATA_DB_BACKEND,
+                url_drivername=parsed_url.drivername,
+            )
+            self.engine = create_async_engine(metadata_db_url, pool_pre_ping=metadata_backend != "mysql")
+            self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
+            async with self.engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            conn_args = _resolve_connection_args()
+            self._checkpointer = OceanBaseCheckpointSaver(
                 connection_args=conn_args
             )
-            self._store = OceanBaseStore(
-                connection_args=conn_args,
-                index=runtime_index,
-                ttl_config=runtime_ttl,
-            )
+            if metadata_backend == "sqlite":
+                self._langgraph_checkpointer = InMemorySaver()
+                self._store = SqliteStore(
+                    url=metadata_db_url,
+                    index=runtime_index,
+                    ttl_config=runtime_ttl,
+                )
+            else:
+                self._langgraph_checkpointer = LangGraphOceanBaseCheckpointSaver(
+                    connection_args=conn_args
+                )
+                self._store = OceanBaseStore(
+                    connection_args=conn_args,
+                    index=runtime_index,
+                    ttl_config=runtime_ttl,
+                )
+
         await self._setup_checkpointer_once()
         await self._setup_langgraph_checkpointer_once()
         await self._setup_store_once()
