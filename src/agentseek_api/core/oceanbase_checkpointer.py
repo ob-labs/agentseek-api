@@ -46,5 +46,5 @@ class OceanBaseCheckpointSaver:
                     INSERT INTO agentseek_checkpoints (thread_id, run_id, checkpoint, created_at)
                     VALUES (%s, %s, %s, %s)
                     """,
-                    (thread_id, run_id, json.dumps(payload), datetime.now(UTC).replace(tzinfo=None)),
+                    (thread_id, run_id, json.dumps(payload, default=lambda o: o.model_dump() if hasattr(o, "model_dump") else str(o)), datetime.now(UTC).replace(tzinfo=None)),
                 )

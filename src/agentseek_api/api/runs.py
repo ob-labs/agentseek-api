@@ -29,7 +29,7 @@ from agentseek_api.services.stream_persistence import (
     load_run_stream_events,
     parse_last_event_id,
 )
-from agentseek_api.services.sse import iter_with_sse_keepalives, sse_keepalive_comment
+from agentseek_api.services.sse import iter_with_sse_keepalives, safe_json_dumps, sse_keepalive_comment
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.settings import settings
 
@@ -328,7 +328,7 @@ _SSE_EVENT_NAME_MAP: dict[str, str] = {
 def _protocol_event_sse(*, event_name: str, data: Any, seq: int | None = None) -> str:
     prefix = f"id: {seq}\n" if seq is not None else ""
     wire_name = _SSE_EVENT_NAME_MAP.get(event_name, event_name)
-    return f"{prefix}event: {wire_name}\ndata: {json.dumps(data)}\n\n"
+    return f"{prefix}event: {wire_name}\ndata: {safe_json_dumps(data)}\n\n"
 
 
 def _build_create_run_stream_response(
@@ -827,7 +827,7 @@ async def stream_run(
             current_seq = max(current_seq, seq)
             event_name = str(event.get("event", "message"))
             event_payload: dict[str, object] = {"run_id": run_id, **event}
-            payload = json.dumps(event_payload)
+            payload = safe_json_dumps(event_payload)
             yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
 
         if use_redis_executor:
@@ -845,7 +845,7 @@ async def stream_run(
                 seq, event = item
                 event_name = str(event.get("event", "message"))
                 event_payload = {"run_id": run_id, **event}
-                yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
+                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
             return
 
         if row.status in TERMINAL_RUN_STATUSES:
@@ -858,7 +858,7 @@ async def stream_run(
             seq, event = item
             event_name = str(event.get("event", "message"))
             event_payload = {"run_id": run_id, **event}
-            yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event_payload)}\n\n"
+            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
 
     return StreamingResponse(
         _event_iter(),

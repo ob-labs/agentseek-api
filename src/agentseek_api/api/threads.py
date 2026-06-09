@@ -2,7 +2,6 @@ import asyncio
 import logging
 from copy import deepcopy
 from datetime import UTC, datetime
-import json
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -28,7 +27,7 @@ from agentseek_api.services.stream_persistence import (
     load_thread_stream_events,
     parse_last_event_id,
 )
-from agentseek_api.services.sse import iter_with_sse_keepalives, sse_keepalive_comment
+from agentseek_api.services.sse import iter_with_sse_keepalives, safe_json_dumps, sse_keepalive_comment
 from agentseek_api.services.thread_checkpoint_store import (
     checkpoint_to_payload,
     copy_checkpoints,
@@ -36,6 +35,7 @@ from agentseek_api.services.thread_checkpoint_store import (
     put_checkpoint,
     prune_checkpoints,
 )
+from agentseek_api.services.langgraph_service import get_langgraph_service
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.services.thread_service import create_thread_for_user, to_read_model
 from agentseek_api.settings import settings
@@ -401,7 +401,11 @@ async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_cu
 
 
 @router.get("/{thread_id}", response_model=ThreadRead, response_model_exclude_none=True)
-async def get_thread(thread_id: str, user: User = Depends(get_current_user)) -> ThreadRead:
+async def get_thread(
+    thread_id: str,
+    include: list[str] | None = Query(None, description="Additional fields to include (e.g. 'ttl')"),
+    user: User = Depends(get_current_user),
+) -> ThreadRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
@@ -513,6 +517,69 @@ async def get_thread_state(
     return await _get_thread_state_payload(thread_id=thread_id, user=user, checkpoint_ns=ns)
 
 
+def _snapshot_to_payload(snapshot: Any, thread_id: str) -> dict[str, object]:
+    """Convert a LangGraph StateSnapshot to the same dict format as checkpoint_to_payload."""
+    config = snapshot.config or {}
+    configurable = config.get("configurable", {})
+    checkpoint_id = str(configurable.get("checkpoint_id", ""))
+    checkpoint_ns = str(configurable.get("checkpoint_ns", ""))
+
+    parent_checkpoint = None
+    parent_checkpoint_id = None
+    if snapshot.parent_config is not None:
+        parent_configurable = snapshot.parent_config.get("configurable", {})
+        parent_checkpoint_id = str(parent_configurable.get("checkpoint_id", ""))
+        parent_checkpoint = {
+            "thread_id": str(parent_configurable.get("thread_id", thread_id)),
+            "checkpoint_ns": str(parent_configurable.get("checkpoint_ns", "")),
+            "checkpoint_id": parent_checkpoint_id,
+        }
+
+    metadata = dict(snapshot.metadata) if snapshot.metadata else {}
+
+    tasks = []
+    for task in (snapshot.tasks or ()):
+        tasks.append({
+            "id": task.id,
+            "name": task.name,
+            "path": list(task.path) if task.path else [],
+            "error": str(task.error) if task.error else None,
+            "interrupts": [{"value": getattr(i, "value", None)} for i in (task.interrupts or ())],
+            "checkpoint": None,
+            "state": None,
+            "result": task.result,
+        })
+
+    interrupts = []
+    for task in (snapshot.tasks or ()):
+        for interrupt in (task.interrupts or ()):
+            interrupts.append({"value": getattr(interrupt, "value", None)})
+
+    created_at = snapshot.created_at
+    if isinstance(created_at, str):
+        try:
+            created_at = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+        except ValueError:
+            pass
+
+    return {
+        "values": snapshot.values if snapshot.values is not None else {},
+        "next": list(snapshot.next) if snapshot.next else [],
+        "tasks": tasks,
+        "checkpoint": {
+            "thread_id": thread_id,
+            "checkpoint_ns": checkpoint_ns,
+            "checkpoint_id": checkpoint_id,
+        },
+        "metadata": metadata,
+        "created_at": created_at,
+        "parent_checkpoint": parent_checkpoint,
+        "interrupts": interrupts,
+        "checkpoint_id": checkpoint_id,
+        "parent_checkpoint_id": parent_checkpoint_id,
+    }
+
+
 @router.get("/{thread_id}/history")
 async def get_thread_history(thread_id: str, user: User = Depends(get_current_user)) -> list[dict[str, object]]:
     session_factory = db_manager.get_session_factory()
@@ -520,16 +587,30 @@ async def get_thread_history(thread_id: str, user: User = Depends(get_current_us
         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
+
+        graph_id = (thread.metadata_json or {}).get("graph_id")
+        if not graph_id:
+            logger.info(f"history: no graph_id for thread {thread_id}")
+            return []
+
         runs = (
             await session.scalars(
                 select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
             )
         ).all()
-    return _visible_checkpoint_payloads(
-        thread,
-        runs,
-        [checkpoint_to_payload(item) for item in await list_checkpoints(thread_id)],
-    )
+
+    entry = get_langgraph_service().get_entry(graph_id)
+    checkpointer = db_manager.get_langgraph_checkpointer()
+    graph = entry.build_graph(checkpointer)
+    if getattr(graph, "checkpointer", None) is None:
+        graph.checkpointer = checkpointer
+
+    config: dict[str, Any] = {"configurable": {"thread_id": thread_id}}
+    payloads: list[dict[str, object]] = []
+    async for snapshot in graph.aget_state_history(config):
+        payloads.append(_snapshot_to_payload(snapshot, thread_id))
+
+    return _visible_checkpoint_payloads(thread, runs, payloads)
 
 
 @router.post("/{thread_id}/history")
@@ -612,7 +693,7 @@ async def checkpoint_thread_state(
 
 
 @router.get("/{thread_id}/stream")
-async def stream_thread(
+async def join_thread_stream(
     thread_id: str,
     user: User = Depends(get_current_user),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
@@ -639,7 +720,7 @@ async def stream_thread(
             seq = int(event.get("seq", 0))
             current_seq = max(current_seq, seq)
             event_name = str(event.get("method", "event"))
-            yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
+            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event)}\n\n"
 
         if _uses_redis_executor():
             async for event in iter_with_sse_keepalives(
@@ -657,7 +738,7 @@ async def stream_thread(
                 seq = int(event.get("seq", 0))
                 current_seq = max(current_seq, seq)
                 event_name = str(event.get("method", "event"))
-                yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
+                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event)}\n\n"
             return
 
         async for event in iter_with_sse_keepalives(
@@ -676,7 +757,7 @@ async def stream_thread(
             seq = int(event.get("seq", 0))
             current_seq = max(current_seq, seq)
             event_name = str(event.get("method", "event"))
-            yield f"id: {seq}\nevent: {event_name}\ndata: {json.dumps(event)}\n\n"
+            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event)}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")
 
@@ -701,7 +782,7 @@ def _coerce_protocol_input(raw_input: Any) -> dict[str, Any]:
     return {"value": raw_input}
 
 
-@router.post("/{thread_id}/commands")
+@router.post("/{thread_id}/commands",summary="Protocol v2 Command​")
 async def handle_protocol_command(
     thread_id: str,
     payload: ProtocolCommandRequest,
@@ -804,7 +885,7 @@ async def handle_protocol_command(
 
 
 @router.post("/{thread_id}/stream")
-@router.post("/{thread_id}/stream/events")
+@router.post("/{thread_id}/stream/events",summary="Protocol v2 Command​")
 async def stream_thread_protocol_events(
     thread_id: str,
     payload: ProtocolEventStreamRequest,
@@ -827,7 +908,7 @@ async def stream_thread_protocol_events(
             seq = int(event.get("seq", 0))
             current_seq = max(current_seq, seq)
             method = str(event.get("method", "event"))
-            body = json.dumps(event)
+            body = safe_json_dumps(event)
             yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
 
         if _uses_redis_executor():
@@ -844,7 +925,7 @@ async def stream_thread_protocol_events(
                     continue
                 seq = int(event.get("seq", 0))
                 method = str(event.get("method", "event"))
-                body = json.dumps(event)
+                body = safe_json_dumps(event)
                 yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
             return
 
@@ -862,7 +943,7 @@ async def stream_thread_protocol_events(
                 continue
             seq = int(event.get("seq", 0))
             method = str(event.get("method", "event"))
-            body = json.dumps(event)
+            body = safe_json_dumps(event)
             yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")

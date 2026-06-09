@@ -145,6 +145,7 @@ class ThreadPatch(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     metadata: dict[str, Any] | None = None
+    ttl: "ThreadTTL | None" = None
 
 
 class ThreadCountRequest(BaseModel):
