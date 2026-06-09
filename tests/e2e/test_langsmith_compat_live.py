@@ -509,7 +509,7 @@ async def test_live_thread_endpoints(e2e_base_url: str) -> None:
         assert history.status_code == 200
         assert len(history.json()) >= 1
 
-        history_post = await client.post(f"/threads/{alpha_thread['thread_id']}/history", headers=_user_headers(user_id))
+        history_post = await client.post(f"/threads/{alpha_thread['thread_id']}/history", json={}, headers=_user_headers(user_id))
         assert history_post.status_code == 200
         assert len(history_post.json()) >= 1
 
