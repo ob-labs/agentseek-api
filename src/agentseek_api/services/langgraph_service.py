@@ -8,6 +8,7 @@ from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 from typing import Any, TypedDict
 
+from langchain_core.runnables import RunnableBinding
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 from langgraph.graph import END, START, StateGraph
 from langgraph.pregel import Pregel
@@ -124,6 +125,13 @@ def _apply_manifest_dependencies(payload: dict[str, Any], manifest_path: Path) -
 def _coerce_graph(graph_object: Any, *, checkpointer: Any | None, store: Any | None) -> Pregel:
     if isinstance(graph_object, Pregel):
         return graph_object
+    # with_config() wraps a Pregel in a RunnableBinding — unwrap but preserve
+    # the bound config so settings like recursion_limit are not silently lost.
+    if isinstance(graph_object, RunnableBinding):
+        inner = graph_object.bound
+        bound_config = graph_object.config
+        coerced = _coerce_graph(inner, checkpointer=checkpointer, store=store)
+        return coerced.with_config(bound_config) if bound_config else coerced
     compile_graph = getattr(graph_object, "compile", None)
     if callable(compile_graph):
         return compile_graph(checkpointer=checkpointer, store=store)
