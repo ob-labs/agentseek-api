@@ -4,7 +4,6 @@
 
 > [!WARNING]
 > 本项目正在积极开发中，**尚未达到生产可用状态**。
-> 目前还不支持连接 LangSmith Studio。
 > 欢迎提交 Pull Request 来修复 Bug 或贡献增强功能！
 
 通过 FastAPI 运行时承载 LangGraph 与 LangChain 应用，并提供独立的
@@ -48,6 +47,74 @@
 ```bash
 uv sync
 ```
+
+### 将 seekdb embed 配置为默认后端（推荐）
+
+最快获得真实后端的方式是 **seekdb embed** — 一个进程内嵌入式 SeekDB 实例，
+无需 Docker 或独立进程：
+
+```bash
+uv sync --dev --extra embedded
+```
+
+然后以嵌入模式启动 API：
+
+```bash
+SEEKDB_EMBED=true uv run agentseek-api dev
+```
+
+数据默认存储在 `~/.agentseek/seekdb_data`，可通过 `SEEKDB_EMBED_DIR` 修改。
+
+<details>
+<summary>改用 seekdb Docker 容器</summary>
+
+```bash
+docker run -d --name seekdb-dev \
+  -p 2881:2881 -p 2886:2886 \
+  oceanbase/seekdb:latest
+```
+
+等待容器健康后，导出环境变量：
+
+```bash
+export OCEANBASE_HOST=127.0.0.1
+export OCEANBASE_PORT=2881
+export OCEANBASE_USER=root
+export OCEANBASE_PASSWORD=
+export OCEANBASE_DB_NAME=seekdb
+```
+
+</details>
+
+<details>
+<summary>改用 OceanBase 实例</summary>
+
+以 mini 模式启动 OceanBase-CE 容器：
+
+```bash
+docker run -d --name ob-dev \
+  -e MODE=mini \
+  -p 2881:2881 \
+  oceanbase/oceanbase-ce:latest
+```
+
+OceanBase-CE mini 模式需要几分钟完成初始化。就绪后导出环境变量：
+
+```bash
+export OCEANBASE_HOST=127.0.0.1
+export OCEANBASE_PORT=2881
+export OCEANBASE_USER=root@test
+export OCEANBASE_PASSWORD=
+export OCEANBASE_DB_NAME=seekdb
+```
+
+创建数据库：
+
+```bash
+mysql -h 127.0.0.1 -P 2881 -u root@test -e "CREATE DATABASE IF NOT EXISTS seekdb"
+```
+
+</details>
 
 ### 2. 创建配置文件
 
@@ -278,7 +345,7 @@ Redis 实例同时运行。
 CLI 层会尽量容忍 LangGraph 在端点级别使用的配置键，例如 `http` 与
 `api_version`。Store 配置会被 HTTP Store API 以及注入的 LangGraph
 `BaseStore` 运行时用于 TTL 与语义检索。本仓库使用 PyPI 上发布的
-`langchain-oceanbase==0.5.0` 包。
+`langchain-oceanbase==0.5.1` 包。
 
 配置驱动的自定义鉴权可以放在 `agentseek.json` 或 `langgraph.json` 中：
 

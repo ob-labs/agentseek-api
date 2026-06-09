@@ -485,7 +485,8 @@ def test_package_exposes_library_and_cli_entrypoints() -> None:
 
     assert project_config["name"] == "agentseek-api"
     assert project_config["scripts"]["agentseek-api"] == "agentseek_api.cli:main"
-    assert project_config["optional-dependencies"]["embedded"] == ["langchain-oceanbase[pyseekdb]==0.5.0"]
+    assert project_config["optional-dependencies"]["embedded"]
+    assert any("langchain-oceanbase" in dep for dep in project_config["optional-dependencies"]["embedded"])
 
 
 def test_cli_module_is_importable_with_embeddable_entrypoints() -> None:

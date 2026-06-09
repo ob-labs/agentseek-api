@@ -20,7 +20,7 @@ dependencies = [
     "langchain-core>=1.0.0",
     "langchain-openai>=1.0.0",
     "langchain-anthropic>=1.0.0",
-    "langchain-oceanbase==0.5.0",
+    "langchain-oceanbase==0.5.1",
     "cryptography>=45.0.0",
     "pymysql>=1.1.0",
     "langchain>=0.3.9",
@@ -30,7 +30,7 @@ dependencies = [
 
 [project.optional-dependencies]
 embedded = [
-    "langchain-oceanbase[pyseekdb]==0.5.0",
+    "langchain-oceanbase[pyseekdb]==0.5.1",
 ]
 
 [project.scripts]

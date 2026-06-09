@@ -37,5 +37,8 @@ class Settings(BaseSettings):
     OCEANBASE_PASSWORD: str = ""
     OCEANBASE_DB_NAME: str = "seekdb"
 
+    SEEKDB_EMBED: bool = False
+    SEEKDB_EMBED_DIR: str = ""
+
 
 settings = Settings()
