@@ -53,12 +53,21 @@ async def _noop_ensure_default_assistants() -> None:
 
 @pytest.fixture
 def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
+    from agentseek_api.core import auth_middleware
+
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr("agentseek_api.main.ensure_default_assistants", _noop_ensure_default_assistants)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(
+        "agentseek_api.core.auth_middleware.get_config_auth_settings",
+        lambda: auth_middleware.ConfigAuthSettings(),
+    )
+    auth_middleware._backend = None
 
     app = create_app()
     app.dependency_overrides[get_current_user] = header_user_override
     with TestClient(app) as test_client:
         yield test_client
+    auth_middleware._backend = None

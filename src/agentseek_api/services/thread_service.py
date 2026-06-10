@@ -43,7 +43,7 @@ async def create_thread_for_user(*, payload: ThreadCreate, user: User) -> Thread
     async with session_factory() as session:
         if payload.thread_id is not None:
             existing = await session.scalar(
-                select(Thread).where(Thread.thread_id == payload.thread_id, Thread.user_id == user.identity)
+                select(Thread).where(Thread.thread_id == payload.thread_id)
             )
             if existing is not None:
                 if payload.if_exists == "raise":

@@ -10,7 +10,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 
-from agentseek_api.core.auth_deps import get_current_user
+from agentseek_api.core.auth_deps import apply_metadata_filters, authorize, get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import (
@@ -113,13 +113,12 @@ def _uses_redis_executor() -> bool:
     return settings.EXECUTOR_BACKEND.strip().lower() == "redis"
 
 
-async def _thread_has_active_runs(*, thread_id: str, user_id: str) -> bool:
+async def _thread_has_active_runs(*, thread_id: str) -> bool:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         active_run_id = await session.scalar(
             select(Run.run_id).where(
                 Run.thread_id == thread_id,
-                Run.user_id == user_id,
                 Run.status.not_in(TERMINAL_RUN_STATUSES),
             )
         )
@@ -130,7 +129,6 @@ async def _iter_persisted_thread_events(
     *,
     thread_id: str,
     payload: ProtocolEventStreamRequest,
-    user_id: str,
     after_seq: int,
     wait_for_future_runs: bool = False,
 ) -> AsyncIterator[dict[str, Any]]:
@@ -151,7 +149,7 @@ async def _iter_persisted_thread_events(
                 yield event
             continue
 
-        if not await _thread_has_active_runs(thread_id=thread_id, user_id=user_id):
+        if not await _thread_has_active_runs(thread_id=thread_id):
             if wait_for_future_runs:
                 await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
                 continue
@@ -281,6 +279,13 @@ async def create_thread(payload: ThreadCreate, user: User = Depends(get_current_
     if payload.supersteps is not None:
         raise HTTPException(status_code=422, detail="'supersteps' is not supported yet")
 
+    value: dict = {"metadata": dict(payload.metadata or {})}
+    if payload.thread_id is not None:
+        value["thread_id"] = str(payload.thread_id)
+    if payload.if_exists is not None:
+        value["if_exists"] = payload.if_exists
+    await authorize(user, "threads", "create", value)
+    payload.metadata = value.get("metadata", payload.metadata)
     return await create_thread_for_user(payload=payload, user=user)
 
 
@@ -296,9 +301,15 @@ async def search_threads(payload: ThreadSearchRequest, user: User = Depends(get_
     sort_column = getattr(Thread, sort_by, Thread.created_at)
     order_clause = sort_column.desc() if sort_order == "desc" else sort_column.asc()
 
+    value: dict = {"metadata": dict(payload.metadata or {}), "limit": payload.limit, "offset": payload.offset}
+    if payload.status is not None:
+        value["status"] = payload.status
+    filters = await authorize(user, "threads", "search", value)
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        stmt = select(Thread).where(Thread.user_id == user.identity)
+        stmt = select(Thread)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
         if payload.ids is not None:
             stmt = stmt.where(Thread.thread_id.in_(payload.ids))
         if payload.status is not None:
@@ -338,9 +349,15 @@ async def count_threads(payload: ThreadCountRequest, user: User = Depends(get_cu
     if payload.values is not None:
         raise HTTPException(status_code=422, detail="'values' filter is not supported yet")
 
+    value: dict = {"metadata": dict(payload.metadata or {})}
+    if payload.status is not None:
+        value["status"] = payload.status
+    filters = await authorize(user, "threads", "search", value)
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        stmt = select(func.count()).select_from(Thread).where(Thread.user_id == user.identity)
+        stmt = select(func.count()).select_from(Thread)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
         if payload.status is not None:
             stmt = stmt.where(Thread.status == payload.status)
         if payload.metadata is not None:
@@ -352,24 +369,26 @@ async def count_threads(payload: ThreadCountRequest, user: User = Depends(get_cu
 
 @router.post("/prune", response_model=ThreadPruneResponse)
 async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_current_user)) -> ThreadPruneResponse:
+    filters = await authorize(user, "threads", "delete", {"thread_ids": payload.thread_ids})
+
     session_factory = db_manager.get_session_factory()
     pruned_run_ids: list[str] = []
     async with session_factory() as session:
-        rows = (
-            await session.scalars(select(Thread).where(Thread.thread_id.in_(payload.thread_ids), Thread.user_id == user.identity))
-        ).all()
+        thread_stmt = select(Thread).where(Thread.thread_id.in_(payload.thread_ids))
+        thread_stmt = apply_metadata_filters(thread_stmt, Thread, filters)
+        rows = (await session.scalars(thread_stmt)).all()
         thread_ids = [row.thread_id for row in rows]
         if payload.strategy == "delete":
             pruned_run_ids = (
-                await session.scalars(select(Run.run_id).where(Run.thread_id.in_(thread_ids), Run.user_id == user.identity))
+                await session.scalars(select(Run.run_id).where(Run.thread_id.in_(thread_ids)))
             ).all()
-            await session.execute(delete(Run).where(Run.thread_id.in_(thread_ids), Run.user_id == user.identity))
-            await session.execute(delete(Thread).where(Thread.thread_id.in_(thread_ids), Thread.user_id == user.identity))
+            await session.execute(delete(Run).where(Run.thread_id.in_(thread_ids)))
+            await session.execute(delete(Thread).where(Thread.thread_id.in_(thread_ids)))
         elif payload.strategy == "keep_latest":
             runs = (
                 await session.scalars(
                     select(Run)
-                    .where(Run.thread_id.in_(thread_ids), Run.user_id == user.identity)
+                    .where(Run.thread_id.in_(thread_ids))
                     .order_by(Run.thread_id.asc(), Run.created_at.desc())
                 )
             ).all()
@@ -382,7 +401,7 @@ async def prune_threads(payload: ThreadPruneRequest, user: User = Depends(get_cu
                 seen_thread_ids.add(run.thread_id)
             if stale_run_ids:
                 pruned_run_ids = stale_run_ids
-                await session.execute(delete(Run).where(Run.run_id.in_(stale_run_ids), Run.user_id == user.identity))
+                await session.execute(delete(Run).where(Run.run_id.in_(stale_run_ids)))
         await session.commit()
     await prune_checkpoints(thread_ids, strategy=payload.strategy)
     if pruned_run_ids:
@@ -400,9 +419,13 @@ async def get_thread(
     include: list[str] | None = Query(None, description="Additional fields to include (e.g. 'ttl')"),
     user: User = Depends(get_current_user),
 ) -> ThreadRead:
+    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        row = await session.scalar(stmt)
         if row is None:
             raise HTTPException(status_code=404, detail="Thread not found")
         graph_id = (row.metadata_json or {}).get("graph_id")
@@ -415,9 +438,13 @@ async def get_thread(
 
 @router.patch("/{thread_id}", response_model=ThreadRead, response_model_exclude_none=True)
 async def patch_thread(thread_id: str, payload: ThreadPatch, user: User = Depends(get_current_user)) -> ThreadRead:
+    filters = await authorize(user, "threads", "update", {"thread_id": thread_id, "metadata": dict(payload.metadata or {})})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        row = await session.scalar(stmt)
         if row is None:
             raise HTTPException(status_code=404, detail="Thread not found")
         if payload.metadata is not None:
@@ -429,15 +456,19 @@ async def patch_thread(thread_id: str, payload: ThreadPatch, user: User = Depend
 
 @router.delete("/{thread_id}", status_code=204)
 async def delete_thread(thread_id: str, user: User = Depends(get_current_user)) -> Response:
+    filters = await authorize(user, "threads", "delete", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        row = await session.scalar(stmt)
         if row is None:
             raise HTTPException(status_code=404, detail="Thread not found")
         run_ids = (
-            await session.scalars(select(Run.run_id).where(Run.thread_id == thread_id, Run.user_id == user.identity))
+            await session.scalars(select(Run.run_id).where(Run.thread_id == thread_id))
         ).all()
-        await session.execute(delete(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity))
+        await session.execute(delete(Run).where(Run.thread_id == thread_id))
         await session.delete(row)
         await session.commit()
     await _best_effort_checkpointer_call("adelete_thread", thread_id)
@@ -451,14 +482,18 @@ async def delete_thread(thread_id: str, user: User = Depends(get_current_user)) 
 
 @router.post("/{thread_id}/copy", response_model=ThreadRead, response_model_exclude_none=True)
 async def copy_thread(thread_id: str, user: User = Depends(get_current_user)) -> ThreadRead:
+    filters = await authorize(user, "threads", "create", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        source = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        source = await session.scalar(stmt)
         if source is None:
             raise HTTPException(status_code=404, detail="Thread not found")
         source_runs = (
             await session.scalars(
-                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
+                select(Run).where(Run.thread_id == thread_id).order_by(Run.created_at.asc())
             )
         ).all()
         copied = Thread(
@@ -498,9 +533,13 @@ async def get_thread_state_internal(
     user: User,
     checkpoint_ns: str | None = None,
 ) -> dict[str, object] | None:
+    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        thread = await session.scalar(stmt)
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -536,9 +575,13 @@ async def get_thread_state(
     if state is not None:
         return state
 
+    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        thread = await session.scalar(stmt)
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
     return _empty_thread_state_payload(thread)
@@ -551,9 +594,13 @@ async def get_thread_history(
     limit: int = Query(default=10, ge=1),
     before: str | None = Query(default=None),
 ) -> list[dict[str, object]]:
+    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        thread = await session.scalar(stmt)
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -564,7 +611,7 @@ async def get_thread_history(
 
         runs = (
             await session.scalars(
-                select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.asc())
+                select(Run).where(Run.thread_id == thread_id).order_by(Run.created_at.asc())
             )
         ).all()
 
@@ -594,9 +641,13 @@ async def get_thread_history_post(
 
 
 async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str, user: User) -> dict[str, object]:
+    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        thread = await session.scalar(stmt)
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -637,9 +688,13 @@ async def update_thread_state(
     payload: dict[str, object],
     user: User = Depends(get_current_user),
 ) -> dict[str, object]:
+    filters = await authorize(user, "threads", "update", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        thread = await session.scalar(stmt)
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
         values = payload.get("values", payload)
@@ -674,9 +729,13 @@ async def join_thread_stream(
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
 ) -> StreamingResponse:
     after_seq = parse_last_event_id(last_event_id) or 0
+    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        thread = await session.scalar(stmt)
         if thread is None:
             raise HTTPException(status_code=404, detail="Thread not found")
 
@@ -702,7 +761,6 @@ async def join_thread_stream(
                 _iter_persisted_thread_events(
                     thread_id=thread_id,
                     payload=payload,
-                    user_id=user.identity,
                     after_seq=current_seq,
                     wait_for_future_runs=True,
                 )

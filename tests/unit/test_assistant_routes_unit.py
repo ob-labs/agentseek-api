@@ -7,6 +7,13 @@ from agentseek_api.api import assistants as assistants_module
 from agentseek_api.main import create_app
 from agentseek_api.core.orm import Assistant
 from agentseek_api.models.api import AssistantConfigRead, AssistantCountRequest, AssistantCreate, AssistantPatch, AssistantSearchRequest
+from agentseek_api.models.auth import User
+
+_TEST_USER = User(identity="test-user")
+
+
+async def _noop_authorize(*args, **kwargs):
+    return None
 
 
 class FakeScalarResult:
@@ -105,6 +112,7 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: session_factory,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     class FakeGraphEntry:
         def build_graph(self):
@@ -130,7 +138,8 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
             config={"configurable": {"temperature": 0}},
             context={"tenant": "tests"},
             description="created assistant",
-        )
+        ),
+        user=_TEST_USER,
     )
     assert created.assistant_id == "assistant-1"
     assert created.graph_id == "react_agent"
@@ -139,7 +148,7 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
     assert created.context == {"tenant": "tests"}
     assert created.description == "created assistant"
 
-    listed = await assistants_module.search_assistants(AssistantSearchRequest())
+    listed = await assistants_module.search_assistants(AssistantSearchRequest(), user=_TEST_USER)
     assert [item.assistant_id for item in listed] == ["assistant-existing"]
 
     patched = await assistants_module.patch_assistant(
@@ -152,6 +161,7 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
             context={"tenant": "unit"},
             description="patched",
         ),
+        user=_TEST_USER,
     )
     assert patched.name == "after"
     assert patched.graph_id == "stress_test"
@@ -160,7 +170,7 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
     assert patched.context == {"tenant": "unit"}
     assert patched.description == "patched"
 
-    deleted = await assistants_module.delete_assistant("assistant-delete")
+    deleted = await assistants_module.delete_assistant("assistant-delete", user=_TEST_USER)
     assert deleted is None
     assert delete_session.deleted == [delete_target]
 
@@ -172,17 +182,18 @@ async def test_assistant_route_handlers_raise_not_found(monkeypatch: pytest.Monk
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: session_factory,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     with pytest.raises(HTTPException, match="Assistant not found") as get_error:
-        await assistants_module.get_assistant("missing")
+        await assistants_module.get_assistant("missing", user=_TEST_USER)
     assert get_error.value.status_code == 404
 
     with pytest.raises(HTTPException, match="Assistant not found") as patch_error:
-        await assistants_module.patch_assistant("missing", AssistantPatch(name="nope"))
+        await assistants_module.patch_assistant("missing", AssistantPatch(name="nope"), user=_TEST_USER)
     assert patch_error.value.status_code == 404
 
     with pytest.raises(HTTPException, match="Assistant not found") as delete_error:
-        await assistants_module.delete_assistant("missing")
+        await assistants_module.delete_assistant("missing", user=_TEST_USER)
     assert delete_error.value.status_code == 404
 
 
@@ -204,9 +215,10 @@ async def test_validate_graph_id_rejects_unknown_graph(monkeypatch: pytest.Monke
         "agentseek_api.api.assistants.get_langgraph_service",
         FakeLangGraphService,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     with pytest.raises(HTTPException, match="Graph 'bad' not found") as exc:
-        await assistants_module.create_assistant(AssistantCreate(graph_id="bad"))
+        await assistants_module.create_assistant(AssistantCreate(graph_id="bad"), user=_TEST_USER)
     assert exc.value.status_code == 404
 
 
@@ -227,9 +239,10 @@ async def test_validate_graph_id_rejects_unloadable_graph(monkeypatch: pytest.Mo
         "agentseek_api.api.assistants.get_langgraph_service",
         FakeLangGraphService,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     with pytest.raises(HTTPException, match="failed to load") as exc:
-        await assistants_module.create_assistant(AssistantCreate(graph_id="broken"))
+        await assistants_module.create_assistant(AssistantCreate(graph_id="broken"), user=_TEST_USER)
     assert exc.value.status_code == 422
 
 
@@ -241,6 +254,7 @@ async def test_create_assistant_if_exists_do_nothing(monkeypatch: pytest.MonkeyP
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: session_factory,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     class FakeGraphEntry:
         def build_graph(self):
@@ -259,7 +273,8 @@ async def test_create_assistant_if_exists_do_nothing(monkeypatch: pytest.MonkeyP
     )
 
     result = await assistants_module.create_assistant(
-        AssistantCreate(assistant_id="existing-1", graph_id="default", if_exists="do_nothing")
+        AssistantCreate(assistant_id="existing-1", graph_id="default", if_exists="do_nothing"),
+        user=_TEST_USER,
     )
     assert result.assistant_id == "existing-1"
 
@@ -272,6 +287,7 @@ async def test_create_assistant_if_exists_raise(monkeypatch: pytest.MonkeyPatch)
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: session_factory,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     class FakeGraphEntry:
         def build_graph(self):
@@ -291,7 +307,8 @@ async def test_create_assistant_if_exists_raise(monkeypatch: pytest.MonkeyPatch)
 
     with pytest.raises(HTTPException, match="Assistant already exists") as exc:
         await assistants_module.create_assistant(
-            AssistantCreate(assistant_id="existing-1", graph_id="default", if_exists="raise")
+            AssistantCreate(assistant_id="existing-1", graph_id="default", if_exists="raise"),
+            user=_TEST_USER,
         )
     assert exc.value.status_code == 409
 
@@ -302,9 +319,10 @@ async def test_delete_assistant_rejects_delete_threads(monkeypatch: pytest.Monke
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: FakeSessionFactory([]),
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     with pytest.raises(HTTPException, match="delete_threads=true is not supported") as exc:
-        await assistants_module.delete_assistant("any-id", delete_threads=True)
+        await assistants_module.delete_assistant("any-id", delete_threads=True, user=_TEST_USER)
     assert exc.value.status_code == 422
 
 
@@ -325,8 +343,9 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: session_factory,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
-    versions = await assistants_module.get_assistant_versions("assistant-1")
+    versions = await assistants_module.get_assistant_versions("assistant-1", user=_TEST_USER)
     assert versions.model_dump() == {
         "assistant_id": "assistant-1",
         "current_version": 1,
@@ -336,7 +355,7 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
     }
 
     with pytest.raises(HTTPException, match="Assistant version promotion is not supported") as latest_error:
-        await assistants_module.set_latest_assistant_version("assistant-1")
+        await assistants_module.set_latest_assistant_version("assistant-1", user=_TEST_USER)
     assert latest_error.value.status_code == 409
 
     class FakeGraph:
@@ -357,11 +376,11 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
     )
 
     with pytest.raises(HTTPException, match="The graph does not support subgraphs") as subgraph_error:
-        await assistants_module.get_assistant_subgraphs("assistant-1")
+        await assistants_module.get_assistant_subgraphs("assistant-1", user=_TEST_USER)
     assert subgraph_error.value.status_code == 422
 
     with pytest.raises(HTTPException, match="The graph does not support subgraphs") as namespaced_error:
-        await assistants_module.get_assistant_subgraphs_by_namespace("assistant-1", "root")
+        await assistants_module.get_assistant_subgraphs_by_namespace("assistant-1", "root", user=_TEST_USER)
     assert namespaced_error.value.status_code == 422
 
 
@@ -417,7 +436,8 @@ async def test_count_assistants_returns_exact_count_beyond_page_limit(monkeypatc
         "agentseek_api.api.assistants.db_manager.get_session_factory",
         lambda: session_factory,
     )
+    monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
-    count = await assistants_module.count_assistants(AssistantCountRequest())
+    count = await assistants_module.count_assistants(AssistantCountRequest(), user=_TEST_USER)
 
     assert count == 10_001

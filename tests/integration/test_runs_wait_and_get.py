@@ -25,16 +25,18 @@ def test_wait_not_found_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_get_run_not_found_for_wrong_user(client: TestClient) -> None:
+def test_get_run_visible_without_auth_on(client: TestClient) -> None:
+    """Without @auth.on handlers, runs are visible to all authenticated users."""
     thread_id, run_id = _seed_run(client, user_id="owner")
     response = client.get(f"/threads/{thread_id}/runs/{run_id}", headers={"x-user-id": "other"})
-    assert response.status_code == 404
+    assert response.status_code == 200
 
 
-def test_wait_run_not_found_for_wrong_user(client: TestClient) -> None:
+def test_wait_run_visible_without_auth_on(client: TestClient) -> None:
+    """Without @auth.on handlers, runs are visible to all authenticated users."""
     thread_id, run_id = _seed_run(client, user_id="owner")
     response = client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers={"x-user-id": "other"})
-    assert response.status_code == 404
+    assert response.status_code == 200
 
 
 def test_get_and_wait_run_success(client: TestClient) -> None:

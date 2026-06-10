@@ -54,8 +54,8 @@ def _to_read_model(row: CronJob) -> CronRead:
     )
 
 
-def _search_stmt(*, user_id: str, payload: CronSearchRequest):
-    stmt = select(CronJob).where(CronJob.user_id == user_id)
+def _search_stmt(*, payload: CronSearchRequest):
+    stmt = select(CronJob)
     if payload.assistant_id is not None:
         stmt = stmt.where(CronJob.assistant_id == payload.assistant_id)
     if payload.enabled is not None:
@@ -93,7 +93,7 @@ async def create_cron(*, assistant_id: str, thread_id: str | None, payload: Cron
 async def get_cron(*, cron_id: str, user: User) -> CronRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id, CronJob.user_id == user.identity))
+        row = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
         if row is None:
             raise HTTPException(status_code=404, detail="Cron not found")
         return _to_read_model(row)
@@ -102,7 +102,7 @@ async def get_cron(*, cron_id: str, user: User) -> CronRead:
 async def patch_cron(*, cron_id: str, payload: CronPatch, user: User) -> CronRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id, CronJob.user_id == user.identity))
+        row = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
         if row is None:
             raise HTTPException(status_code=404, detail="Cron not found")
 
@@ -156,7 +156,7 @@ async def patch_cron(*, cron_id: str, payload: CronPatch, user: User) -> CronRea
 async def delete_cron(*, cron_id: str, user: User) -> None:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        result = await session.execute(delete(CronJob).where(CronJob.cron_id == cron_id, CronJob.user_id == user.identity))
+        result = await session.execute(delete(CronJob).where(CronJob.cron_id == cron_id))
         if result.rowcount == 0:
             raise HTTPException(status_code=404, detail="Cron not found")
         await session.commit()
@@ -166,7 +166,7 @@ async def search_crons(*, payload: CronSearchRequest, user: User) -> CronSearchR
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         stmt = (
-            _search_stmt(user_id=user.identity, payload=payload)
+            _search_stmt(payload=payload)
             .order_by(CronJob.created_at.desc(), CronJob.cron_id.desc())
             .limit(payload.limit)
             .offset(payload.offset)
@@ -178,6 +178,6 @@ async def search_crons(*, payload: CronSearchRequest, user: User) -> CronSearchR
 async def count_crons(*, payload: CronCountRequest, user: User) -> CronCountResponse:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        stmt = _search_stmt(user_id=user.identity, payload=payload).with_only_columns(func.count(CronJob.cron_id))
+        stmt = _search_stmt(payload=payload).with_only_columns(func.count(CronJob.cron_id))
         count = await session.scalar(stmt)
     return CronCountResponse(count=int(count or 0))

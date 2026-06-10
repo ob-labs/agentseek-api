@@ -51,7 +51,8 @@ def test_get_run_not_found(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_run_visibility_is_user_scoped(client: TestClient) -> None:
+def test_run_visibility_without_auth_on(client: TestClient) -> None:
+    """Without @auth.on handlers, runs are visible to all authenticated users."""
     assistant_id = _create_assistant(client)
     owner_thread = _create_thread(client, user_id="owner")
     run = client.post(
@@ -62,8 +63,8 @@ def test_run_visibility_is_user_scoped(client: TestClient) -> None:
     assert run.status_code == 200
     run_id = run.json()["run_id"]
 
-    hidden = client.get(f"/threads/{owner_thread}/runs/{run_id}", headers={"x-user-id": "other"})
-    assert hidden.status_code == 404
+    visible = client.get(f"/threads/{owner_thread}/runs/{run_id}", headers={"x-user-id": "other"})
+    assert visible.status_code == 200
 
 
 def test_wait_run_returns_terminal_status(client: TestClient) -> None:

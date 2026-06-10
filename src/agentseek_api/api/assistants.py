@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse
 from langchain_core.runnables.utils import create_model
 
-from agentseek_api.core.auth_deps import get_current_user
+from agentseek_api.core.auth_deps import authorize, apply_metadata_filters, get_current_user
 from agentseek_api.models.auth import User
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant
@@ -105,6 +105,14 @@ def _build_filter_query(payload: AssistantCountRequest | AssistantSearchRequest)
 async def create_assistant(payload: AssistantCreate, user: User = Depends(get_current_user)) -> AssistantRead:
     _validate_graph_id(payload.graph_id)
 
+    value: dict = {
+        "metadata": dict(payload.metadata) if payload.metadata else {},
+        "graph_id": payload.graph_id,
+        "name": payload.name,
+    }
+    await authorize(user, "assistants", "create", value)
+    payload.metadata = value.get("metadata", payload.metadata)
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         if payload.assistant_id is not None:
@@ -134,7 +142,12 @@ async def create_assistant(payload: AssistantCreate, user: User = Depends(get_cu
 
 @router.post("/search", response_model=list[AssistantRead], response_model_exclude_none=True)
 async def search_assistants(payload: AssistantSearchRequest, user: User = Depends(get_current_user)) -> list[AssistantRead] | JSONResponse:
+    filters = await authorize(user, "assistants", "search", {
+        "metadata": dict(payload.metadata) if payload.metadata else {},
+    })
+
     query = _build_filter_query(payload)
+    query = apply_metadata_filters(query, Assistant, filters)
 
     sort_column = getattr(Assistant, payload.sort_by, Assistant.created_at) if payload.sort_by else Assistant.created_at
     order = sort_column.asc() if payload.sort_order == "asc" else sort_column.desc()
@@ -154,7 +167,13 @@ async def search_assistants(payload: AssistantSearchRequest, user: User = Depend
 
 @router.post("/count", response_model=int)
 async def count_assistants(payload: AssistantCountRequest, user: User = Depends(get_current_user)) -> int:
+    filters = await authorize(user, "assistants", "search", {
+        "metadata": dict(payload.metadata) if payload.metadata else {},
+    })
+
     query = _build_filter_query(payload)
+    query = apply_metadata_filters(query, Assistant, filters)
+
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         count = await session.scalar(select(func.count()).select_from(query.subquery()))
@@ -163,11 +182,13 @@ async def count_assistants(payload: AssistantCountRequest, user: User = Depends(
 
 @router.get("/{assistant_id}", response_model=AssistantRead, response_model_exclude_none=True)
 async def get_assistant(assistant_id: str, user: User = Depends(get_current_user)) -> AssistantRead:
+    await authorize(user, "assistants", "read", {"assistant_id": assistant_id})
     return await _get_assistant_by_id(assistant_id)
 
 
 @router.patch("/{assistant_id}", response_model=AssistantRead, response_model_exclude_none=True)
 async def patch_assistant(assistant_id: str, payload: AssistantPatch, user: User = Depends(get_current_user)) -> AssistantRead:
+    await authorize(user, "assistants", "update", {"assistant_id": assistant_id})
     resolved_id = resolve_assistant_id(assistant_id)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -201,6 +222,7 @@ async def patch_assistant(assistant_id: str, payload: AssistantPatch, user: User
     },
 )
 async def delete_assistant(assistant_id: str, delete_threads: bool = False, user: User = Depends(get_current_user)):
+    await authorize(user, "assistants", "delete", {"assistant_id": assistant_id})
     if delete_threads:
         raise HTTPException(status_code=422, detail=DELETE_THREADS_UNSUPPORTED)
     resolved_id = resolve_assistant_id(assistant_id)
@@ -222,6 +244,7 @@ async def get_assistant_graph(
     ),
     user: User = Depends(get_current_user),
 ) -> dict[str, object]:
+    await authorize(user, "assistants", "read", {"assistant_id": assistant_id})
     assistant = await _get_assistant_by_id(assistant_id)
     entry = get_langgraph_service().get_entry(assistant.graph_id)
     graph = entry.build_graph()
@@ -246,6 +269,7 @@ async def get_assistant_graph(
     },
 )
 async def get_assistant_schemas(assistant_id: str, user: User = Depends(get_current_user)) -> dict[str, object]:
+    await authorize(user, "assistants", "read", {"assistant_id": assistant_id})
     assistant = await _get_assistant_by_id(assistant_id)
     entry = get_langgraph_service().get_entry(assistant.graph_id)
     graph = entry.build_graph()
@@ -315,6 +339,7 @@ async def get_assistant_subgraphs(
     recurse: bool = Query(False, description="Recursively retrieve subgraphs of subgraphs."),
     user: User = Depends(get_current_user),
 ) -> dict[str, dict[str, object | None]]:
+    await authorize(user, "assistants", "read", {"assistant_id": assistant_id})
     return await _collect_subgraphs(assistant_id, namespace=None, recurse=recurse)
 
 
@@ -332,6 +357,7 @@ async def get_assistant_subgraphs_by_namespace(
     recurse: bool = Query(False, description="Recursively include nested subgraphs."),
     user: User = Depends(get_current_user),
 ) -> dict[str, dict[str, object | None]]:
+    await authorize(user, "assistants", "read", {"assistant_id": assistant_id})
     return await _collect_subgraphs(assistant_id, namespace=namespace, recurse=recurse)
 
 
@@ -343,6 +369,7 @@ async def get_assistant_subgraphs_by_namespace(
     },
 )
 async def get_assistant_versions(assistant_id: str, user: User = Depends(get_current_user)) -> AssistantVersionInfo:
+    await authorize(user, "assistants", "read", {"assistant_id": assistant_id})
     assistant = await _get_assistant_by_id(assistant_id)
     return AssistantVersionInfo(
         assistant_id=assistant.assistant_id,
@@ -366,5 +393,6 @@ async def get_assistant_versions(assistant_id: str, user: User = Depends(get_cur
     },
 )
 async def set_latest_assistant_version(assistant_id: str, user: User = Depends(get_current_user)) -> None:
+    await authorize(user, "assistants", "update", {"assistant_id": assistant_id})
     _ = await _get_assistant_by_id(assistant_id)
     raise HTTPException(status_code=409, detail=ASSISTANT_VERSION_PROMOTION_UNSUPPORTED)
