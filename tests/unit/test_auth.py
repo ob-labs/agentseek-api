@@ -24,9 +24,20 @@ async def test_noop_auth_backend_returns_default_user() -> None:
     assert user.is_authenticated is True
 
 
+def test_get_auth_backend_caches_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    monkeypatch.setattr(auth_middleware, "get_config_auth_settings", lambda: auth_middleware.ConfigAuthSettings())
+    auth_middleware._backend = None
+    backend1 = get_auth_backend()
+    backend2 = get_auth_backend()
+    assert backend1 is backend2
+
+
 def test_get_auth_backend_defaults_to_noop(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    monkeypatch.setattr(auth_middleware, "get_config_auth_settings", lambda: auth_middleware.ConfigAuthSettings())
     auth_middleware._backend = None
     backend = get_auth_backend()
     assert isinstance(backend, NoopAuthBackend)
@@ -115,6 +126,57 @@ async def get_current_user(authorization: str | None):
 
     unauthed_request = Request({"type": "http", "headers": []})
     user = await backend.authenticate(unauthed_request)
+    assert user.identity == "anonymous"
+    assert user.is_authenticated is False
+
+
+@pytest.mark.asyncio
+async def test_langgraph_auth_backend_injects_all_supported_params(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    auth_file = tmp_path / "full_params_auth.py"
+    auth_file.write_text(
+        """
+from langgraph_sdk import Auth
+
+auth = Auth()
+
+@auth.authenticate
+async def get_current_user(request, headers: dict, method: str, path: str, query_params: dict, path_params: dict):
+    api_key = headers.get(b"x-api-key", b"").decode()
+    if not api_key:
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Missing key")
+    return {"identity": f"{method}:{path}:{api_key}"}
+""".strip(),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", f"{auth_file}:auth")
+    auth_middleware._backend = None
+
+    backend = get_auth_backend()
+    assert isinstance(backend, LangGraphAuthBackend)
+
+    request = Request({
+        "type": "http",
+        "method": "POST",
+        "path": "/threads",
+        "query_string": b"foo=bar",
+        "headers": [(b"x-api-key", b"my-key")],
+        "path_params": {"thread_id": "t-123"},
+    })
+    user = await backend.authenticate(request)
+    assert user.identity == "POST:/threads:my-key"
+    assert user.is_authenticated is True
+
+    no_key_request = Request({
+        "type": "http",
+        "method": "GET",
+        "path": "/threads",
+        "query_string": b"",
+        "headers": [],
+        "path_params": {},
+    })
+    user = await backend.authenticate(no_key_request)
     assert user.identity == "anonymous"
     assert user.is_authenticated is False
 
@@ -248,3 +310,85 @@ def test_get_studio_user_accepts_loopback_requests_in_local_dev(monkeypatch: pyt
     assert user is not None
     assert user.identity == "langgraph-studio-user"
     assert user.is_authenticated is True
+
+
+def test_get_studio_user_rejects_wrong_auth_scheme(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", "some_module:auth")
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    monkeypatch.setattr(settings, "STUDIO_AUTH_LOCAL_DEV", True)
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-auth-scheme", b"bearer")],
+            "client": ("127.0.0.1", 50000),
+        }
+    )
+
+    assert get_studio_user(request) is None
+
+
+def test_get_studio_user_rejects_when_auth_not_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
+    monkeypatch.setattr(settings, "STUDIO_AUTH_LOCAL_DEV", True)
+    monkeypatch.setattr(auth_middleware, "get_config_auth_settings", lambda: auth_middleware.ConfigAuthSettings())
+
+    request = Request(
+        {
+            "type": "http",
+            "headers": [(b"x-auth-scheme", b"langsmith")],
+            "client": ("127.0.0.1", 50000),
+        }
+    )
+
+    assert get_studio_user(request) is None
+
+
+def test_is_loopback_client_handles_no_client() -> None:
+    request = Request({"type": "http", "headers": []})
+    assert auth_middleware._is_loopback_client(request) is False
+
+
+def test_is_loopback_client_handles_localhost_string() -> None:
+    request = Request({"type": "http", "headers": [], "client": ("localhost", 50000)})
+    assert auth_middleware._is_loopback_client(request) is True
+
+
+def test_is_loopback_client_handles_invalid_host() -> None:
+    request = Request({"type": "http", "headers": [], "client": ("not-an-ip", 50000)})
+    assert auth_middleware._is_loopback_client(request) is False
+
+
+def test_normalize_config_symbol_reference_without_colon() -> None:
+    result = auth_middleware._normalize_config_symbol_reference("module_path_only", config_path=Path("/tmp/config.json"))
+    assert result == "module_path_only"
+
+
+def test_normalize_config_symbol_reference_module_style() -> None:
+    result = auth_middleware._normalize_config_symbol_reference("mypackage.auth:handler", config_path=Path("/tmp/config.json"))
+    assert result == "mypackage.auth:handler"
+
+
+def test_apply_config_dependencies_skips_non_list(tmp_path: Path) -> None:
+    auth_middleware._apply_config_dependencies({"dependencies": "not-a-list"}, config_path=tmp_path / "config.json")
+
+
+def test_apply_config_dependencies_skips_non_string_entries(tmp_path: Path) -> None:
+    auth_middleware._apply_config_dependencies({"dependencies": [123, None, "."]}, config_path=tmp_path / "config.json")
+
+
+def test_apply_config_dependencies_handles_relative_path(tmp_path: Path) -> None:
+    lib_dir = tmp_path / "libs"
+    lib_dir.mkdir()
+    auth_middleware._apply_config_dependencies({"dependencies": [str(lib_dir)]}, config_path=tmp_path / "config.json")
+    import sys
+    assert str(lib_dir.resolve()) in sys.path
+
+
+def test_get_auth_backend_rejects_empty_symbol(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", "module:")
+    auth_middleware._backend = None
+
+    with pytest.raises(RuntimeError, match="Invalid AUTH_MODULE_PATH"):
+        get_auth_backend()

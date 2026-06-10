@@ -130,6 +130,3 @@ def test_agent_card_endpoint_is_not_mounted_when_a2a_is_disabled(monkeypatch, tm
         response = client.get("/.well-known/agent-card.json?assistant_id=assistant-123")
 
     assert response.status_code == 404
-
-
-    assert body["securityRequirements"] == [{"apiKeyAuth": []}]
