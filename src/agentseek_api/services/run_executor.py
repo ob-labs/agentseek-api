@@ -838,7 +838,7 @@ async def execute_run(
         _astream_kwargs["durability"] = _durability
     if run_kwargs.get("stream_subgraphs"):
         _astream_kwargs["subgraphs"] = True
-        
+
     async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):

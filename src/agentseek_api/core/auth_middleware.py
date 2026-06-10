@@ -1,5 +1,6 @@
 import inspect
 import ipaddress
+import logging
 import sys
 from dataclasses import dataclass
 from importlib import import_module
@@ -29,10 +30,15 @@ class ConfigAuthSettings:
     disable_studio_auth: bool | None = None
 
 
+logger = logging.getLogger(__name__)
+
+
 class LangGraphAuthBackend:
     """Adapter that wraps a langgraph_sdk.Auth object into an AuthBackend."""
 
     def __init__(self, auth_obj) -> None:
+        if auth_obj._authenticate_handler is None:
+            raise RuntimeError("Auth object has no @auth.authenticate handler registered.")
         self._auth = auth_obj
 
     async def authenticate(self, request: Request) -> User:
@@ -57,7 +63,10 @@ class LangGraphAuthBackend:
 
         try:
             result = await handler(**kwargs)
-        except Exception:
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status is None or not (400 <= status < 500):
+                logger.error("Auth handler raised unexpected error: %s", exc)
             return User(identity="anonymous", is_authenticated=False)
 
         identity = result.get("identity", "anonymous") if isinstance(result, dict) else "anonymous"
@@ -192,7 +201,7 @@ def _load_custom_backend(auth_module_path: str | None = None) -> AuthBackend | N
         obj = getattr(module, symbol)
         if callable(obj):
             obj = obj()
-        if hasattr(obj, '_authenticate_handler'):
+        if hasattr(obj, '_authenticate_handler') and obj._authenticate_handler is not None:
             return LangGraphAuthBackend(obj)
         return obj
     except Exception as exc:  # noqa: BLE001
