@@ -55,8 +55,6 @@ def _wait_for_health(base_url: str, timeout_seconds: float) -> bool:
 def a2a_live_base_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Generator[str, None, None]:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "custom")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", "examples/auth/custom_backend.py:backend")
 
     stress_graph_path = Path(__file__).resolve().parents[2] / "examples" / "graphs" / "stress_test" / "graph.py"

@@ -274,7 +274,6 @@ def build_runtime_env(
             env.update(_parse_env_file(config.env_file))
         env.update(config.env_mapping)
         if config.auth_path:
-            env["AUTH_TYPE"] = "custom"
             env["AUTH_MODULE_PATH"] = config.auth_path
     if env_file:
         resolved_env_file = _resolve_path(env_file, cwd=cwd)

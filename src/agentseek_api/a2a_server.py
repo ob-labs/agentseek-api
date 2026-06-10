@@ -23,7 +23,6 @@ from agentseek_api.core.runtime_store import UserScopedStore
 from agentseek_api.models.api import AssistantConfigRead, AssistantRead
 from agentseek_api.models.auth import User
 from agentseek_api.services.langgraph_service import GraphEntry
-from agentseek_api.settings import settings
 
 
 @dataclass
@@ -113,31 +112,6 @@ def _agent_card_auth_metadata() -> dict[str, Any]:
                     metadata["securityRequirements"] = translated_security
                 return metadata
 
-    auth_type = settings.AUTH_TYPE.strip().lower()
-    if auth_type == "api_key":
-        return {
-            "securitySchemes": {
-                "apiKeyAuth": {
-                    "apiKeySecurityScheme": {
-                        "location": "header",
-                        "name": "x-api-key",
-                    }
-                }
-            },
-            "securityRequirements": [{"apiKeyAuth": []}],
-        }
-    if auth_type == "jwt":
-        return {
-            "securitySchemes": {
-                "bearerAuth": {
-                    "httpAuthSecurityScheme": {
-                        "scheme": "bearer",
-                        "bearerFormat": "JWT",
-                    }
-                }
-            },
-            "securityRequirements": [{"bearerAuth": []}],
-        }
     return {}
 
 

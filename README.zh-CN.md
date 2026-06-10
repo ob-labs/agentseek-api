@@ -592,12 +592,9 @@ parent api build --config ./langgraph.json -t my-api:dev
   - PostgreSQL：`postgresql+asyncpg://...`
   - OceanBase / MySQL：`mysql+aiomysql://...`
 - Checkpoint 持久化默认使用 OceanBase / seekdb 配置
-- 鉴权模式：
-  - `AUTH_TYPE=noop`
-  - `AUTH_TYPE=custom`，搭配 `AUTH_MODULE_PATH=module:backend_symbol`
-  - `AUTH_TYPE=api_key`，搭配 `AUTH_API_KEYS=key=user_id[,key2=user2]`
-  - `AUTH_TYPE=jwt`，搭配 `AUTH_JWT_SECRET`，可选
-    `AUTH_JWT_ALGORITHM=HS256`，使用 `sub` 作为用户身份
+- 鉴权：通过 `agentseek.json` 的 `"auth.path"` 或 `AUTH_MODULE_PATH` 环境变量配置。
+  使用 `langgraph_sdk.Auth` 的 `@auth.authenticate` 装饰器风格。
+  未配置时所有请求以 default_user 放行（noop）。
 - Assistant 管理、thread 与 run 端点会强制执行所配置的鉴权。
 
 ### 持久化执行

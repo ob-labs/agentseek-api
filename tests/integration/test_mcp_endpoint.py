@@ -22,6 +22,14 @@ class FakeCheckpointer:
         _ = (thread_id, run_id, payload)
 
 
+class TestApiKeyBackend:
+    async def authenticate(self, request) -> User:
+        api_key = request.headers.get("x-api-key")
+        if not api_key or api_key != "secret":
+            return User(identity="anonymous", is_authenticated=False)
+        return User(identity="api-user", is_authenticated=True)
+
+
 class BodyReadingAuthBackend:
     async def authenticate(self, request) -> User:
         await request.body()
@@ -39,11 +47,9 @@ def _mcp_headers(api_key: str | None = None) -> dict[str, str]:
 def auth_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
-    auth_middleware._backend = None
+    auth_middleware._backend = TestApiKeyBackend()
     langgraph_service_module._langgraph_service = None
 
     app = create_app()
@@ -79,8 +85,6 @@ def test_mcp_endpoint_supports_backends_that_read_request_body(
 ) -> None:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "noop")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
     auth_middleware._backend = BodyReadingAuthBackend()
@@ -105,8 +109,6 @@ def test_mcp_endpoint_honors_current_user_dependency_override(
 ) -> None:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
     auth_middleware._backend = None
@@ -182,8 +184,6 @@ def test_mcp_endpoint_injects_user_scoped_store(auth_client: TestClient) -> None
 def test_mcp_endpoint_enforces_output_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
     graph_path = tmp_path / "bad_graph.py"
     graph_path.write_text(
@@ -259,8 +259,6 @@ def extract_output(result, payload):
 def test_mcp_route_is_not_mounted_when_disabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "noop")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
     config_path = tmp_path / "agentseek.json"
     config_path.write_text(
@@ -288,8 +286,6 @@ def test_mcp_route_is_not_mounted_when_disabled(monkeypatch: pytest.MonkeyPatch,
 def test_mcp_route_is_not_mounted_for_invalid_http_section(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "noop")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
     graph_path = tmp_path / "graph.py"
     graph_path.write_text(
