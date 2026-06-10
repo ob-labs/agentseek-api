@@ -532,8 +532,10 @@ async def get_thread_state_internal(
     thread_id: str,
     user: User,
     checkpoint_ns: str | None = None,
+    filters: dict[str, Any] | None = None,
 ) -> dict[str, object] | None:
-    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+    if filters is None:
+        filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
 
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -570,12 +572,12 @@ async def get_thread_state(
     if subgraphs is True:
         raise HTTPException(status_code=422, detail="'subgraphs' is not supported yet")
 
+    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
+
     ns = checkpoint_ns if isinstance(checkpoint_ns, str) else None
-    state = await get_thread_state_internal(thread_id, user, checkpoint_ns=ns)
+    state = await get_thread_state_internal(thread_id, user, checkpoint_ns=ns, filters=filters)
     if state is not None:
         return state
-
-    filters = await authorize(user, "threads", "read", {"thread_id": thread_id})
 
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:

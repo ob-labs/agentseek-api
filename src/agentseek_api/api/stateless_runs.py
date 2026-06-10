@@ -5,7 +5,7 @@ from sqlalchemy import select
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
 
-from agentseek_api.core.auth_deps import authorize, get_current_user
+from agentseek_api.core.auth_deps import authorize, apply_metadata_filters, get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import (
@@ -110,10 +110,11 @@ async def create_run_batch(payload: list[RunCreateStateless], user: User = Depen
 
 @router.post("/cancel", status_code=204)
 async def cancel_runs(payload: RunsCancelRequest, user: User = Depends(get_current_user)) -> Response:
-    await authorize(user, "threads", "update", {})
+    filters = await authorize(user, "threads", "update", {})
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        query = select(Run)
+        query = select(Run).join(Thread, Run.thread_id == Thread.thread_id)
+        query = apply_metadata_filters(query, Thread, filters)
         if payload.thread_id is not None:
             query = query.where(Run.thread_id == payload.thread_id)
         if payload.run_ids:

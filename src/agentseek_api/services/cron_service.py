@@ -1,9 +1,11 @@
+from typing import Any
 from urllib.parse import urlparse
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import func, select
 
 from fastapi import HTTPException
 
+from agentseek_api.core.auth_deps import apply_metadata_filters
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import CronJob
 from agentseek_api.models.api import (
@@ -90,19 +92,23 @@ async def create_cron(*, assistant_id: str, thread_id: str | None, payload: Cron
         return _to_read_model(row)
 
 
-async def get_cron(*, cron_id: str, user: User) -> CronRead:
+async def get_cron(*, cron_id: str, user: User, filters: dict[str, Any] | None = None) -> CronRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+        stmt = select(CronJob).where(CronJob.cron_id == cron_id)
+        stmt = apply_metadata_filters(stmt, CronJob, filters)
+        row = await session.scalar(stmt)
         if row is None:
             raise HTTPException(status_code=404, detail="Cron not found")
         return _to_read_model(row)
 
 
-async def patch_cron(*, cron_id: str, payload: CronPatch, user: User) -> CronRead:
+async def patch_cron(*, cron_id: str, payload: CronPatch, user: User, filters: dict[str, Any] | None = None) -> CronRead:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        row = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+        stmt = select(CronJob).where(CronJob.cron_id == cron_id)
+        stmt = apply_metadata_filters(stmt, CronJob, filters)
+        row = await session.scalar(stmt)
         if row is None:
             raise HTTPException(status_code=404, detail="Cron not found")
 
@@ -153,20 +159,25 @@ async def patch_cron(*, cron_id: str, payload: CronPatch, user: User) -> CronRea
         return _to_read_model(row)
 
 
-async def delete_cron(*, cron_id: str, user: User) -> None:
+async def delete_cron(*, cron_id: str, user: User, filters: dict[str, Any] | None = None) -> None:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        result = await session.execute(delete(CronJob).where(CronJob.cron_id == cron_id))
-        if result.rowcount == 0:
+        stmt = select(CronJob).where(CronJob.cron_id == cron_id)
+        stmt = apply_metadata_filters(stmt, CronJob, filters)
+        row = await session.scalar(stmt)
+        if row is None:
             raise HTTPException(status_code=404, detail="Cron not found")
+        await session.delete(row)
         await session.commit()
 
 
-async def search_crons(*, payload: CronSearchRequest, user: User) -> CronSearchResponse:
+async def search_crons(*, payload: CronSearchRequest, user: User, filters: dict[str, Any] | None = None) -> CronSearchResponse:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
+        stmt = _search_stmt(payload=payload)
+        stmt = apply_metadata_filters(stmt, CronJob, filters)
         stmt = (
-            _search_stmt(payload=payload)
+            stmt
             .order_by(CronJob.created_at.desc(), CronJob.cron_id.desc())
             .limit(payload.limit)
             .offset(payload.offset)
@@ -175,9 +186,11 @@ async def search_crons(*, payload: CronSearchRequest, user: User) -> CronSearchR
     return CronSearchResponse(items=[_to_read_model(row) for row in rows])
 
 
-async def count_crons(*, payload: CronCountRequest, user: User) -> CronCountResponse:
+async def count_crons(*, payload: CronCountRequest, user: User, filters: dict[str, Any] | None = None) -> CronCountResponse:
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        stmt = _search_stmt(payload=payload).with_only_columns(func.count(CronJob.cron_id))
+        stmt = _search_stmt(payload=payload)
+        stmt = apply_metadata_filters(stmt, CronJob, filters)
+        stmt = stmt.with_only_columns(func.count(CronJob.cron_id))
         count = await session.scalar(stmt)
     return CronCountResponse(count=int(count or 0))
