@@ -1,9 +1,36 @@
-from fastapi import Request
+from langgraph_sdk import Auth
 
-from agentseek_api.models.auth import User
+HeaderAuthBackend = Auth()
 
 
-class HeaderAuthBackend:
-    async def authenticate(self, request: Request) -> User:
-        identity = request.headers.get("x-user-id", "default_user")
-        return User(identity=identity, is_authenticated=True)
+@HeaderAuthBackend.authenticate
+async def authenticate(headers: dict[bytes, bytes]) -> dict:
+    raw = headers.get(b"x-user-id", b"default_user")
+    identity = raw.decode() if isinstance(raw, bytes) else str(raw)
+    return {"identity": identity}
+
+
+@HeaderAuthBackend.on.threads.create
+async def on_threads_create(ctx: Auth.types.AuthContext, value: dict) -> None:
+    metadata = value.setdefault("metadata", {})
+    metadata["owner"] = ctx.user.identity
+
+
+@HeaderAuthBackend.on.threads.read
+async def on_threads_read(ctx: Auth.types.AuthContext, value: dict) -> dict:
+    return {"owner": ctx.user.identity}
+
+
+@HeaderAuthBackend.on.threads.update
+async def on_threads_update(ctx: Auth.types.AuthContext, value: dict) -> dict:
+    return {"owner": ctx.user.identity}
+
+
+@HeaderAuthBackend.on.threads.delete
+async def on_threads_delete(ctx: Auth.types.AuthContext, value: dict) -> dict:
+    return {"owner": ctx.user.identity}
+
+
+@HeaderAuthBackend.on.threads.search
+async def on_threads_search(ctx: Auth.types.AuthContext, value: dict) -> dict:
+    return {"owner": ctx.user.identity}

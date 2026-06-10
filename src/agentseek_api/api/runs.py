@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from agentseek_api.core.auth_deps import authorize, get_current_user
+from agentseek_api.core.auth_deps import apply_metadata_filters, authorize, get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
@@ -42,6 +42,22 @@ REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
 SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages", "messages-tuple", "debug", "events", "tasks", "checkpoints", "custom"}
 RUN_STREAM_MODE_ALIASES: dict[str, str] = {}
 RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
+
+
+async def _has_thread_access(thread_id: str, user: User, *, action: str = "read") -> bool:
+    filters = await authorize(user, "threads", action, {"thread_id": thread_id})
+    if not filters:
+        return True
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        stmt = select(Thread.thread_id).where(Thread.thread_id == thread_id)
+        stmt = apply_metadata_filters(stmt, Thread, filters)
+        return await session.scalar(stmt) is not None
+
+
+async def _verify_thread_access(thread_id: str, user: User, *, action: str = "read") -> None:
+    if not await _has_thread_access(thread_id, user, action=action):
+        raise HTTPException(status_code=404, detail="Thread not found")
 
 
 async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
@@ -538,7 +554,7 @@ async def _iter_persisted_run_records(
 
 @router.post("", response_model=RunRead)
 async def create_run(thread_id: str, payload: RunCreateStateful, user: User = Depends(get_current_user)) -> RunRead:
-    await authorize(user, "threads", "create_run", {"thread_id": thread_id})
+    await _verify_thread_access(thread_id, user, action="create_run")
     _validate_supported_run_controls(payload, stateless=False)
     run_kwargs: dict[str, Any] = {"config": payload.config, "context": payload.context}
     stream_modes = _normalize_stream_modes(payload.stream_mode)
@@ -593,7 +609,8 @@ async def list_runs(
 ) -> Any:
     if status is not None and status not in _VALID_RUN_STATUSES:
         raise HTTPException(status_code=422, detail=f"Invalid status filter: {status}")
-    await authorize(user, "threads", "read", {"thread_id": thread_id})
+    if not await _has_thread_access(thread_id, user):
+        return []
     query = select(Run).where(Run.thread_id == thread_id)
     if status is not None:
         query = query.where(Run.status == status)
@@ -610,7 +627,7 @@ async def list_runs(
 
 @router.get("/{run_id}", response_model=RunRead)
 async def get_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
-    await authorize(user, "threads", "read", {"thread_id": thread_id, "run_id": run_id})
+    await _verify_thread_access(thread_id, user)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(
@@ -646,7 +663,7 @@ async def _wait_run_terminal(
 
 @router.get("/{run_id}/wait", response_model=RunRead)
 async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
-    await authorize(user, "threads", "read", {"thread_id": thread_id, "run_id": run_id})
+    await _verify_thread_access(thread_id, user)
     return await _wait_run_terminal(thread_id, run_id, user)
 
 
@@ -718,7 +735,7 @@ async def resume_existing_run(
     payload: RunResume,
     user: User = Depends(get_current_user),
 ) -> RunRead:
-    await authorize(user, "threads", "create_run", {"thread_id": thread_id, "run_id": run_id})
+    await _verify_thread_access(thread_id, user, action="create_run")
     try:
         row = await resume_run(thread_id=thread_id, run_id=run_id, resume=payload.resume, user=user)
     except ValueError as exc:
@@ -771,7 +788,7 @@ async def cancel_run(
     run_id: str,
     user: User = Depends(get_current_user),
 ) -> dict[str, object]:
-    await authorize(user, "threads", "update", {"thread_id": thread_id, "run_id": run_id})
+    await _verify_thread_access(thread_id, user, action="update")
     await _cancel_active_run(thread_id=thread_id, run_id=run_id, user_id=user.identity)
     return {}
 
@@ -790,7 +807,7 @@ async def cancel_run(
     },
 )
 async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> StreamingResponse:
-    await authorize(user, "threads", "read", {"thread_id": thread_id, "run_id": run_id})
+    await _verify_thread_access(thread_id, user)
     run = await _get_run_read(thread_id, run_id, user)
     return _wait_json_stream_response(
         run=run,
@@ -801,7 +818,7 @@ async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current
 
 @router.delete("/{run_id}", status_code=204)
 async def delete_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> Response:
-    await authorize(user, "threads", "delete", {"thread_id": thread_id, "run_id": run_id})
+    await _verify_thread_access(thread_id, user, action="delete")
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(
@@ -827,7 +844,7 @@ async def stream_run(
     parsed_last_event_id = parse_last_event_id(last_event_id)
     after_seq = parsed_last_event_id or 0
     replay_existing = parsed_last_event_id is not None
-    await authorize(user, "threads", "read", {"thread_id": thread_id, "run_id": run_id})
+    await _verify_thread_access(thread_id, user)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         row = await session.scalar(

@@ -41,7 +41,9 @@ async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
 async def create_stateless_run(payload: RunCreateStateless, user: User = Depends(get_current_user)) -> RunRead:
     await authorize(user, "threads", "create_run", {"assistant_id": payload.assistant_id})
     _validate_supported_run_controls(payload, stateless=True)
-    thread = await create_thread_for_user(payload=ThreadCreate(metadata={"stateless": True}), user=user)
+    thread_value: dict = {"metadata": {"stateless": True}}
+    await authorize(user, "threads", "create", thread_value)
+    thread = await create_thread_for_user(payload=ThreadCreate(metadata=thread_value.get("metadata", {"stateless": True})), user=user)
     return await create_run(thread.thread_id, payload, user)
 
 
@@ -89,7 +91,9 @@ async def create_stateless_run_stream(payload: RunCreateStreamingStateless, user
     await authorize(user, "threads", "create_run", {"assistant_id": payload.assistant_id})
     stream_modes = _normalize_stream_modes(payload.stream_mode)
     _validate_supported_run_controls(payload, stateless=True)
-    thread = await create_thread_for_user(payload=ThreadCreate(metadata={"stateless": True}), user=user)
+    thread_value: dict = {"metadata": {"stateless": True}}
+    await authorize(user, "threads", "create", thread_value)
+    thread = await create_thread_for_user(payload=ThreadCreate(metadata=thread_value.get("metadata", {"stateless": True})), user=user)
     created = await create_run(thread.thread_id, payload, user)
     return _build_create_run_stream_response(
         thread_id=thread.thread_id,
