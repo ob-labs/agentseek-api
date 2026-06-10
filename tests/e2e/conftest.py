@@ -93,7 +93,6 @@ def _start_e2e_server(*, graphs_path: str) -> Generator[str, None, None]:
     env = os.environ.copy()
     env.setdefault("SEEKDB_URL", _seekdb_url())
     env.setdefault("AGENTSEEK_GRAPHS", graphs_path)
-    env.setdefault("AUTH_TYPE", "custom")
     env.setdefault("AUTH_MODULE_PATH", "examples/auth/custom_backend.py:backend")
 
     log_path = Path(os.getenv("E2E_SERVER_LOG", ".tmp/e2e-server.log"))

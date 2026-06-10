@@ -596,12 +596,9 @@ parent api build --config ./langgraph.json -t my-api:dev
   - PostgreSQL: `postgresql+asyncpg://...`
   - OceanBase / MySQL: `mysql+aiomysql://...`
 - Checkpoint persistence defaults to OceanBase / seekdb settings
-- Auth modes:
-  - `AUTH_TYPE=noop`
-  - `AUTH_TYPE=custom` with `AUTH_MODULE_PATH=module:backend_symbol`
-  - `AUTH_TYPE=api_key` with `AUTH_API_KEYS=key=user_id[,key2=user2]`
-  - `AUTH_TYPE=jwt` with `AUTH_JWT_SECRET`, optional
-    `AUTH_JWT_ALGORITHM=HS256`, and `sub` as the user identity
+- Auth: configure via `agentseek.json` `"auth.path"` or `AUTH_MODULE_PATH` env var.
+  Uses `langgraph_sdk.Auth` with `@auth.authenticate` decorator.
+  If not set, all requests pass through as default_user (noop).
 - Assistant management, thread, and run endpoints enforce configured auth.
 
 ### Durable execution

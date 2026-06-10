@@ -228,7 +228,7 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) ->
 
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / ".env"
-    env_file.write_text("AUTH_TYPE=custom\nAUTH_MODULE_PATH=test.module:backend\n", encoding="utf-8")
+    env_file.write_text("AUTH_MODULE_PATH=test.module:backend\n", encoding="utf-8")
     capture = _RunCapture()
 
     exit_code = main(
@@ -252,7 +252,6 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) ->
     assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "9999"]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
-    assert capture.env["AUTH_TYPE"] == "custom"
     assert capture.env["AUTH_MODULE_PATH"] == "test.module:backend"
 
 
@@ -290,7 +289,6 @@ def test_dev_command_loads_config_env_mapping_and_auth_path(tmp_path: Path) -> N
     assert capture.env is not None
     assert capture.env["OPENAI_API_KEY"] == "test-key"
     assert capture.env["FEATURE_FLAG"] == "True"
-    assert capture.env["AUTH_TYPE"] == "custom"
     assert capture.env["AUTH_MODULE_PATH"] == f"{(tmp_path / 'auth.py').resolve()}:auth"
 
 
@@ -1300,7 +1298,6 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path
     container_env = _docker_env_from_run_command(capture.calls[1])
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/auth.py:backend"
-    assert container_env["AUTH_TYPE"] == "custom"
     assert container_env["FEATURE_FLAG"] == "True"
 
 
@@ -1329,35 +1326,6 @@ def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatc
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
 
 
-def test_up_command_passes_new_auth_env_into_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from agentseek_api.cli import main
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    monkeypatch.setenv("AUTH_TYPE", "api_key")
-    monkeypatch.setenv("AUTH_API_KEYS", "local-key=local-user")
-    monkeypatch.setenv("AUTH_JWT_SECRET", "jwt-secret")
-    monkeypatch.setenv("AUTH_JWT_ALGORITHM", "HS256")
-    capture = _RunCapture()
-
-    exit_code = main(
-        [
-            "up",
-            "--config",
-            str(config_path),
-            "--image",
-            "agentseek:test",
-        ],
-        runner=capture,
-        cwd=tmp_path,
-    )
-
-    assert exit_code == 0
-    assert capture.calls is not None
-    container_env = _docker_env_from_run_command(capture.calls[1])
-    assert container_env["AUTH_TYPE"] == "api_key"
-    assert container_env["AUTH_API_KEYS"] == "local-key=local-user"
-    assert container_env["AUTH_JWT_SECRET"] == "jwt-secret"
-    assert container_env["AUTH_JWT_ALGORITHM"] == "HS256"
 
 
 def test_up_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:

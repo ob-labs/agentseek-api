@@ -778,6 +778,9 @@ async def execute_run(
     run_kwargs = kwargs or {}
     user_config = dict(run_kwargs.get("config", {})) if isinstance(run_kwargs.get("config"), dict) else {}
     config = dict(user_config)
+    graph_bound_config = getattr(graph, "config", None) or {}
+    if "recursion_limit" not in config and "recursion_limit" in graph_bound_config:
+        config["recursion_limit"] = graph_bound_config["recursion_limit"]
     configurable = dict(config.get(CONF, {})) if isinstance(config.get(CONF), dict) else {}
     configurable.update(
         {
@@ -835,6 +838,7 @@ async def execute_run(
         _astream_kwargs["durability"] = _durability
     if run_kwargs.get("stream_subgraphs"):
         _astream_kwargs["subgraphs"] = True
+
     async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):

@@ -96,8 +96,8 @@ def main() -> int:
                 f"{env['OCEANBASE_USER']}:{env['OCEANBASE_PASSWORD']}"
                 f"@{env['OCEANBASE_HOST']}:{env['OCEANBASE_PORT']}/{env['OCEANBASE_DB_NAME']}"
             ),
-            "AUTH_TYPE": "api_key",
-            "AUTH_API_KEYS": "secret=api-user",
+            "AUTH_MODULE_PATH": str(ROOT_DIR / "examples" / "auth" / "bearer_token_auth.py") + ":auth",
+            "AUTH_BEARER_TOKENS": "secret=api-user",
         }
     )
 

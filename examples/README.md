@@ -116,7 +116,10 @@ See `examples/external_graph/manifest.json` and
 
 ## Auth and app mounting examples
 
-- `examples/auth/custom_backend.py` shows an `AUTH_TYPE=custom` backend object.
-- `examples/auth/jwt.md` documents the `AUTH_TYPE=jwt` environment contract.
+- `examples/auth/api_key_auth.py` — X-API-Key header validation (`AUTH_API_KEYS=key=user`)
+- `examples/auth/jwt_auth.py` — JWT HS256 token validation (`AUTH_JWT_SECRET=...`)
+- `examples/auth/bearer_token_auth.py` — simple Bearer token lookup (`AUTH_BEARER_TOKENS=token=user`)
+- `examples/auth/custom_backend.py` — protocol-based auth backend (non-SDK style)
+- `examples/auth/jwt.md` — overview of auth configuration
 - `examples/custom_routes/app.py` shows how to mount custom routes around
   `agentseek_api.main.create_app()`.

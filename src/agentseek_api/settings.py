@@ -24,11 +24,7 @@ class Settings(BaseSettings):
     SCHEDULER_POLL_INTERVAL_SECONDS: float = 1.0
     SCHEDULER_CLAIM_LIMIT: int = 10
     AGENTSEEK_GRAPHS: str | None = None
-    AUTH_TYPE: str = "noop"
     AUTH_MODULE_PATH: str | None = None
-    AUTH_API_KEYS: str | None = None
-    AUTH_JWT_SECRET: str | None = None
-    AUTH_JWT_ALGORITHM: str = "HS256"
     STUDIO_AUTH_LOCAL_DEV: bool = False
 
     OCEANBASE_HOST: str = "localhost"

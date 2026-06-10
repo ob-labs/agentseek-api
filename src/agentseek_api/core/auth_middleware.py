@@ -1,10 +1,7 @@
-import base64
-import hashlib
-import hmac
+import inspect
 import ipaddress
-import json
+import logging
 import sys
-import time
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import module_from_spec, spec_from_file_location
@@ -33,104 +30,52 @@ class ConfigAuthSettings:
     disable_studio_auth: bool | None = None
 
 
-class NoopAuthBackend:
-    async def authenticate(self, _request: Request) -> User:
-        return User(identity="default_user", is_authenticated=True)
+logger = logging.getLogger(__name__)
 
 
-class ApiKeyAuthBackend:
-    def __init__(self, api_keys: str) -> None:
-        self._users_by_key = _parse_api_key_mapping(api_keys)
+class LangGraphAuthBackend:
+    """Adapter that wraps a langgraph_sdk.Auth object into an AuthBackend."""
+
+    def __init__(self, auth_obj) -> None:
+        if auth_obj._authenticate_handler is None:
+            raise RuntimeError("Auth object has no @auth.authenticate handler registered.")
+        self._auth = auth_obj
 
     async def authenticate(self, request: Request) -> User:
-        api_key = request.headers.get("x-api-key")
-        if not api_key:
+        handler = self._auth._authenticate_handler
+        params = inspect.signature(handler).parameters
+
+        kwargs: dict[str, Any] = {}
+        if "authorization" in params:
+            kwargs["authorization"] = request.headers.get("authorization")
+        if "headers" in params:
+            kwargs["headers"] = {k.encode(): v.encode() for k, v in request.headers.items()}
+        if "request" in params:
+            kwargs["request"] = request
+        if "method" in params:
+            kwargs["method"] = request.method
+        if "path" in params:
+            kwargs["path"] = request.url.path
+        if "path_params" in params:
+            kwargs["path_params"] = request.path_params
+        if "query_params" in params:
+            kwargs["query_params"] = dict(request.query_params)
+
+        try:
+            result = await handler(**kwargs)
+        except Exception as exc:
+            status = getattr(exc, "status_code", None)
+            if status is None or not (400 <= status < 500):
+                logger.error("Auth handler raised unexpected error: %s", exc)
             return User(identity="anonymous", is_authenticated=False)
-        identity = self._users_by_key.get(api_key)
-        if identity is None:
-            return User(identity="anonymous", is_authenticated=False)
+
+        identity = result.get("identity", "anonymous") if isinstance(result, dict) else "anonymous"
         return User(identity=identity, is_authenticated=True)
 
 
-class JwtAuthBackend:
-    def __init__(self, *, secret: str, algorithm: str = "HS256") -> None:
-        if algorithm != "HS256":
-            raise RuntimeError("Only AUTH_JWT_ALGORITHM=HS256 is supported.")
-        self._secret = secret
-        self._algorithm = algorithm
-
-    async def authenticate(self, request: Request) -> User:
-        authorization = request.headers.get("authorization", "")
-        scheme, _, token = authorization.partition(" ")
-        if scheme.lower() != "bearer" or not token:
-            return User(identity="anonymous", is_authenticated=False)
-
-        payload = _decode_hs256_jwt(token, secret=self._secret, algorithm=self._algorithm)
-        subject = payload.get("sub") if payload is not None else None
-        if not isinstance(subject, str) or not subject:
-            return User(identity="anonymous", is_authenticated=False)
-        return User(identity=subject, is_authenticated=True)
-
-
-def _parse_api_key_mapping(raw_value: str) -> dict[str, str]:
-    users_by_key: dict[str, str] = {}
-    for raw_entry in raw_value.split(","):
-        entry = raw_entry.strip()
-        if not entry:
-            continue
-        if "=" not in entry:
-            raise RuntimeError("AUTH_API_KEYS entries must use 'key=user_id' format.")
-        key, identity = (part.strip() for part in entry.split("=", maxsplit=1))
-        if not key or not identity:
-            raise RuntimeError("AUTH_API_KEYS entries must use 'key=user_id' format.")
-        users_by_key[key] = identity
-    if not users_by_key:
-        raise RuntimeError("AUTH_TYPE=api_key requires AUTH_API_KEYS to contain at least one key=user_id entry.")
-    return users_by_key
-
-
-def _decode_urlsafe_json(segment: str) -> dict[str, Any] | None:
-    try:
-        padded = segment + ("=" * (-len(segment) % 4))
-        raw = base64.urlsafe_b64decode(padded.encode())
-        payload = json.loads(raw)
-    except Exception:
-        return None
-    return payload if isinstance(payload, dict) else None
-
-
-def _decode_hs256_jwt(token: str, *, secret: str, algorithm: str) -> dict[str, Any] | None:
-    try:
-        header_segment, payload_segment, signature_segment = token.split(".")
-    except ValueError:
-        return None
-    header = _decode_urlsafe_json(header_segment)
-    if header is None or header.get("alg") != algorithm:
-        return None
-
-    signing_input = f"{header_segment}.{payload_segment}".encode()
-    expected_signature = hmac.new(secret.encode(), signing_input, hashlib.sha256).digest()
-    expected_segment = base64.urlsafe_b64encode(expected_signature).rstrip(b"=").decode()
-    if not hmac.compare_digest(signature_segment, expected_segment):
-        return None
-    payload = _decode_urlsafe_json(payload_segment)
-    if payload is None or not _jwt_time_claims_are_valid(payload, now=time.time()):
-        return None
-    return payload
-
-
-def _jwt_time_claims_are_valid(payload: dict[str, Any], *, now: float) -> bool:
-    exp = payload.get("exp")
-    if exp is not None:
-        if not isinstance(exp, int | float) or now >= exp:
-            return False
-
-    nbf = payload.get("nbf")
-    if nbf is not None:
-        if not isinstance(nbf, int | float) or now < nbf:
-            return False
-
-    return True
+class NoopAuthBackend:
+    async def authenticate(self, _request: Request) -> User:
+        return User(identity="default_user", is_authenticated=True)
 
 
 def _load_python_file_backend(module_ref: str) -> object:
@@ -201,8 +146,7 @@ def get_config_auth_openapi() -> dict[str, Any] | None:
 
 
 def _auth_is_configured(config_auth: ConfigAuthSettings) -> bool:
-    auth_type = settings.AUTH_TYPE.strip().lower()
-    return auth_type != "noop" or bool(settings.AUTH_MODULE_PATH or config_auth.path)
+    return bool(settings.AUTH_MODULE_PATH or config_auth.path)
 
 
 def _is_loopback_client(request: Request) -> bool:
@@ -255,7 +199,11 @@ def _load_custom_backend(auth_module_path: str | None = None) -> AuthBackend | N
         else:
             module = import_module(module_name)
         obj = getattr(module, symbol)
-        return obj() if callable(obj) else obj
+        if callable(obj):
+            obj = obj()
+        if hasattr(obj, '_authenticate_handler') and obj._authenticate_handler is not None:
+            return LangGraphAuthBackend(obj)
+        return obj
     except Exception as exc:  # noqa: BLE001
         raise RuntimeError(
             f"Could not load AUTH_MODULE_PATH='{auth_module_path}': {exc}"
@@ -271,31 +219,11 @@ def get_auth_backend() -> AuthBackend:
         return _backend
 
     config_auth = get_config_auth_settings()
-    auth_type = settings.AUTH_TYPE.strip().lower()
-    if auth_type == "noop":
-        if config_auth.path:
-            custom_backend = _load_custom_backend(config_auth.path)
-            if custom_backend is not None:
-                _backend = custom_backend
-                return _backend
-        _backend = NoopAuthBackend()
-        return _backend
-    if auth_type == "custom":
-        custom_backend = _load_custom_backend(settings.AUTH_MODULE_PATH or config_auth.path)
-        if custom_backend is None:
-            raise RuntimeError("AUTH_TYPE=custom requires AUTH_MODULE_PATH to be configured.")
-        _backend = custom_backend
-        return _backend
-    if auth_type == "api_key":
-        if not settings.AUTH_API_KEYS:
-            raise RuntimeError("AUTH_TYPE=api_key requires AUTH_API_KEYS to be configured.")
-        _backend = ApiKeyAuthBackend(settings.AUTH_API_KEYS)
-        return _backend
-    if auth_type == "jwt":
-        if not settings.AUTH_JWT_SECRET:
-            raise RuntimeError("AUTH_TYPE=jwt requires AUTH_JWT_SECRET to be configured.")
-        _backend = JwtAuthBackend(secret=settings.AUTH_JWT_SECRET, algorithm=settings.AUTH_JWT_ALGORITHM)
-        return _backend
-    raise ValueError(f"Unsupported AUTH_TYPE: {settings.AUTH_TYPE}")
-
+    auth_path = settings.AUTH_MODULE_PATH or config_auth.path
+    if auth_path:
+        custom_backend = _load_custom_backend(auth_path)
+        if custom_backend is not None:
+            _backend = custom_backend
+            return _backend
+    _backend = NoopAuthBackend()
     return _backend

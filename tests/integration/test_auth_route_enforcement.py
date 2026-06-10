@@ -41,14 +41,31 @@ class InlineExecutor:
         )
 
 
+def _write_auth_file(tmp_path: Path) -> str:
+    auth_file = tmp_path / "test_auth.py"
+    auth_file.write_text(
+        """
+from langgraph_sdk import Auth
+
+auth = Auth()
+
+@auth.authenticate
+async def get_current_user(authorization: str | None):
+    if not authorization:
+        raise Auth.exceptions.HTTPException(status_code=401, detail="Missing token")
+    return {"identity": "test-user"}
+""".strip(),
+        encoding="utf-8",
+    )
+    return f"{auth_file}:auth"
+
+
 @pytest.fixture
 def auth_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
-    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", _write_auth_file(tmp_path))
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
     auth_middleware._backend = None
 
@@ -63,9 +80,7 @@ def local_dev_auth_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Te
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
-    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", _write_auth_file(tmp_path))
     monkeypatch.setattr(settings, "STUDIO_AUTH_LOCAL_DEV", True)
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", None)
 
@@ -80,9 +95,7 @@ def studio_auth_disabled_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
-    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
+    monkeypatch.setattr(settings, "AUTH_MODULE_PATH", _write_auth_file(tmp_path))
     monkeypatch.setattr(settings, "STUDIO_AUTH_LOCAL_DEV", True)
     config_path = tmp_path / "agentseek.json"
     config_path.write_text(
@@ -107,14 +120,14 @@ def studio_auth_disabled_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     auth_middleware._backend = None
 
 
-def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: TestClient) -> None:
+def test_auth_protects_assistant_thread_and_run_routes(auth_client: TestClient) -> None:
     missing_assistant = auth_client.post("/assistants", json={"name": "protected-assistant", "graph_id": "default"})
     assert missing_assistant.status_code == 401
 
     assistant = auth_client.post(
         "/assistants",
         json={"name": "protected-assistant", "graph_id": "default"},
-        headers={"X-API-Key": "secret"},
+        headers={"Authorization": "Bearer test-token"},
     )
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
@@ -122,7 +135,7 @@ def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: Test
     missing_assistant_list = auth_client.post("/assistants/search", json={})
     assert missing_assistant_list.status_code == 401
 
-    assistant_list = auth_client.post("/assistants/search", json={}, headers={"X-API-Key": "secret"})
+    assistant_list = auth_client.post("/assistants/search", json={}, headers={"Authorization": "Bearer test-token"})
     assert assistant_list.status_code == 200
     assert any(item["assistant_id"] == assistant_id for item in assistant_list.json())
 
@@ -132,7 +145,7 @@ def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: Test
     valid_thread = auth_client.post(
         "/threads",
         json={"metadata": {"scope": "auth"}},
-        headers={"X-API-Key": "secret"},
+        headers={"Authorization": "Bearer test-token"},
     )
     assert valid_thread.status_code == 200
     assert "thread_id" in valid_thread.json()
@@ -153,13 +166,13 @@ def test_api_key_auth_protects_assistant_thread_and_run_routes(auth_client: Test
     valid_stateless_run = auth_client.post(
         "/runs",
         json={"assistant_id": assistant_id, "input": {"message": "hello"}},
-        headers={"X-API-Key": "secret"},
+        headers={"Authorization": "Bearer test-token"},
     )
     assert valid_stateless_run.status_code == 200
     assert valid_stateless_run.json()["assistant_id"] == assistant_id
 
 
-def test_studio_requests_bypass_api_key_auth_in_local_dev(local_dev_auth_client: TestClient) -> None:
+def test_studio_requests_bypass_auth_in_local_dev(local_dev_auth_client: TestClient) -> None:
     assistant = local_dev_auth_client.post(
         "/assistants",
         json={"name": "studio-assistant", "graph_id": "default"},

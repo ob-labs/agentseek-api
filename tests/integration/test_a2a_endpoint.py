@@ -16,6 +16,14 @@ from agentseek_api.services.run_jobs import RunExecutionJob
 from agentseek_api.settings import settings
 
 
+class TestApiKeyBackend:
+    async def authenticate(self, request) -> User:
+        api_key = request.headers.get("x-api-key")
+        if not api_key or api_key != "secret":
+            return User(identity="anonymous", is_authenticated=False)
+        return User(identity="api-user", is_authenticated=True)
+
+
 class FakeCheckpointer:
     def __init__(self, connection_args: dict[str, str]) -> None:
         self.connection_args = connection_args
@@ -79,8 +87,6 @@ def _a2a_client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Tes
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
 
     stress_graph_path = Path(__file__).resolve().parents[2] / "examples" / "graphs" / "stress_test" / "graph.py"
@@ -113,15 +119,13 @@ def _create_stress_assistant(client: TestClient, *, name: str = "Messages Echo")
 def test_a2a_route_requires_auth(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
-    monkeypatch.setattr(settings, "AUTH_TYPE", "api_key")
-    monkeypatch.setattr(settings, "AUTH_API_KEYS", "secret=api-user")
     monkeypatch.setattr(settings, "AUTH_MODULE_PATH", None)
 
     stress_graph_path = Path(__file__).resolve().parents[2] / "examples" / "graphs" / "stress_test" / "graph.py"
     config_path = tmp_path / "agentseek.json"
     _write_agent_config(config_path=config_path, stress_graph_path=stress_graph_path)
     monkeypatch.setattr(settings, "AGENTSEEK_GRAPHS", str(config_path))
-    auth_middleware._backend = None
+    auth_middleware._backend = TestApiKeyBackend()
     langgraph_service_module._langgraph_service = None
 
     try:

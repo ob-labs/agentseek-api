@@ -259,29 +259,6 @@ def test_build_agent_card_drops_mixed_supported_and_unsupported_requirement_obje
     assert card["securityRequirements"] == [{"apiKeyAuth": []}]
 
 
-def test_build_agent_card_includes_builtin_api_key_auth_metadata(monkeypatch) -> None:
-    assistant = _assistant()
-    entry = _entry(
-        input_schema={
-            "type": "object",
-            "properties": {"messages": {"type": "array"}},
-            "required": ["messages"],
-        }
-    )
-    monkeypatch.setattr("agentseek_api.a2a_server.get_config_auth_openapi", lambda: None)
-    monkeypatch.setattr("agentseek_api.a2a_server.settings.AUTH_TYPE", "api_key")
-
-    card = build_agent_card(base_url="https://example.com", assistant=assistant, entry=entry)
-
-    assert card["securitySchemes"] == {
-        "apiKeyAuth": {
-            "apiKeySecurityScheme": {
-                "location": "header",
-                "name": "x-api-key",
-            }
-        }
-    }
-    assert card["securityRequirements"] == [{"apiKeyAuth": []}]
 
 
 def test_a2a_task_registry_returns_saved_record() -> None:
