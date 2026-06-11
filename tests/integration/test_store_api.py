@@ -365,3 +365,8 @@ def test_store_invalid_namespace_returns_422(client: TestClient) -> None:
     )
 
     assert response.status_code == 422
+
+
+def test_store_delete_invalid_namespace_returns_422(client: TestClient) -> None:
+    response = client.request("DELETE", "/store/items", json={"namespace": ["valid", ""], "key": "k"}, headers={"x-user-id": "u1"})
+    assert response.status_code == 422

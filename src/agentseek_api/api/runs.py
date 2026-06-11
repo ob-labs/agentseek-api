@@ -9,7 +9,7 @@ from sqlalchemy import delete, select
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from agentseek_api.core.auth_deps import apply_metadata_filters, authorize, get_current_user
 from agentseek_api.core.database import db_manager
@@ -845,8 +845,8 @@ async def join_run(
     )
 
 
-@router.delete("/{run_id}")
-async def delete_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> dict:
+@router.delete("/{run_id}", status_code=204)
+async def delete_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> Response:
     await _verify_thread_access(thread_id, user, action="delete")
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -859,7 +859,7 @@ async def delete_run(thread_id: str, run_id: str, user: User = Depends(get_curre
         await session.commit()
     await _best_effort_delete_for_runs([run_id])
     await delete_run_stream_events([run_id])
-    return {}
+    return Response(status_code=204)
 
 
 @router.get("/{run_id}/stream")
