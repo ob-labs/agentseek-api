@@ -5,7 +5,7 @@ from sqlalchemy import select
 from fastapi import APIRouter, Depends, Response
 from fastapi.responses import StreamingResponse
 
-from agentseek_api.core.auth_deps import get_current_user
+from agentseek_api.core.auth_deps import authorize, apply_metadata_filters, get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import (
@@ -39,8 +39,11 @@ async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
 
 @router.post("", response_model=RunRead)
 async def create_stateless_run(payload: RunCreateStateless, user: User = Depends(get_current_user)) -> RunRead:
+    await authorize(user, "threads", "create_run", {"assistant_id": payload.assistant_id})
     _validate_supported_run_controls(payload, stateless=True)
-    thread = await create_thread_for_user(payload=ThreadCreate(metadata={"stateless": True}), user=user)
+    thread_value: dict = {"metadata": {"stateless": True}}
+    await authorize(user, "threads", "create", thread_value)
+    thread = await create_thread_for_user(payload=ThreadCreate(metadata=thread_value.get("metadata", {"stateless": True})), user=user)
     return await create_run(thread.thread_id, payload, user)
 
 
@@ -85,9 +88,12 @@ async def create_stateless_run_wait(payload: RunCreateStreamingStateless, user: 
     },
 )
 async def create_stateless_run_stream(payload: RunCreateStreamingStateless, user: User = Depends(get_current_user)):
+    await authorize(user, "threads", "create_run", {"assistant_id": payload.assistant_id})
     stream_modes = _normalize_stream_modes(payload.stream_mode)
     _validate_supported_run_controls(payload, stateless=True)
-    thread = await create_thread_for_user(payload=ThreadCreate(metadata={"stateless": True}), user=user)
+    thread_value: dict = {"metadata": {"stateless": True}}
+    await authorize(user, "threads", "create", thread_value)
+    thread = await create_thread_for_user(payload=ThreadCreate(metadata=thread_value.get("metadata", {"stateless": True})), user=user)
     created = await create_run(thread.thread_id, payload, user)
     return _build_create_run_stream_response(
         thread_id=thread.thread_id,
@@ -108,9 +114,11 @@ async def create_run_batch(payload: list[RunCreateStateless], user: User = Depen
 
 @router.post("/cancel", status_code=204)
 async def cancel_runs(payload: RunsCancelRequest, user: User = Depends(get_current_user)) -> Response:
+    filters = await authorize(user, "threads", "update", {})
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        query = select(Run).where(Run.user_id == user.identity)
+        query = select(Run).join(Thread, Run.thread_id == Thread.thread_id)
+        query = apply_metadata_filters(query, Thread, filters)
         if payload.thread_id is not None:
             query = query.where(Run.thread_id == payload.thread_id)
         if payload.run_ids:
@@ -127,7 +135,7 @@ async def cancel_runs(payload: RunsCancelRequest, user: User = Depends(get_curre
         if cancelled_thread_ids:
             threads = (
                 await session.scalars(
-                    select(Thread).where(Thread.thread_id.in_(cancelled_thread_ids), Thread.user_id == user.identity)
+                    select(Thread).where(Thread.thread_id.in_(cancelled_thread_ids))
                 )
             ).all()
             for thread in threads:

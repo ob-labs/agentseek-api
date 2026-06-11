@@ -10,6 +10,8 @@ from typing import Any
 from typing import Protocol
 
 from fastapi import Request
+from langgraph_sdk.auth.exceptions import HTTPException
+from langgraph_sdk.auth.types import AuthContext, StudioUser
 
 from agentseek_api.core.config_file import active_config_path, get_active_config_payload
 from agentseek_api.models.auth import User
@@ -40,6 +42,47 @@ class LangGraphAuthBackend:
         if auth_obj._authenticate_handler is None:
             raise RuntimeError("Auth object has no @auth.authenticate handler registered.")
         self._auth = auth_obj
+        self._has_on_handlers = bool(
+            auth_obj._global_handlers or auth_obj._handlers
+        )
+
+    def _resolve_handler(self, resource: str, action: str):
+        handlers = self._auth._handlers
+        if (resource, action) in handlers:
+            return handlers[(resource, action)][0]
+        if (resource, "*") in handlers:
+            return handlers[(resource, "*")][0]
+        if self._auth._global_handlers:
+            return self._auth._global_handlers[0]
+        return None
+
+    async def authorize(
+        self, user: User, resource: str, action: str, value: dict[str, Any]
+    ) -> None | bool | dict[str, Any]:
+        if not self._has_on_handlers:
+            return None
+
+        handler = self._resolve_handler(resource, action)
+        if handler is None:
+            return None
+
+        ctx_user: User | StudioUser = user
+        if user.identity == STUDIO_USER_ID:
+            ctx_user = StudioUser(username=user.identity, is_authenticated=True)
+
+        ctx = AuthContext(
+            permissions=list(user.permissions),
+            user=ctx_user,
+            resource=resource,
+            action=action,
+        )
+
+        result = await handler(ctx=ctx, value=value)
+
+        if result is False:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        return result
 
     async def authenticate(self, request: Request) -> User:
         handler = self._auth._authenticate_handler
@@ -69,8 +112,19 @@ class LangGraphAuthBackend:
                 logger.error("Auth handler raised unexpected error: %s", exc)
             return User(identity="anonymous", is_authenticated=False)
 
-        identity = result.get("identity", "anonymous") if isinstance(result, dict) else "anonymous"
-        return User(identity=identity, is_authenticated=True)
+        if isinstance(result, str):
+            return User(identity=result, is_authenticated=True)
+        if isinstance(result, dict):
+            result.setdefault("identity", "anonymous")
+            result.setdefault("is_authenticated", True)
+            return User(**result)
+        if hasattr(result, "identity"):
+            fields: dict[str, Any] = {"identity": result.identity, "is_authenticated": True}
+            for attr in ("display_name", "permissions"):
+                if hasattr(result, attr):
+                    fields[attr] = getattr(result, attr)
+            return User(**fields)
+        return User(identity="anonymous", is_authenticated=True)
 
 
 class NoopAuthBackend:

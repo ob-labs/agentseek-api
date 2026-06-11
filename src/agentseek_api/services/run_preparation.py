@@ -62,10 +62,9 @@ async def _persist_submission_failure(
         await session.commit()
 
 
-def _active_run_exists_query(*, thread_id: str, user_id: str, exclude_run_id: str | None = None):
+def _active_run_exists_query(*, thread_id: str, exclude_run_id: str | None = None):
     query = select(Run.run_id).where(
         Run.thread_id == thread_id,
-        Run.user_id == user_id,
         Run.status.not_in(TERMINAL_RUN_STATUSES),
     )
     if exclude_run_id is not None:
@@ -73,13 +72,12 @@ def _active_run_exists_query(*, thread_id: str, user_id: str, exclude_run_id: st
     return query.exists()
 
 
-async def _claim_thread_for_run(*, session, thread_id: str, user_id: str, claimed_at: datetime) -> bool:
+async def _claim_thread_for_run(*, session, thread_id: str, claimed_at: datetime) -> bool:
     result = await session.execute(
         update(Thread)
         .where(
             Thread.thread_id == thread_id,
-            Thread.user_id == user_id,
-            ~_active_run_exists_query(thread_id=thread_id, user_id=user_id),
+            ~_active_run_exists_query(thread_id=thread_id),
         )
         .values(status="busy", state_updated_at=claimed_at)
     )
@@ -91,22 +89,19 @@ async def _claim_thread_for_resume(
     session,
     thread_id: str,
     run_id: str,
-    user_id: str,
     claimed_at: datetime,
 ) -> bool:
     resumable_run_exists = select(Run.run_id).where(
         Run.run_id == run_id,
         Run.thread_id == thread_id,
-        Run.user_id == user_id,
         Run.status == "interrupted",
     ).exists()
     result = await session.execute(
         update(Thread)
         .where(
             Thread.thread_id == thread_id,
-            Thread.user_id == user_id,
             resumable_run_exists,
-            ~_active_run_exists_query(thread_id=thread_id, user_id=user_id),
+            ~_active_run_exists_query(thread_id=thread_id),
         )
         .values(status="busy", state_updated_at=claimed_at)
     )
@@ -177,7 +172,7 @@ async def _prepare_run(
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(
-            select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
+            select(Thread).where(Thread.thread_id == thread_id)
         )
         if thread is None:
             raise ValueError("Thread not found")
@@ -195,7 +190,6 @@ async def _prepare_run(
         if not await _claim_thread_for_run(
             session=session,
             thread_id=thread_id,
-            user_id=user.identity,
             claimed_at=claimed_at,
         ):
             raise ActiveThreadRunConflictError(ACTIVE_THREAD_RUN_CONFLICT)
@@ -353,12 +347,12 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
         thread = await session.scalar(
-            select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity)
+            select(Thread).where(Thread.thread_id == thread_id)
         )
         if thread is None:
             raise ValueError("Thread not found")
         run = await session.scalar(
-            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
+            select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id)
         )
         if run is None:
             raise ValueError("Run not found")
@@ -370,13 +364,11 @@ async def resume_run(*, thread_id: str, run_id: str, resume: Any, user: User) ->
             session=session,
             thread_id=thread_id,
             run_id=run_id,
-            user_id=user.identity,
             claimed_at=claimed_at,
         ):
             if await session.scalar(
                 select(Run.run_id).where(
                     Run.thread_id == thread_id,
-                    Run.user_id == user.identity,
                     Run.status.not_in(TERMINAL_RUN_STATUSES),
                 )
             ):

@@ -164,8 +164,8 @@ def test_run_stream_polls_persisted_events_in_redis_mode(client: TestClient, mon
             ]
         return []
 
-    async def fake_is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
-        _ = (run_id, thread_id, user_id)
+    async def fake_is_run_terminal(*, run_id: str, thread_id: str) -> bool:
+        _ = (run_id, thread_id)
         return load_calls["count"] >= 2
 
     def unexpected_stream_records(*args, **kwargs):
@@ -250,8 +250,8 @@ def test_create_run_stream_polls_persisted_protocol_events_in_redis_mode(client:
             ]
         return []
 
-    async def fake_is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
-        _ = (run_id, thread_id, user_id)
+    async def fake_is_run_terminal(*, run_id: str, thread_id: str) -> bool:
+        _ = (run_id, thread_id)
         return load_calls["count"] >= 2
 
     def unexpected_protocol_stream(*args, **kwargs):
@@ -299,8 +299,8 @@ def test_run_stream_polls_persisted_events_for_terminal_rows_in_redis_mode(clien
             return [(3, {"event": "end", "status": "success"})]
         return []
 
-    async def fake_is_run_terminal(*, run_id: str, thread_id: str, user_id: str) -> bool:
-        _ = (run_id, thread_id, user_id)
+    async def fake_is_run_terminal(*, run_id: str, thread_id: str) -> bool:
+        _ = (run_id, thread_id)
         return True
 
     def unexpected_stream_records(*args, **kwargs):

@@ -36,12 +36,11 @@ def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
     search = client.post("/threads/search", json={"metadata": {"topic": "alpha"}}, headers={"x-user-id": "u1"})
     assert search.status_code == 200
     search_body = search.json()
-    assert len(search_body) == 1
-    assert search_body[0]["thread_id"] == thread_id
+    assert len(search_body) == 2
 
     count = client.post("/threads/count", json={"metadata": {"topic": "alpha"}}, headers={"x-user-id": "u1"})
     assert count.status_code == 200
-    assert count.json() == 1
+    assert count.json() == 2
 
     patched = client.patch(f"/threads/{thread_id}", json={"metadata": {"tag": "patched"}}, headers={"x-user-id": "u1"})
     assert patched.status_code == 200

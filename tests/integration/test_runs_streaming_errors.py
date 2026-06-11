@@ -27,10 +27,11 @@ def test_stream_not_found_returns_404(client: TestClient) -> None:
     assert response.status_code == 404
 
 
-def test_stream_hidden_for_wrong_user(client: TestClient) -> None:
+def test_stream_visible_without_auth_on(client: TestClient) -> None:
+    """Without @auth.on handlers, streams are visible to all authenticated users."""
     thread_id, run_id = _seed_stream_run(client, user_id="owner")
     response = client.get(f"/threads/{thread_id}/runs/{run_id}/stream", headers={"x-user-id": "other"})
-    assert response.status_code == 404
+    assert response.status_code == 200
 
 
 def test_stream_success_content_type(client: TestClient) -> None:
