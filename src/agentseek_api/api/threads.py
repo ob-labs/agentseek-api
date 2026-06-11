@@ -21,6 +21,7 @@ from agentseek_api.models.api import (
     ThreadPruneResponse,
     ThreadRead,
     ThreadSearchRequest,
+    ThreadState,
     ThreadStateSearch,
 )
 from agentseek_api.models.auth import User
@@ -562,13 +563,13 @@ async def get_thread_state_internal(
     return snapshot_to_payload(snapshot, thread_id)
 
 
-@router.get("/{thread_id}/state")
+@router.get("/{thread_id}/state", response_model=ThreadState, response_model_exclude_none=True)
 async def get_thread_state(
     thread_id: str,
     subgraphs: bool = Query(False, description="Whether to include subgraphs in the response"),
     checkpoint_ns: str | None = Query(None, description="Checkpoint namespace to scope lookup"),
     user: User = Depends(get_current_user),
-) -> dict[str, object]:
+) -> ThreadState:
     if subgraphs is True:
         raise HTTPException(status_code=422, detail="'subgraphs' is not supported yet")
 
@@ -671,14 +672,13 @@ async def _get_thread_state_at_checkpoint(*, thread_id: str, checkpoint_id: str,
     return snapshot_to_payload(snapshot, thread_id)
 
 
-@router.get("/{thread_id}/state/{checkpoint_id}")
+@router.get("/{thread_id}/state/{checkpoint_id}", response_model=ThreadState, response_model_exclude_none=True)
 async def get_thread_state_at_checkpoint(
     thread_id: str,
     checkpoint_id: str,
     subgraphs: bool = Query(False, description="Whether to include subgraphs in the response"),
-    checkpoint_ns: str | None = Query(None, description="Checkpoint namespace to scope lookup"),
     user: User = Depends(get_current_user),
-) -> dict[str, object]:
+) -> ThreadState:
     if subgraphs is True:
         raise HTTPException(status_code=422, detail="'subgraphs' is not supported yet")
     return await _get_thread_state_at_checkpoint(thread_id=thread_id, checkpoint_id=checkpoint_id, user=user)

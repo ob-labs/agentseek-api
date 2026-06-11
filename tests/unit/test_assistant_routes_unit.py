@@ -337,6 +337,8 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
             FakeSession(scalar_rows=[assistant]),
             FakeSession(scalar_rows=[assistant]),
             FakeSession(scalar_rows=[assistant]),
+            FakeSession(scalar_rows=[assistant]),
+            FakeSession(scalar_rows=[assistant]),
         ]
     )
     monkeypatch.setattr(
@@ -346,17 +348,18 @@ async def test_assistant_helper_routes_are_truthful_about_missing_version_and_su
     monkeypatch.setattr("agentseek_api.api.assistants.authorize", _noop_authorize)
 
     versions = await assistants_module.get_assistant_versions("assistant-1", user=_TEST_USER)
-    assert versions.model_dump() == {
-        "assistant_id": "assistant-1",
-        "current_version": 1,
-        "latest_version": 1,
-        "available_versions": [1],
-        "supports_version_history": False,
-    }
+    assert len(versions) == 1
+    v = versions[0]
+    assert v.assistant_id == "assistant-1"
+    assert v.version == 1
 
-    with pytest.raises(HTTPException, match="Assistant version promotion is not supported") as latest_error:
-        await assistants_module.set_latest_assistant_version("assistant-1", user=_TEST_USER)
-    assert latest_error.value.status_code == 409
+    latest = await assistants_module.set_latest_assistant_version("assistant-1", version=1, user=_TEST_USER)
+    assert latest.assistant_id == "assistant-1"
+    assert latest.version == 1
+
+    with pytest.raises(HTTPException, match="Version not found") as latest_error:
+        await assistants_module.set_latest_assistant_version("assistant-1", version=99, user=_TEST_USER)
+    assert latest_error.value.status_code == 422
 
     class FakeGraph:
         pass
@@ -412,17 +415,19 @@ def test_assistant_helper_openapi_matches_limited_contract() -> None:
     assert namespaced_responses["422"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
 
     latest_responses = schema["paths"]["/assistants/{assistant_id}/latest"]["post"]["responses"]
-    assert "200" not in latest_responses
-    assert "409" in latest_responses
-    assert latest_responses["409"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
-    assert latest_responses["409"]["content"]["application/json"]["example"] == {
-        "detail": "Assistant version promotion is not supported"
+    assert "200" in latest_responses
+    assert latest_responses["200"]["content"]["application/json"]["schema"]["$ref"] == (
+        "#/components/schemas/AssistantRead"
+    )
+    assert latest_responses["422"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
+    assert latest_responses["422"]["content"]["application/json"]["example"] == {
+        "detail": "Version not found"
     }
 
     versions_responses = schema["paths"]["/assistants/{assistant_id}/versions"]["post"]["responses"]
-    assert versions_responses["200"]["content"]["application/json"]["schema"]["$ref"] == (
-        "#/components/schemas/AssistantVersionInfo"
-    )
+    versions_schema = versions_responses["200"]["content"]["application/json"]["schema"]
+    assert versions_schema["type"] == "array"
+    assert versions_schema["items"]["$ref"] == "#/components/schemas/AssistantRead"
     assert versions_responses["404"]["content"]["application/json"]["schema"]["$ref"] == error_schema_ref
     assert versions_responses["404"]["content"]["application/json"]["example"] == {
         "detail": "Assistant not found"

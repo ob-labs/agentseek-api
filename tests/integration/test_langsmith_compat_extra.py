@@ -109,17 +109,20 @@ def test_assistant_graph_schema_and_version_endpoints(client: TestClient) -> Non
 
     versioned = client.post(f"/assistants/{assistant_id}/versions")
     assert versioned.status_code == 200
-    assert versioned.json() == {
-        "assistant_id": assistant_id,
-        "current_version": 1,
-        "latest_version": 1,
-        "available_versions": [1],
-        "supports_version_history": False,
-    }
+    versions_data = versioned.json()
+    assert isinstance(versions_data, list)
+    assert len(versions_data) == 1
+    assert versions_data[0]["assistant_id"] == assistant_id
+    assert versions_data[0]["version"] == 1
 
-    latest = client.post(f"/assistants/{assistant_id}/latest")
-    assert latest.status_code == 409
-    assert latest.json()["detail"] == "Assistant version promotion is not supported"
+    latest = client.post(f"/assistants/{assistant_id}/latest?version=1")
+    assert latest.status_code == 200
+    assert latest.json()["assistant_id"] == assistant_id
+    assert latest.json()["version"] == 1
+
+    latest_bad = client.post(f"/assistants/{assistant_id}/latest?version=99")
+    assert latest_bad.status_code == 422
+    assert latest_bad.json()["detail"] == "Version not found"
 
 
 def test_run_join_and_delete_endpoints(client: TestClient) -> None:

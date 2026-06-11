@@ -2,19 +2,19 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
 from sqlalchemy import delete, select
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Query
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from agentseek_api.core.auth_deps import apply_metadata_filters, authorize, get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
-from agentseek_api.models.api import RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
+from agentseek_api.models.api import ErrorDetailResponse, RunCreateStateful, RunCreateStreamingStateful, RunRead, RunResume
 from agentseek_api.models.auth import User
 from agentseek_api.api.threads import get_thread_state_internal
 from agentseek_api.services.thread_checkpoint_store import snapshot_to_payload
@@ -93,6 +93,13 @@ def _public_run_metadata(metadata: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(metadata, dict):
         return {}
     return {key: value for key, value in metadata.items() if key != RUN_CHECKPOINT_ID_METADATA_KEY}
+
+
+def _format_run_error(last_error: str | None, run_id: str) -> dict[str, Any]:
+    if last_error and ": " in last_error:
+        error_type, _, message = last_error.partition(": ")
+        return {"error": error_type, "message": message, "run_id": run_id}
+    return {"error": last_error or "Unknown", "message": last_error or "", "run_id": run_id}
 
 
 def _uses_redis_executor() -> bool:
@@ -482,7 +489,7 @@ def _build_create_run_stream_response(
                 yield _protocol_event_sse(
                     seq=current_seq,
                     event_name="error",
-                    data={"error": final_run.last_error, "run_id": created.run_id},
+                    data=_format_run_error(final_run.last_error, created.run_id),
                 )
                 return
             interrupt_event = _interrupt_stream_event_name(stream_modes)
@@ -552,7 +559,7 @@ async def _iter_persisted_run_records(
         await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
 
 
-@router.post("", response_model=RunRead)
+@router.post("", response_model=RunRead, response_model_exclude_none=True)
 async def create_run(thread_id: str, payload: RunCreateStateful, user: User = Depends(get_current_user)) -> RunRead:
     await _verify_thread_access(thread_id, user, action="create_run")
     _validate_supported_run_controls(payload, stateless=False)
@@ -568,7 +575,7 @@ async def create_run(thread_id: str, payload: RunCreateStateful, user: User = De
         run_kwargs["interrupt_after"] = interrupt_after
     command = getattr(payload, "command", None)
     if command is not None:
-        run_kwargs["command"] = command
+        run_kwargs["command"] = command.model_dump(exclude_none=True)
     durability = getattr(payload, "durability", "async")
     if durability != "async":
         run_kwargs["durability"] = durability
@@ -591,26 +598,32 @@ async def create_run(thread_id: str, payload: RunCreateStateful, user: User = De
     return _to_read_model(row)
 
 
-_VALID_RUN_STATUSES = {"pending", "running", "error", "success", "timeout", "interrupted"}
+_RunStatus = Literal["pending", "running", "error", "success", "timeout", "interrupted"]
+_RunSelectField = Literal[
+    "run_id", "thread_id", "assistant_id", "created_at", "updated_at",
+    "status", "metadata", "kwargs", "multitask_strategy",
+]
 _VALID_RUN_SELECT_FIELDS = {
     "run_id", "thread_id", "assistant_id", "created_at", "updated_at",
     "status", "metadata", "kwargs", "multitask_strategy",
 }
 
 
-@router.get("", response_model=list[RunRead])
+@router.get(
+    "",
+    response_model=list[RunRead],
+    response_model_exclude_none=True,
+    responses={404: {"model": ErrorDetailResponse}},
+)
 async def list_runs(
     thread_id: str,
     user: User = Depends(get_current_user),
     limit: int = Query(default=10, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
-    status: str | None = Query(default=None),
-    select_fields: Annotated[list[str] | None, Query(alias="select")] = None,
+    status: _RunStatus | None = Query(default=None),
+    select_fields: Annotated[list[_RunSelectField] | None, Query(alias="select")] = None,
 ) -> Any:
-    if status is not None and status not in _VALID_RUN_STATUSES:
-        raise HTTPException(status_code=422, detail=f"Invalid status filter: {status}")
-    if not await _has_thread_access(thread_id, user):
-        return []
+    await _verify_thread_access(thread_id, user)
     query = select(Run).where(Run.thread_id == thread_id)
     if status is not None:
         query = query.where(Run.status == status)
@@ -625,7 +638,7 @@ async def list_runs(
     return [_to_read_model(row) for row in rows]
 
 
-@router.get("/{run_id}", response_model=RunRead)
+@router.get("/{run_id}", response_model=RunRead, response_model_exclude_none=True)
 async def get_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
     await _verify_thread_access(thread_id, user)
     session_factory = db_manager.get_session_factory()
@@ -661,7 +674,7 @@ async def _wait_run_terminal(
         await asyncio.sleep(0.2)
 
 
-@router.get("/{run_id}/wait", response_model=RunRead)
+@router.get("/{run_id}/wait", response_model=RunRead, response_model_exclude_none=True)
 async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
     await _verify_thread_access(thread_id, user)
     return await _wait_run_terminal(thread_id, run_id, user)
@@ -786,10 +799,20 @@ async def _cancel_active_run(
 async def cancel_run(
     thread_id: str,
     run_id: str,
+    wait: bool = Query(False),
+    action: Literal["interrupt", "rollback"] = Query("interrupt"),
     user: User = Depends(get_current_user),
 ) -> dict[str, object]:
     await _verify_thread_access(thread_id, user, action="update")
-    await _cancel_active_run(thread_id=thread_id, run_id=run_id, user_id=user.identity)
+    cancelled = await _cancel_active_run(thread_id=thread_id, run_id=run_id, user_id=user.identity)
+    if wait and cancelled:
+        await _wait_run_terminal(thread_id, run_id, user)
+    if action == "rollback" and cancelled:
+        session_factory = db_manager.get_session_factory()
+        async with session_factory() as session:
+            await session.execute(delete(Run).where(Run.run_id == run_id, Run.thread_id == thread_id))
+            await session.commit()
+        await delete_run_stream_events([run_id])
     return {}
 
 
@@ -806,18 +829,24 @@ async def cancel_run(
         }
     },
 )
-async def join_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> StreamingResponse:
+async def join_run(
+    thread_id: str,
+    run_id: str,
+    cancel_on_disconnect: bool = Query(False, description="If true, the run will be cancelled if the client disconnects."),
+    user: User = Depends(get_current_user),
+) -> StreamingResponse:
     await _verify_thread_access(thread_id, user)
     run = await _get_run_read(thread_id, run_id, user)
     return _wait_json_stream_response(
         run=run,
         user=user,
         headers=_wait_response_headers(thread_id=thread_id, run_id=run_id),
+        cancel_on_disconnect=cancel_on_disconnect,
     )
 
 
-@router.delete("/{run_id}", status_code=204)
-async def delete_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> Response:
+@router.delete("/{run_id}")
+async def delete_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> dict:
     await _verify_thread_access(thread_id, user, action="delete")
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -830,7 +859,7 @@ async def delete_run(thread_id: str, run_id: str, user: User = Depends(get_curre
         await session.commit()
     await _best_effort_delete_for_runs([run_id])
     await delete_run_stream_events([run_id])
-    return Response(status_code=204)
+    return {}
 
 
 @router.get("/{run_id}/stream")
@@ -840,6 +869,7 @@ async def stream_run(
     user: User = Depends(get_current_user),
     last_event_id: str | None = Header(default=None, alias="Last-Event-ID"),
     stream_mode: Annotated[list[str] | None, Query()] = None,
+    cancel_on_disconnect: bool = Query(False, description="If true, the run will be cancelled if the client disconnects."),
 ) -> StreamingResponse:
     parsed_last_event_id = parse_last_event_id(last_event_id)
     after_seq = parsed_last_event_id or 0
@@ -865,6 +895,7 @@ async def stream_run(
                 content_location=f"/threads/{thread_id}/runs/{run_id}",
                 include_metadata=after_seq == 0,
                 replay_existing=replay_existing,
+                cancel_on_disconnect=cancel_on_disconnect,
             )
 
     async def _event_iter() -> AsyncIterator[str]:

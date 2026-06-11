@@ -167,6 +167,40 @@ def _build_entry_graph(entry: Any, *, checkpointer: Any, store: Any) -> Any:
     return build_graph(checkpointer)
 
 
+def _get_schema_fields(schema: type) -> set[str] | None:
+    from dataclasses import fields as dc_fields
+    try:
+        if hasattr(schema, "model_fields"):
+            return set(schema.model_fields.keys())
+        if hasattr(schema, "__dataclass_fields__"):
+            return {f.name for f in dc_fields(schema)}
+        if hasattr(schema, "__annotations__"):
+            return set(schema.__annotations__.keys())
+    except Exception:
+        pass
+    return None
+
+
+_CONFIGURABLE_INTERNAL_KEYS = frozenset({
+    "thread_id", "checkpoint_ns", "checkpoint_id", "graph_id",
+    "assistant_id", "run_id", "store", "langgraph_auth_user",
+})
+
+
+def _resolve_run_context(
+    context_schema: type,
+    explicit_context: dict[str, Any] | None,
+    configurable: dict[str, Any] | None,
+) -> dict[str, Any]:
+    context = explicit_context or {}
+    if not context and isinstance(configurable, dict):
+        context = {k: v for k, v in configurable.items() if k not in _CONFIGURABLE_INTERNAL_KEYS}
+    valid_keys = _get_schema_fields(context_schema)
+    if valid_keys is not None and context:
+        context = {k: v for k, v in context.items() if k in valid_keys}
+    return context
+
+
 class _ProtocolMessageStreamState:
     @dataclass
     class _OpenMessage:
@@ -793,8 +827,6 @@ async def execute_run(
             "store": runtime_store,
         }
     )
-    if "context" in run_kwargs:
-        configurable["context"] = run_kwargs["context"]
     config[CONF] = configurable
     command_payload = run_kwargs.get("command")
     if resume is not UNSET:
@@ -825,6 +857,11 @@ async def execute_run(
     _want_messages_tuple = "messages-tuple" in _requested_stream_modes
     _extra_stream_modes = [m for m in _requested_stream_modes if m not in ("messages", "messages-tuple", "updates")]
     _astream_kwargs: dict[str, Any] = {}
+    _context_schema = getattr(graph, "context_schema", None)
+    if _context_schema is not None:
+        _astream_kwargs["context"] = _resolve_run_context(
+            _context_schema, run_kwargs.get("context"), config.get(CONF, {})
+        )
     if _extra_stream_modes:
         _astream_kwargs["stream_mode"] = list(set(_extra_stream_modes) | {"updates"})
     _interrupt_before = run_kwargs.get("interrupt_before")
@@ -838,7 +875,6 @@ async def execute_run(
         _astream_kwargs["durability"] = _durability
     if run_kwargs.get("stream_subgraphs"):
         _astream_kwargs["subgraphs"] = True
-
     async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):

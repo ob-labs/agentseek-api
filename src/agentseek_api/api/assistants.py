@@ -18,14 +18,12 @@ from agentseek_api.models.api import (
     AssistantPatch,
     AssistantRead,
     AssistantSearchRequest,
-    AssistantVersionInfo,
     ErrorDetailResponse,
 )
 from agentseek_api.services.default_assistants import resolve_assistant_id
 from agentseek_api.services.langgraph_service import get_langgraph_service
 
 router = APIRouter()
-ASSISTANT_VERSION_PROMOTION_UNSUPPORTED = "Assistant version promotion is not supported"
 DELETE_THREADS_UNSUPPORTED = "delete_threads=true is not supported"
 SUBGRAPHS_UNSUPPORTED = "The graph does not support subgraphs"
 
@@ -363,36 +361,34 @@ async def get_assistant_subgraphs_by_namespace(
 
 @router.post(
     "/{assistant_id}/versions",
-    response_model=AssistantVersionInfo,
+    response_model=list[AssistantRead],
+    response_model_exclude_none=True,
     responses={
         404: _detail_response(description="Assistant not found", detail="Assistant not found"),
     },
 )
-async def get_assistant_versions(assistant_id: str, user: User = Depends(get_current_user)) -> AssistantVersionInfo:
+async def get_assistant_versions(assistant_id: str, user: User = Depends(get_current_user)) -> list[AssistantRead]:
     await authorize(user, "assistants", "read", {"assistant_id": assistant_id})
     assistant = await _get_assistant_by_id(assistant_id)
-    return AssistantVersionInfo(
-        assistant_id=assistant.assistant_id,
-        current_version=assistant.version,
-        latest_version=assistant.version,
-        available_versions=[assistant.version],
-        supports_version_history=False,
-    )
+    return [assistant]
 
 
 @router.post(
     "/{assistant_id}/latest",
-    status_code=409,
-    response_model=None,
+    response_model=AssistantRead,
+    response_model_exclude_none=True,
     responses={
         404: _detail_response(description="Assistant not found", detail="Assistant not found"),
-        409: _detail_response(
-            description="Unsupported helper endpoint",
-            detail=ASSISTANT_VERSION_PROMOTION_UNSUPPORTED,
-        ),
+        422: _detail_response(description="Invalid version", detail="Version not found"),
     },
 )
-async def set_latest_assistant_version(assistant_id: str, user: User = Depends(get_current_user)) -> None:
+async def set_latest_assistant_version(
+    assistant_id: str,
+    version: int = Query(..., description="The version of the assistant to change to."),
+    user: User = Depends(get_current_user),
+) -> AssistantRead:
     await authorize(user, "assistants", "update", {"assistant_id": assistant_id})
-    _ = await _get_assistant_by_id(assistant_id)
-    raise HTTPException(status_code=409, detail=ASSISTANT_VERSION_PROMOTION_UNSUPPORTED)
+    assistant = await _get_assistant_by_id(assistant_id)
+    if version != assistant.version:
+        raise HTTPException(status_code=422, detail="Version not found")
+    return assistant

@@ -37,28 +37,27 @@ def _handle_store_error(exc: InvalidNamespaceError) -> HTTPException:
     return HTTPException(status_code=422, detail=str(exc))
 
 
-@router.put("/items", response_model=StoreItemRead)
-async def put_item(payload: StorePutRequest, user: User = Depends(get_current_user)) -> StoreItemRead:
+@router.put("/items", status_code=204)
+async def put_item(payload: StorePutRequest, user: User = Depends(get_current_user)) -> Response:
     ttl = payload.ttl if "ttl" in payload.model_fields_set else NOT_PROVIDED
+    index = payload.index if "index" in payload.model_fields_set else None
     try:
         await _user_store(user).aput(
             tuple(payload.namespace),
             payload.key,
             dict(payload.value),
+            index=index,
             ttl=ttl,
         )
-        item = await _user_store(user).aget(tuple(payload.namespace), payload.key, refresh_ttl=False)
     except InvalidNamespaceError as exc:
         raise _handle_store_error(exc) from exc
-    if item is None:
-        raise HTTPException(status_code=500, detail="Store write did not persist.")
-    return _to_store_item_read(item)
+    return Response(status_code=204)
 
 
 @router.get("/items", response_model=StoreItemRead)
 async def get_item(
-    namespace: list[str] = Query(),
     key: str = Query(),
+    namespace: list[str] = Query(default_factory=list),
     refresh_ttl: bool | None = Query(default=None),
     user: User = Depends(get_current_user),
 ) -> StoreItemRead:
