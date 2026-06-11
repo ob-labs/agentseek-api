@@ -74,6 +74,10 @@ async def test_backend_authorize_passes_studio_user_to_handler():
     result = await backend.authorize(user, "threads", "read", {})
     assert result is None
 
+    regular_user = User(identity="alice", is_authenticated=True)
+    result = await backend.authorize(regular_user, "threads", "read", {})
+    assert result == {"owner": "alice"}
+
 
 @pytest.mark.asyncio
 async def test_backend_authorize_handler_returns_false_raises_403():

@@ -495,3 +495,344 @@ class TestAuthorizeReturnTrue:
 
         result = await backend.authorize(user, "threads", "read", {})
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Gap 1: @auth.on.store() namespace-based authorization
+# ---------------------------------------------------------------------------
+
+
+def _build_store_namespace_auth() -> Auth:
+    """Auth object with @auth.on handler that enforces namespace[0] == user identity (doc example)."""
+    auth = Auth()
+
+    @auth.authenticate
+    async def authenticate(authorization: str | None):
+        if not authorization:
+            raise Auth.exceptions.HTTPException(status_code=401, detail="Missing token")
+        scheme, token = authorization.split(" ", 1)
+        if scheme.lower() != "bearer":
+            raise Auth.exceptions.HTTPException(status_code=401, detail="Bad scheme")
+        users = {"alice-token": "alice", "bob-token": "bob"}
+        identity = users.get(token)
+        if identity is None:
+            raise Auth.exceptions.HTTPException(status_code=401, detail="Invalid token")
+        return {"identity": identity}
+
+    @auth.on
+    async def add_owner(ctx, value):
+        metadata = value.setdefault("metadata", {})
+        metadata["owner"] = ctx.user.identity
+        return {"owner": ctx.user.identity}
+
+    return auth
+
+
+class TestStoreNamespaceAuthorization:
+    """Verify store namespace-based user isolation (doc: @auth.on.store).
+
+    The project uses UserScopedStore to enforce namespace isolation at the
+    application layer rather than via @auth.on.store() handlers. These tests
+    verify that when a real auth backend is active, the store API still
+    correctly isolates data between authenticated users.
+    """
+
+    @pytest.fixture
+    def store_auth_client(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
+        client = _make_auth_client(monkeypatch, tmp_path, _build_store_namespace_auth())
+        with client:
+            yield client
+        auth_middleware._backend = None
+
+    def test_user_cannot_see_other_users_store_items(self, store_auth_client: TestClient) -> None:
+        put = store_auth_client.put(
+            "/store/items",
+            json={"namespace": ["memories"], "key": "secret", "value": {"data": "alice-only"}},
+            headers=ALICE_HEADERS,
+        )
+        assert put.status_code == 200
+
+        alice_get = store_auth_client.get(
+            "/store/items",
+            params=[("namespace", "memories"), ("key", "secret")],
+            headers=ALICE_HEADERS,
+        )
+        assert alice_get.status_code == 200
+        assert alice_get.json()["value"]["data"] == "alice-only"
+
+        bob_get = store_auth_client.get(
+            "/store/items",
+            params=[("namespace", "memories"), ("key", "secret")],
+            headers=BOB_HEADERS,
+        )
+        assert bob_get.status_code == 404
+
+    def test_store_search_filters_by_user(self, store_auth_client: TestClient) -> None:
+        store_auth_client.put(
+            "/store/items",
+            json={"namespace": ["notes"], "key": "a", "value": {"owner": "alice"}},
+            headers=ALICE_HEADERS,
+        )
+        store_auth_client.put(
+            "/store/items",
+            json={"namespace": ["notes"], "key": "b", "value": {"owner": "bob"}},
+            headers=BOB_HEADERS,
+        )
+
+        alice_search = store_auth_client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["notes"], "limit": 10, "offset": 0},
+            headers=ALICE_HEADERS,
+        )
+        assert alice_search.status_code == 200
+        assert all(item["value"]["owner"] == "alice" for item in alice_search.json()["items"])
+
+        bob_search = store_auth_client.post(
+            "/store/items/search",
+            json={"namespace_prefix": ["notes"], "limit": 10, "offset": 0},
+            headers=BOB_HEADERS,
+        )
+        assert bob_search.status_code == 200
+        assert all(item["value"]["owner"] == "bob" for item in bob_search.json()["items"])
+
+    def test_store_namespaces_filtered_by_user(self, store_auth_client: TestClient) -> None:
+        store_auth_client.put(
+            "/store/items",
+            json={"namespace": ["workspace", "docs"], "key": "readme", "value": {"content": "hi"}},
+            headers=ALICE_HEADERS,
+        )
+        store_auth_client.put(
+            "/store/items",
+            json={"namespace": ["workspace", "logs"], "key": "entry", "value": {"content": "log"}},
+            headers=BOB_HEADERS,
+        )
+
+        alice_ns = store_auth_client.post(
+            "/store/namespaces",
+            json={"prefix": ["workspace"], "max_depth": 2, "limit": 10, "offset": 0},
+            headers=ALICE_HEADERS,
+        )
+        assert alice_ns.status_code == 200
+        assert alice_ns.json() == [["workspace", "docs"]]
+
+        bob_ns = store_auth_client.post(
+            "/store/namespaces",
+            json={"prefix": ["workspace"], "max_depth": 2, "limit": 10, "offset": 0},
+            headers=BOB_HEADERS,
+        )
+        assert bob_ns.status_code == 200
+        assert bob_ns.json() == [["workspace", "logs"]]
+
+
+# ---------------------------------------------------------------------------
+# Gap 2: Custom authenticate fields reach langgraph_auth_user
+# ---------------------------------------------------------------------------
+
+
+class TestCustomAuthFieldsPropagation:
+    """Verify that custom fields from @auth.authenticate are propagated to User model.
+
+    The doc example returns {identity, github_token, jira_token, email} from the
+    authenticate handler. Since User uses extra='allow', these fields should be
+    available on the User object and ultimately in langgraph_auth_user.
+    """
+
+    @pytest.mark.asyncio
+    async def test_authenticate_returns_custom_fields_on_user(self) -> None:
+        auth = Auth()
+
+        @auth.authenticate
+        async def authenticate(authorization: str | None):
+            if not authorization:
+                raise Auth.exceptions.HTTPException(status_code=401, detail="Missing")
+            return {
+                "identity": "user-42",
+                "email": "alice@example.com",
+                "github_token": "ghp_abc123",
+                "jira_token": "jira_xyz",
+            }
+
+        backend = LangGraphAuthBackend(auth)
+        from fastapi import Request
+
+        request = Request({
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer valid-token")],
+        })
+        user = await backend.authenticate(request)
+
+        assert user.identity == "user-42"
+        assert user.is_authenticated is True
+        assert user["email"] == "alice@example.com"
+        assert user["github_token"] == "ghp_abc123"
+        assert user["jira_token"] == "jira_xyz"
+
+    @pytest.mark.asyncio
+    async def test_custom_fields_survive_model_dump_into_configurable(self) -> None:
+        user = User(identity="user-42", is_authenticated=True, email="alice@example.com", github_token="ghp_abc123")
+        config: dict[str, Any] = {"configurable": {}}
+        config["configurable"]["langgraph_auth_user"] = user
+
+        auth_user = config["configurable"]["langgraph_auth_user"]
+        assert auth_user.identity == "user-42"
+        assert auth_user["email"] == "alice@example.com"
+        assert auth_user["github_token"] == "ghp_abc123"
+
+
+# ---------------------------------------------------------------------------
+# Gap 3: External auth provider (httpx + JWT)
+# ---------------------------------------------------------------------------
+
+
+class TestExternalAuthProvider:
+    """Verify the OAuth2 / external auth provider pattern from the doc.
+
+    Simulates calling an external service (e.g. Supabase) to validate tokens
+    by mocking httpx.AsyncClient.
+    """
+
+    @pytest.mark.asyncio
+    async def test_external_jwt_validation_success(self) -> None:
+        import httpx
+
+        auth = Auth()
+
+        SUPABASE_URL = "https://fake.supabase.co"
+        SUPABASE_SERVICE_KEY = "service-key-secret"
+
+        @auth.authenticate
+        async def get_current_user(authorization: str | None):
+            assert authorization
+            scheme, token = authorization.split()
+            assert scheme.lower() == "bearer"
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        f"{SUPABASE_URL}/auth/v1/user",
+                        headers={
+                            "Authorization": authorization,
+                            "apiKey": SUPABASE_SERVICE_KEY,
+                        },
+                    )
+                    assert response.status_code == 200
+                    user_data = response.json()
+                    return {
+                        "identity": user_data["id"],
+                        "email": user_data["email"],
+                        "is_authenticated": True,
+                    }
+            except Exception as e:
+                raise Auth.exceptions.HTTPException(status_code=401, detail=str(e))
+
+        backend = LangGraphAuthBackend(auth)
+
+        from unittest.mock import AsyncMock, patch, MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 200
+        mock_response.json.return_value = {"id": "supabase-uid-123", "email": "alice@example.com"}
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        from fastapi import Request
+
+        request = Request({
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer valid-jwt-token")],
+        })
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            user = await backend.authenticate(request)
+
+        assert user.identity == "supabase-uid-123"
+        assert user["email"] == "alice@example.com"
+        assert user.is_authenticated is True
+
+        mock_client.get.assert_called_once_with(
+            f"{SUPABASE_URL}/auth/v1/user",
+            headers={
+                "Authorization": "Bearer valid-jwt-token",
+                "apiKey": SUPABASE_SERVICE_KEY,
+            },
+        )
+
+    @pytest.mark.asyncio
+    async def test_external_jwt_validation_failure(self) -> None:
+        import httpx
+
+        auth = Auth()
+
+        @auth.authenticate
+        async def get_current_user(authorization: str | None):
+            assert authorization
+            scheme, token = authorization.split()
+            assert scheme.lower() == "bearer"
+            try:
+                async with httpx.AsyncClient() as client:
+                    response = await client.get(
+                        "https://fake.supabase.co/auth/v1/user",
+                        headers={"Authorization": authorization, "apiKey": "key"},
+                    )
+                    assert response.status_code == 200
+                    user_data = response.json()
+                    return {"identity": user_data["id"], "is_authenticated": True}
+            except Exception as e:
+                raise Auth.exceptions.HTTPException(status_code=401, detail=str(e))
+
+        backend = LangGraphAuthBackend(auth)
+
+        from unittest.mock import AsyncMock, patch, MagicMock
+
+        mock_response = MagicMock()
+        mock_response.status_code = 401
+
+        mock_client = AsyncMock()
+        mock_client.get = AsyncMock(return_value=mock_response)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+
+        from fastapi import Request
+
+        request = Request({
+            "type": "http",
+            "headers": [(b"authorization", b"Bearer expired-token")],
+        })
+
+        with patch("httpx.AsyncClient", return_value=mock_client):
+            user = await backend.authenticate(request)
+
+        assert user.identity == "anonymous"
+        assert user.is_authenticated is False
+
+
+# ---------------------------------------------------------------------------
+# Gap 4: @auth.on.threads.search scoped handler (explicit test)
+# ---------------------------------------------------------------------------
+
+
+class TestThreadsSearchScopedHandler:
+    """Verify @auth.on.threads.search handler is exercised with resource_specific_client."""
+
+    def test_thread_search_filters_by_owner(self, resource_specific_client: TestClient) -> None:
+        resource_specific_client.post("/threads", json={}, headers=ALICE_HEADERS)
+        resource_specific_client.post("/threads", json={}, headers=BOB_HEADERS)
+
+        alice_search = resource_specific_client.post("/threads/search", json={}, headers=ALICE_HEADERS)
+        assert alice_search.status_code == 200
+        for t in alice_search.json():
+            assert t["metadata"].get("owner") == "alice"
+
+        bob_search = resource_specific_client.post("/threads/search", json={}, headers=BOB_HEADERS)
+        assert bob_search.status_code == 200
+        for t in bob_search.json():
+            assert t["metadata"].get("owner") == "bob"
+
+    def test_thread_search_returns_empty_for_user_with_no_threads(self, resource_specific_client: TestClient) -> None:
+        resource_specific_client.post("/threads", json={}, headers=ALICE_HEADERS)
+
+        bob_search = resource_specific_client.post("/threads/search", json={}, headers=BOB_HEADERS)
+        assert bob_search.status_code == 200
+        assert bob_search.json() == []

@@ -10,7 +10,8 @@ from typing import Any
 from typing import Protocol
 
 from fastapi import Request
-from langgraph_sdk.auth.types import StudioUser
+from langgraph_sdk.auth.exceptions import HTTPException
+from langgraph_sdk.auth.types import AuthContext, StudioUser
 
 from agentseek_api.core.config_file import active_config_path, get_active_config_payload
 from agentseek_api.models.auth import User
@@ -65,9 +66,7 @@ class LangGraphAuthBackend:
         if handler is None:
             return None
 
-        from langgraph_sdk.auth.types import AuthContext
-
-        ctx_user: Any = user
+        ctx_user: User | StudioUser = user
         if user.identity == STUDIO_USER_ID:
             ctx_user = StudioUser(username=user.identity, is_authenticated=True)
 
@@ -81,7 +80,6 @@ class LangGraphAuthBackend:
         result = await handler(ctx=ctx, value=value)
 
         if result is False:
-            from langgraph_sdk.auth.exceptions import HTTPException
             raise HTTPException(status_code=403, detail="Forbidden")
 
         return result
