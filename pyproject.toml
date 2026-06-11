@@ -1,6 +1,6 @@
 [project]
 name = "agentseek-api"
-version = "0.0.3"
+version = "0.1.0rc1"
 description = "AgentSeek API core runtime with OceanBase checkpoints."
 readme = "README.md"
 requires-python = ">=3.12"
