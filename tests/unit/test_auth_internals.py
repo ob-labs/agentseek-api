@@ -61,8 +61,12 @@ async def test_backend_authorize_returns_none_when_no_handlers():
 
 
 @pytest.mark.asyncio
-async def test_backend_authorize_returns_none_for_studio_user():
+async def test_backend_authorize_passes_studio_user_to_handler():
+    from langgraph_sdk.auth import is_studio_user
+
     async def handler(ctx, value):
+        if is_studio_user(ctx.user):
+            return None
         return {"owner": ctx.user.identity}
 
     backend = _make_backend_with_handler(handler)

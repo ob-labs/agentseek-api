@@ -10,6 +10,7 @@ from typing import Any
 from typing import Protocol
 
 from fastapi import Request
+from langgraph_sdk.auth.types import StudioUser
 
 from agentseek_api.core.config_file import active_config_path, get_active_config_payload
 from agentseek_api.models.auth import User
@@ -60,18 +61,19 @@ class LangGraphAuthBackend:
         if not self._has_on_handlers:
             return None
 
-        if user.identity == STUDIO_USER_ID:
-            return None
-
         handler = self._resolve_handler(resource, action)
         if handler is None:
             return None
 
         from langgraph_sdk.auth.types import AuthContext
 
+        ctx_user: Any = user
+        if user.identity == STUDIO_USER_ID:
+            ctx_user = StudioUser(username=user.identity, is_authenticated=True)
+
         ctx = AuthContext(
             permissions=list(user.permissions),
-            user=user,
+            user=ctx_user,
             resource=resource,
             action=action,
         )
