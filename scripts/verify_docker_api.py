@@ -223,8 +223,8 @@ def _assert_common_flow(base_url: str) -> None:
     )
     assert isinstance(missing_for_bob, dict)
 
-    _, bob_runs, _ = _request(base_url=base_url, path=f"/threads/{thread_id}/runs", headers=bob)
-    assert bob_runs == []
+    _, bob_runs, _ = _request(base_url=base_url, path=f"/threads/{thread_id}/runs", headers=bob, expected_status=404)
+    assert isinstance(bob_runs, dict)
 
     _, stream_body, stream_content_type = _request(
         base_url=base_url,

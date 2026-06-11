@@ -392,3 +392,16 @@ def test_get_auth_backend_rejects_empty_symbol(monkeypatch: pytest.MonkeyPatch) 
 
     with pytest.raises(RuntimeError, match="Invalid AUTH_MODULE_PATH"):
         get_auth_backend()
+
+
+def test_user_iter_includes_extra_fields() -> None:
+    user = User(identity="u1", custom_field="val")
+    keys = list(user)
+    assert "custom_field" in keys
+    assert "identity" in keys
+
+
+def test_user_getitem_raises_key_error_for_missing() -> None:
+    user = User(identity="u1")
+    with pytest.raises(KeyError):
+        user["nonexistent"]

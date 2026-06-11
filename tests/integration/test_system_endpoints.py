@@ -60,7 +60,6 @@ def test_info_endpoint(client: TestClient) -> None:
     assert body["metadata"]["compatibility_tier"] == "oss-core"
     assert body["metadata"]["unsupported_features"] == [
         "distributed_runtime",
-        "assistant_version_promotion",
     ]
 
 

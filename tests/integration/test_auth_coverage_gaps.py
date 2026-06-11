@@ -550,7 +550,7 @@ class TestStoreNamespaceAuthorization:
             json={"namespace": ["memories"], "key": "secret", "value": {"data": "alice-only"}},
             headers=ALICE_HEADERS,
         )
-        assert put.status_code == 200
+        assert put.status_code == 204
 
         alice_get = store_auth_client.get(
             "/store/items",

@@ -208,17 +208,20 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
 
         versions = await client.post(f"/assistants/{default_assistant['assistant_id']}/versions")
         assert versions.status_code == 200
-        assert versions.json() == {
-            "assistant_id": default_assistant["assistant_id"],
-            "current_version": 1,
-            "latest_version": 1,
-            "available_versions": [1],
-            "supports_version_history": False,
-        }
+        versions_data = versions.json()
+        assert isinstance(versions_data, list)
+        assert len(versions_data) == 1
+        assert versions_data[0]["assistant_id"] == default_assistant["assistant_id"]
+        assert versions_data[0]["version"] == 1
 
-        latest = await client.post(f"/assistants/{default_assistant['assistant_id']}/latest")
-        assert latest.status_code == 409
-        assert latest.json()["detail"] == "Assistant version promotion is not supported"
+        latest = await client.post(f"/assistants/{default_assistant['assistant_id']}/latest?version=1")
+        assert latest.status_code == 200
+        assert latest.json()["assistant_id"] == default_assistant["assistant_id"]
+        assert latest.json()["version"] == 1
+
+        latest_bad = await client.post(f"/assistants/{default_assistant['assistant_id']}/latest?version=99")
+        assert latest_bad.status_code == 422
+        assert latest_bad.json()["detail"] == "Version not found"
 
         unsupported_delete = await client.delete(
             f"/assistants/{default_assistant['assistant_id']}?delete_threads=true",
@@ -255,11 +258,7 @@ async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) 
             },
             headers=_user_headers(user_id),
         )
-        assert created.status_code == 200
-        created_body = created.json()
-        assert created_body["namespace"] == namespace
-        assert created_body["key"] == "profile"
-        assert created_body["value"] == {"kind": "profile", "name": "Ada"}
+        assert created.status_code == 204
 
         updated = await client.put(
             "/store/items",
@@ -270,10 +269,7 @@ async def test_live_store_endpoints_use_mysql_family_backend(e2e_base_url: str) 
             },
             headers=_user_headers(user_id),
         )
-        assert updated.status_code == 200
-        updated_body = updated.json()
-        assert updated_body["created_at"] == created_body["created_at"]
-        assert updated_body["value"] == {"kind": "profile", "name": "Ada", "level": 2}
+        assert updated.status_code == 204
 
         backend_row = await _fetch_store_item_from_backend(user_id=user_id, namespace=namespace, key="profile")
         assert backend_row == {
@@ -361,7 +357,7 @@ async def test_live_store_ttl_from_manifest_expires_items_on_mysql_family_backen
             },
             headers=_user_headers(user_id),
         )
-        assert created.status_code == 200
+        assert created.status_code == 204
 
         immediate = await client.get(
             "/store/items",

@@ -103,7 +103,6 @@ def _server_metadata() -> dict[str, object]:
         "compatibility_tier": "oss-core",
         "unsupported_features": [
             "distributed_runtime",
-            "assistant_version_promotion",
         ],
     }
 

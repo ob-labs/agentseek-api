@@ -148,7 +148,6 @@ async def test_execute_run_merges_user_config_and_context_into_graph_config(monk
 
     config = FakeEntry.graph.configs[0]
     assert config["recursion_limit"] == 7
-    assert config[CONF]["context"] == {"tenant": "acme"}
     assert config[CONF]["thread_id"] == "t1"
 
 

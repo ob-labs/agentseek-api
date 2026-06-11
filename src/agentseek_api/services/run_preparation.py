@@ -184,6 +184,13 @@ async def _prepare_run(
             raise ValueError("Assistant not found")
         assistant_id = resolved_assistant_id
         graph_id = assistant.graph_id
+        # Merge assistant-level context as defaults into run kwargs
+        assistant_context = assistant.context_json or {}
+        if assistant_context:
+            effective_kwargs = dict(kwargs) if kwargs else {}
+            run_context = effective_kwargs.get("context") or {}
+            effective_kwargs["context"] = {**assistant_context, **run_context}
+            kwargs = effective_kwargs
         if thread.metadata_json.get("graph_id") != graph_id:
             thread.metadata_json = {**thread.metadata_json, "graph_id": graph_id}
         claimed_at = datetime.now(UTC)

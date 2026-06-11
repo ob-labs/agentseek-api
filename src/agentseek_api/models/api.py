@@ -71,14 +71,6 @@ class AssistantRead(BaseModel):
     description: str | None = None
 
 
-class AssistantVersionInfo(BaseModel):
-    assistant_id: str
-    current_version: int
-    latest_version: int
-    available_versions: list[int]
-    supports_version_history: bool
-
-
 class ErrorDetailResponse(BaseModel):
     detail: str
 
@@ -247,9 +239,9 @@ class RunCreateStateful(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     assistant_id: str
-    checkpoint: dict[str, Any] | None = None
+    checkpoint: CheckpointConfig | None = None
     input: Any = None
-    command: dict[str, Any] | None = None
+    command: Command | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
@@ -276,7 +268,7 @@ class RunCreateStateless(BaseModel):
 
     assistant_id: str
     input: Any = None
-    command: dict[str, Any] | None = None
+    command: Command | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
     config: dict[str, Any] = Field(default_factory=dict)
     context: dict[str, Any] = Field(default_factory=dict)
@@ -395,13 +387,14 @@ class StorePutRequest(BaseModel):
     namespace: list[str]
     key: str
     value: dict[str, Any]
+    index: bool | list[str] | None = None
     ttl: float | None = None
 
 
 class StoreDeleteRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    namespace: list[str]
+    namespace: list[str] = Field(default_factory=list)
     key: str
 
 

@@ -133,7 +133,7 @@ async def test_prepare_run_raises_when_assistant_missing(monkeypatch: pytest.Mon
 
 @pytest.mark.asyncio
 async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_assistant = type("FakeAssistant", (), {"graph_id": "stress_test"})()
+    fake_assistant = type("FakeAssistant", (), {"graph_id": "stress_test", "context_json": None})()
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
     create_session = FakeSession([fake_thread, fake_assistant], execute_rowcounts=[1])
     db_run = type("DbRun", (), {"run_id": "r1", "status": "pending", "output_json": None, "last_error": None})()
@@ -176,7 +176,7 @@ async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pyt
 
     assert run.status == "error"
     assert db_run.status == "error"
-    assert db_run.last_error == "boom"
+    assert db_run.last_error == "RuntimeError: boom"
     assert events[-1][1] == "end"
     assert events[-1][2]["status"] == "error"
     assert captured["graph_id"] == "stress_test"
@@ -263,7 +263,7 @@ async def test_execute_and_persist_publishes_terminal_run_event_before_terminal_
 @pytest.mark.asyncio
 async def test_prepare_run_marks_thread_busy_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    fake_assistant = type("FakeAssistant", (), {"graph_id": "default"})()
+    fake_assistant = type("FakeAssistant", (), {"graph_id": "default", "context_json": None})()
     db_run = type(
         "DbRun",
         (),
@@ -308,7 +308,7 @@ async def test_prepare_run_marks_thread_busy_before_background_execution(monkeyp
 @pytest.mark.asyncio
 async def test_prepare_run_cleans_protocol_state_when_submit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    fake_assistant = type("FakeAssistant", (), {"graph_id": "default"})()
+    fake_assistant = type("FakeAssistant", (), {"graph_id": "default", "context_json": None})()
     create_session = FakeSession([fake_thread, fake_assistant], execute_rowcounts=[1])
     persist_session = CallbackSession([lambda: create_session.added[-1], fake_thread])
     session_factory = FakeSessionFactory([create_session, persist_session])
@@ -387,7 +387,7 @@ async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(monke
 
 @pytest.mark.asyncio
 async def test_resume_run_marks_row_pending_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
+    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent", "context_json": None})()
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
     db_run = type(
         "DbRun",
@@ -435,7 +435,7 @@ async def test_resume_run_marks_row_pending_before_background_execution(monkeypa
 
 @pytest.mark.asyncio
 async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
+    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent", "context_json": None})()
     fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
     db_run = type(
         "DbRun",
@@ -507,7 +507,7 @@ async def test_resume_run_rejects_when_thread_already_has_active_run(monkeypatch
             "last_error": None,
         },
     )()
-    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
+    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent", "context_json": None})()
     active_run_id = "r1"
     session_factory = FakeSessionFactory([FakeSession([fake_thread, db_run, fake_assistant, active_run_id], execute_rowcounts=[0])])
 
@@ -539,7 +539,7 @@ async def test_resume_run_reports_not_interrupted_when_claim_fails_without_activ
             "last_error": None,
         },
     )()
-    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent"})()
+    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent", "context_json": None})()
     session_factory = FakeSessionFactory([FakeSession([fake_thread, db_run, fake_assistant, None], execute_rowcounts=[0])])
 
     monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)

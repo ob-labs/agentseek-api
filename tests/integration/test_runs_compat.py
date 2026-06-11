@@ -799,7 +799,7 @@ def test_create_run_stream_surfaces_terminal_error_event(client: TestClient) -> 
     assert response.status_code == 200
     events = _parse_sse_events(response.text)
     assert events[-1]["event"] == "error"
-    assert "Intentional failure" in events[-1]["data"]["error"]
+    assert "Intentional failure" in events[-1]["data"]["message"]
 
 
 def test_create_run_compat_openapi_documents_wait_and_stream_routes() -> None:

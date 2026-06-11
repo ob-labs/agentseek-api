@@ -1,8 +1,10 @@
 from datetime import UTC, datetime
 
-from sqlalchemy import select
+from typing import Literal
 
-from fastapi import APIRouter, Depends, Response
+from sqlalchemy import delete, select
+
+from fastapi import APIRouter, Depends, Query, Response
 from fastapi.responses import StreamingResponse
 
 from agentseek_api.core.auth_deps import authorize, apply_metadata_filters, get_current_user
@@ -37,7 +39,7 @@ async def _best_effort_delete_for_runs(run_ids: list[str]) -> None:
         return
 
 
-@router.post("", response_model=RunRead)
+@router.post("", response_model=RunRead, response_model_exclude_none=True)
 async def create_stateless_run(payload: RunCreateStateless, user: User = Depends(get_current_user)) -> RunRead:
     await authorize(user, "threads", "create_run", {"assistant_id": payload.assistant_id})
     _validate_supported_run_controls(payload, stateless=True)
@@ -107,13 +109,17 @@ async def create_stateless_run_stream(payload: RunCreateStreamingStateless, user
     )
 
 
-@router.post("/batch", response_model=list[RunRead])
+@router.post("/batch", response_model=list[RunRead], response_model_exclude_none=True)
 async def create_run_batch(payload: list[RunCreateStateless], user: User = Depends(get_current_user)) -> list[RunRead]:
     return [await create_stateless_run(item, user) for item in payload]
 
 
 @router.post("/cancel", status_code=204)
-async def cancel_runs(payload: RunsCancelRequest, user: User = Depends(get_current_user)) -> Response:
+async def cancel_runs(
+    payload: RunsCancelRequest,
+    action: Literal["interrupt", "rollback"] = Query("interrupt"),
+    user: User = Depends(get_current_user),
+) -> Response:
     filters = await authorize(user, "threads", "update", {})
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -126,11 +132,13 @@ async def cancel_runs(payload: RunsCancelRequest, user: User = Depends(get_curre
         if payload.status is not None and payload.status != "all":
             query = query.where(Run.status == payload.status)
         rows = (await session.scalars(query)).all()
+        cancelled_run_ids: list[str] = []
         cancelled_thread_ids: set[str] = set()
         for row in rows:
             if row.status not in {"success", "error", "interrupted"}:
                 row.status = "error"
                 row.last_error = "Run cancelled"
+                cancelled_run_ids.append(row.run_id)
                 cancelled_thread_ids.add(row.thread_id)
         if cancelled_thread_ids:
             threads = (
@@ -142,6 +150,10 @@ async def cancel_runs(payload: RunsCancelRequest, user: User = Depends(get_curre
                 thread.status = "error"
                 thread.state_updated_at = datetime.now(UTC)
         await session.commit()
-    if rows:
-        await _best_effort_delete_for_runs([row.run_id for row in rows])
+    if cancelled_run_ids:
+        await _best_effort_delete_for_runs(cancelled_run_ids)
+    if action == "rollback" and cancelled_run_ids:
+        async with session_factory() as session:
+            await session.execute(delete(Run).where(Run.run_id.in_(cancelled_run_ids)))
+            await session.commit()
     return Response(status_code=204)

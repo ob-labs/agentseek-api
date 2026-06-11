@@ -191,7 +191,7 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                 await execution_session.refresh(db_run)
                 if not _is_cancelled_run(db_run):
                     db_run.status = "error"
-                    db_run.last_error = str(exc)
+                    db_run.last_error = f"{type(exc).__name__}: {exc}"
 
             thread = await execution_session.scalar(select(Thread).where(Thread.thread_id == job.thread_id))
             if thread is not None:

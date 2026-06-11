@@ -215,3 +215,10 @@ def test_load_store_config_returns_default_for_invalid_json(tmp_path) -> None:
     config_path.write_text("NOT VALID JSON", encoding="utf-8")
     config = load_store_config(agentseek_graphs=str(config_path))
     assert config.ttl.to_runtime_config() is None
+
+
+def test_load_store_config_returns_default_when_no_config_found(tmp_path, monkeypatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    config = load_store_config(agentseek_graphs=None)
+    assert config.ttl.to_runtime_config() is None
+    assert config.index.to_runtime_config() is None

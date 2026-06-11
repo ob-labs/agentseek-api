@@ -32,17 +32,14 @@ def test_store_put_get_update_delete_and_user_isolation(client: TestClient) -> N
         json={"namespace": ["memories", "users"], "key": "profile", "value": {"name": "Ada"}},
         headers={"x-user-id": "u1"},
     )
-    assert put.status_code == 200
-    assert put.json()["value"] == {"name": "Ada"}
+    assert put.status_code == 204
 
     updated = client.put(
         "/store/items",
         json={"namespace": ["memories", "users"], "key": "profile", "value": {"name": "Ada", "level": 2}},
         headers={"x-user-id": "u1"},
     )
-    assert updated.status_code == 200
-    assert updated.json()["created_at"] == put.json()["created_at"]
-    assert updated.json()["updated_at"] != put.json()["updated_at"]
+    assert updated.status_code == 204
 
     fetched = client.get(
         "/store/items",
@@ -85,7 +82,7 @@ def test_store_search_namespaces_and_info_flag(client: TestClient) -> None:
             json={"namespace": namespace, "key": key, "value": value},
             headers={"x-user-id": "u1"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 204
 
     search = client.post(
         "/store/items/search",
@@ -159,7 +156,7 @@ def test_store_ttl_config_from_agentseek_json_expires_and_refreshes_items(
         json={"namespace": ["memories"], "key": "ttl", "value": {"kind": "note"}},
         headers={"x-user-id": "u1"},
     )
-    assert put.status_code == 200
+    assert put.status_code == 204
 
     later = now + timedelta(minutes=5)
     _set_store_time(monkeypatch, later)
@@ -249,7 +246,7 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
             json={"namespace": ["memories"], "key": key, "value": value},
             headers={"x-user-id": "u1"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 204
 
     search = client.post(
         "/store/items/search",
@@ -267,7 +264,7 @@ def test_store_namespace_max_depth_truncates_results(client: TestClient) -> None
         json={"namespace": ["a", "b", "c", "d"], "key": "deep", "value": {"kind": "note"}},
         headers={"x-user-id": "u1"},
     )
-    assert response.status_code == 200
+    assert response.status_code == 204
 
     namespaces = client.post(
         "/store/namespaces",
@@ -310,18 +307,15 @@ async def test_store_route_functions_use_runtime_store_backend(
     now = datetime(2026, 5, 18, 12, 0, tzinfo=UTC)
     _set_store_time(monkeypatch, now)
 
-    created = await store_module.put_item(
+    await store_module.put_item(
         StorePutRequest(namespace=namespace, key="profile", value={"kind": "profile", "level": 1}),
         user=user,
     )
-    assert created.value == {"kind": "profile", "level": 1}
 
-    updated = await store_module.put_item(
+    await store_module.put_item(
         StorePutRequest(namespace=namespace, key="profile", value={"kind": "profile", "level": 2}),
         user=user,
     )
-    assert updated.created_at == created.created_at
-    assert updated.value == {"kind": "profile", "level": 2}
 
     fetched = await store_module.get_item(namespace=namespace, key="profile", user=user)
     assert fetched.value == {"kind": "profile", "level": 2}
@@ -370,4 +364,9 @@ def test_store_invalid_namespace_returns_422(client: TestClient) -> None:
         headers={"x-user-id": "u1"},
     )
 
+    assert response.status_code == 422
+
+
+def test_store_delete_invalid_namespace_returns_422(client: TestClient) -> None:
+    response = client.request("DELETE", "/store/items", json={"namespace": ["valid", ""], "key": "k"}, headers={"x-user-id": "u1"})
     assert response.status_code == 422

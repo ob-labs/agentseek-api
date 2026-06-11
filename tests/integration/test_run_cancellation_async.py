@@ -65,7 +65,7 @@ def test_cancelled_run_is_not_overwritten_by_background_completion(tmp_path: Pat
             assert fetched.status_code == 200
             assert fetched.json()["status"] == "error"
             assert fetched.json()["last_error"] == "Run cancelled"
-            assert fetched.json()["output"] is None
+            assert fetched.json().get("output") is None
 
             state = client.get(
                 f"/threads/{thread_id}/state",

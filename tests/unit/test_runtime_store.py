@@ -6,7 +6,7 @@ from typing import Any
 import pytest
 from langgraph.store.base import GetOp, Item, ListNamespacesOp, MatchCondition, PutOp, SearchItem, SearchOp
 
-from agentseek_api.core.runtime_store import UserScopedStore
+from agentseek_api.core.runtime_store import UserScopedStore, make_user_store_namespace
 
 
 class FakeBackendStore:
@@ -273,3 +273,8 @@ async def test_user_scoped_store_abatch_scopes_ops_and_strips_results() -> None:
     assert results[0] is None
     assert results[1] is not None
     assert results[1].namespace == ("graph", "memory")
+
+
+def test_make_user_store_namespace_prefixes_user_id() -> None:
+    ns = make_user_store_namespace(user_id="alice", namespace=("docs", "notes"))
+    assert ns == ("__agentseek_users__", "alice", "docs", "notes")
