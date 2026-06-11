@@ -12,18 +12,19 @@
 > [!NOTE]
 > AgentSeek API 主要以
 > [Agent Protocol](https://github.com/langchain-ai/agent-protocol) 作为对外
-> 兼容性的参考。当前的运行时已经覆盖了核心的 thread、run、cron、streaming
-> 以及 protocol-v2 事件流，部分协议接口仍在补齐过程中。Agent 资源通过
-> `/assistants`、直接的 `/agents` 别名、Streamable HTTP MCP 以及
-> LangSmith 风格的 A2A 端点对外暴露。这是对核心 agent-server 接口实用的
-> OSS 对齐实现，并不等同于完整的 LangSmith Agent Server 对齐。
+> 兼容性的参考。当前的运行时覆盖了核心的 thread、run、cron、streaming
+> （含子图与扩展流模式）以及 protocol-v2 事件流。鉴权使用
+> `langgraph_sdk.Auth` 模式，支持 `@auth.authenticate` 与 `@auth.on`
+> 处理器。Agent 资源通过 `/assistants`、直接的 `/agents` 别名、
+> Streamable HTTP MCP 以及 LangSmith 风格的 A2A 端点对外暴露。这是对核心
+> agent-server 接口实用的 OSS 对齐实现，并不等同于完整的 LangSmith Agent
+> Server 对齐。
 
 当前版本边界：
 
-- 已实现：assistants、threads、runs、crons、streaming、Store API、MCP
-  以及 A2A
-- 明确不实现：分布式运行时对齐、assistant 子图查看，以及 assistant 版本
-  晋升流程
+- 已实现：assistants、threads、runs、crons、streaming（包含子图与扩展流
+  模式）、Store API、MCP 以及 A2A
+- 明确不实现：分布式运行时对齐，以及 assistant 版本晋升流程
 
 ## 🚀 快速上手
 
@@ -42,25 +43,34 @@
 当你不需要真实后端验证时，使用 `langgraph dev`；当你希望验证本仓库实际
 提供的 API 契约时，使用 `agentseek-api dev`。
 
-### 1. 安装依赖
+### 1. 安装
+
+**从 PyPI 安装**（推荐终端用户使用）：
+
+```bash
+# 基础安装
+uv tool install agentseek-api
+
+# 附带嵌入式 seekdb 后端（无需 Docker）
+uv tool install agentseek-api[embedded]
+```
+
+**从源码安装**（贡献者使用）：
 
 ```bash
 uv sync
+
+# 附带嵌入式 seekdb 后端
+uv sync --extra embedded
 ```
 
-### 将 seekdb embed 配置为默认后端（推荐）
+### 2. 将 seekdb embed 配置为默认后端（推荐）
 
 最快获得真实后端的方式是 **seekdb embed** — 一个进程内嵌入式 SeekDB 实例，
 无需 Docker 或独立进程：
 
 ```bash
-uv sync --dev --extra embedded
-```
-
-然后以嵌入模式启动 API：
-
-```bash
-SEEKDB_EMBED=true uv run agentseek-api dev
+SEEKDB_EMBED=true agentseek-api dev
 ```
 
 数据默认存储在 `~/.agentseek/seekdb_data`，可通过 `SEEKDB_EMBED_DIR` 修改。
@@ -116,7 +126,7 @@ mysql -h 127.0.0.1 -P 2881 -u root@test -e "CREATE DATABASE IF NOT EXISTS seekdb
 
 </details>
 
-### 2. 创建配置文件
+### 3. 创建配置文件
 
 `agentseek-api` 会按以下顺序查找配置：
 
@@ -136,7 +146,7 @@ mysql -h 127.0.0.1 -P 2881 -u root@test -e "CREATE DATABASE IF NOT EXISTS seekdb
 }
 ```
 
-### 3. 启动本地 API
+### 4. 启动本地 API
 
 ```bash
 uv run agentseek-api dev
@@ -160,14 +170,14 @@ uv run agentseek-api dev --config ./langgraph.json
 > - LangSmith Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 ```
 
-### 4. 验证服务是否启动
+### 5. 验证服务是否启动
 
 ```bash
 curl http://127.0.0.1:2024/health
 curl http://127.0.0.1:2024/info
 curl http://127.0.0.1:2024/openapi.json
 ```
-### 5. 使用 LangGraph SDK 进行测试
+### 6. 使用 LangGraph SDK 进行测试
 
 ```python
 from langgraph_sdk import get_client
@@ -273,7 +283,8 @@ uv run agentseek-api version
 - ⚙️ 独立 CLI，同时支持作为子命令嵌入到父级 CLI 中
 - 🔌 通过 `agentseek.json`、`langgraph.json` 或 `AGENTSEEK_GRAPHS`
   实现 manifest 驱动的图加载
-- 🌊 基于 `message_chunk` 事件的 SSE 流式输出
+- 🌊 支持子图的 SSE 流式输出，以及扩展的流模式
+  （values、updates、messages、messages-tuple、events、tasks、checkpoints、custom、debug）
 - 🧰 通过 Streamable HTTP 把注册的图暴露为 MCP 工具
 - 🤝 A2A assistant 端点，支持 agent-card 发现、流式以及任务查询/取消
 - 🧵 Thread、run、wait、cancel、history、state 以及 protocol-v2 流式
@@ -286,7 +297,8 @@ uv run agentseek-api version
   checkpoint 持久化
 - 📦 基于 Redis 的持久化执行，配合独立的 worker 进程
 - ♻️ 持久化 run 与 thread 流回放，支持重启后恢复
-- 🔐 `noop` 鉴权与自定义鉴权后端
+- 🔐 基于 `langgraph_sdk.Auth` 的鉴权，支持 `@auth.authenticate` 与
+  `@auth.on` 处理器；未配置时自动回退为 noop
 - 🐳 Dockerfile 生成、镜像构建以及本地 Docker 运行时辅助命令
 - 🧪 覆盖 MySQL、seekdb、OceanBase 与 Redis 运行时路径的真实后端 CI
 - 🧪 面向真实 provider 的手动流式校验，提供端到端 SSE 证明
@@ -296,12 +308,11 @@ uv run agentseek-api version
 可以把 AgentSeek API 看作一套实用的、OSS 兼容的 Agent Server 风格
 应用核心。
 
-- 已交付：assistant CRUD、thread/run 生命周期 API、可恢复的 SSE 流、
-  cron API 与 scheduler 派发、Store API、MCP、A2A、基于 Redis 的持久化
-  执行，以及 Docker/runtime 辅助命令
-- 有意未实现：分布式运行时编排对齐、完整的 assistant 版本管理、
-  assistant 子图查看，以及超出核心 CRUD 与 schema 流程之外的完整
-  assistant 辅助能力对齐
+- 已交付：assistant CRUD、thread/run 生命周期 API、支持子图与扩展流模式的
+  可恢复 SSE 流、cron API 与 scheduler 派发、Store API、MCP、A2A、基于
+  Redis 的持久化执行，以及 Docker/runtime 辅助命令
+- 有意未实现：分布式运行时编排对齐、完整的 assistant 版本管理，以及超出核心
+  CRUD 与 schema 流程之外的完整 assistant 辅助能力对齐
 
 ## 🚚 部署角色
 
@@ -593,9 +604,10 @@ parent api build --config ./langgraph.json -t my-api:dev
   - OceanBase / MySQL：`mysql+aiomysql://...`
 - Checkpoint 持久化默认使用 OceanBase / seekdb 配置
 - 鉴权：通过 `agentseek.json` 的 `"auth.path"` 或 `AUTH_MODULE_PATH` 环境变量配置。
-  使用 `langgraph_sdk.Auth` 的 `@auth.authenticate` 装饰器风格。
+  使用 `langgraph_sdk.Auth` 的 `@auth.authenticate` 与 `@auth.on` 处理器风格。
   未配置时所有请求以 default_user 放行（noop）。
 - Assistant 管理、thread 与 run 端点会强制执行所配置的鉴权。
+  通过 `@auth.on` 处理器支持资源级别的过滤。
 
 ### 持久化执行
 
@@ -610,6 +622,9 @@ parent api build --config ./langgraph.json -t my-api:dev
 
 - `examples/minimal_agentseek/agentseek.json`：最小化的首次配置
 - `examples/assistant_config/`：assistant 的 config/context/metadata 入门示例
+- `examples/auth/api_key_auth.py`：使用 `langgraph_sdk.Auth` 的 API Key 鉴权
+- `examples/auth/bearer_token_auth.py`：Bearer Token 鉴权
+- `examples/auth/jwt_auth.py`：带 JWKS 校验的 JWT 鉴权
 - `examples/auth/custom_backend.py`：自定义鉴权后端
 - `examples/auth/jwt.md`：JWT 鉴权环境变量约定
 - `examples/custom_routes/app.py`：在 AgentSeek API 应用周围挂载自定义
