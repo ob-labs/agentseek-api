@@ -12,19 +12,20 @@ Run LangGraph and LangChain apps behind a FastAPI runtime with a standalone
 > [!NOTE]
 > AgentSeek API uses
 > [Agent Protocol](https://github.com/langchain-ai/agent-protocol) as the main
-> external compatibility reference. The current runtime already covers the core
-> thread, run, cron, streaming, and protocol-v2 event flows. Some protocol surfaces
-> are still pending, and agent resources are exposed through `/assistants`,
-> direct `/agents` aliases, Streamable HTTP MCP, and LangSmith-style A2A
-> endpoints. This is workable OSS parity for the core agent-server surfaces,
-> not full LangSmith Agent Server parity.
+> external compatibility reference. The current runtime covers the core
+> thread, run, cron, streaming (including subgraph and expanded stream modes),
+> and protocol-v2 event flows. Auth uses the `langgraph_sdk.Auth` pattern with
+> `@auth.authenticate` and `@auth.on` handlers. Agent resources are exposed
+> through `/assistants`, direct `/agents` aliases, Streamable HTTP MCP, and
+> LangSmith-style A2A endpoints. This is workable OSS parity for the core
+> agent-server surfaces, not full LangSmith Agent Server parity.
 
 Current release boundary:
 
-- Implemented: assistants, threads, runs, crons, streaming, Store API, MCP,
-  and A2A
-- Explicitly not implemented: distributed runtime parity, assistant
-  subgraph inspection, and assistant version-promotion workflows
+- Implemented: assistants, threads, runs, crons, streaming (including subgraph
+  and expanded stream modes), Store API, MCP, and A2A
+- Explicitly not implemented: distributed runtime parity and assistant
+  version-promotion workflows
 
 ## 🚀 Quickstart
 
@@ -44,25 +45,34 @@ Use `langgraph dev` when you do not need real backend validation. Use
 `agentseek-api dev` when you want to exercise the actual API contract this repo
 ships.
 
-### 1. Install dependencies
+### 1. Install
+
+**Install from PyPI** (recommended for end users):
+
+```bash
+# Base install
+uv tool install agentseek-api
+
+# With embedded seekdb backend (no Docker needed)
+uv tool install agentseek-api[embedded]
+```
+
+**Install from source** (for contributors):
 
 ```bash
 uv sync
+
+# With embedded seekdb backend
+uv sync --extra embedded
 ```
 
-### Configure seekdb embed as the default backend (recommended)
+### 2. Configure seekdb embed as the default backend (recommended)
 
 The fastest way to get a real backend running locally is **seekdb embed** — an
 in-process SeekDB instance, no Docker or separate process required:
 
 ```bash
-uv sync --dev --extra embedded
-```
-
-Then start the API with embedded mode enabled:
-
-```bash
-SEEKDB_EMBED=true uv run agentseek-api dev
+SEEKDB_EMBED=true agentseek-api dev
 ```
 
 Data is stored in `~/.agentseek/seekdb_data` by default. Set `SEEKDB_EMBED_DIR`
@@ -120,7 +130,7 @@ mysql -h 127.0.0.1 -P 2881 -u root@test -e "CREATE DATABASE IF NOT EXISTS seekdb
 
 </details>
 
-### 2. Create a config file
+### 3. Create a config file
 
 `agentseek-api` looks for config in this order:
 
@@ -140,7 +150,7 @@ Minimal `langgraph.json`:
 }
 ```
 
-### 3. Start the local API
+### 4. Start the local API
 
 ```bash
 uv run agentseek-api dev
@@ -164,7 +174,7 @@ When the server is ready it prints the local API, docs, and Studio URLs:
 > - LangSmith Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 ```
 
-### 4. Check that it is up
+### 5. Check that it is up
 
 ```bash
 curl http://127.0.0.1:2024/health
@@ -172,7 +182,7 @@ curl http://127.0.0.1:2024/info
 curl http://127.0.0.1:2024/openapi.json
 ```
 
-### 5. Test by using LangGraph SDK
+### 6. Test by using LangGraph SDK
 
 ```python
 from langgraph_sdk import get_client
@@ -279,7 +289,8 @@ in-memory, or tunneled local workflows, prefer `langgraph dev`.
 - ⚙️ Standalone CLI plus embeddable subcommand registration for parent CLIs
 - 🔌 Manifest-driven graph loading through `agentseek.json`, `langgraph.json`,
   or `AGENTSEEK_GRAPHS`
-- 🌊 SSE streaming with `message_chunk` events
+- 🌊 SSE streaming with subgraph support and expanded stream modes
+  (values, updates, messages, messages-tuple, events, tasks, checkpoints, custom, debug)
 - 🧰 MCP tool exposure for registered graphs over Streamable HTTP
 - 🤝 A2A assistant endpoints with agent-card discovery, streaming, and task lookup/cancel
 - 🧵 Thread, run, wait, cancel, history, state, and protocol-v2 stream flows
@@ -291,7 +302,8 @@ in-memory, or tunneled local workflows, prefer `langgraph dev`.
   `langchain-oceanbase`
 - 📦 Redis-backed durable execution with a dedicated worker process
 - ♻️ Persisted run and thread stream replay for resume-after-restart flows
-- 🔐 `noop` and custom auth backends
+- 🔐 `langgraph_sdk.Auth`-based authentication with `@auth.authenticate` and
+  `@auth.on` handlers; noop fallback when unconfigured
 - 🐳 Dockerfile generation, image build, and local Docker runtime helpers
 - 🧪 Real backend CI coverage across MySQL, seekdb, OceanBase, and Redis runtime paths
 - 🧪 Manual provider-backed streaming checks for live SSE proof
@@ -301,12 +313,13 @@ in-memory, or tunneled local workflows, prefer `langgraph dev`.
 Treat AgentSeek API as a practical OSS-compatible core for Agent Server-style
 apps.
 
-- Shipped: assistant CRUD, thread/run lifecycle APIs, resumable SSE streams,
-  cron APIs and scheduler dispatch, Store API, MCP, A2A, Redis-backed durable
-  execution, and Docker/runtime helpers
+- Shipped: assistant CRUD, thread/run lifecycle APIs, resumable SSE streams
+  with subgraph and expanded stream modes, cron APIs and scheduler dispatch,
+  Store API, MCP, A2A, Redis-backed durable execution, and Docker/runtime
+  helpers
 - Intentionally missing: distributed runtime orchestration parity, full
-  assistant version management, assistant subgraph inspection, and full
-  assistant helper parity beyond the core CRUD and schema flows
+  assistant version management, and full assistant helper parity beyond the
+  core CRUD and schema flows
 
 ## 🚚 Deployment Roles
 
@@ -597,9 +610,10 @@ parent api build --config ./langgraph.json -t my-api:dev
   - OceanBase / MySQL: `mysql+aiomysql://...`
 - Checkpoint persistence defaults to OceanBase / seekdb settings
 - Auth: configure via `agentseek.json` `"auth.path"` or `AUTH_MODULE_PATH` env var.
-  Uses `langgraph_sdk.Auth` with `@auth.authenticate` decorator.
+  Uses `langgraph_sdk.Auth` with `@auth.authenticate` and `@auth.on` handlers.
   If not set, all requests pass through as default_user (noop).
 - Assistant management, thread, and run endpoints enforce configured auth.
+  Resource-level filtering is supported via `@auth.on` handlers.
 
 ### Durable execution
 
@@ -614,6 +628,9 @@ parent api build --config ./langgraph.json -t my-api:dev
 
 - `examples/minimal_agentseek/agentseek.json`: minimal first-time config
 - `examples/assistant_config/`: assistant config/context/metadata starter
+- `examples/auth/api_key_auth.py`: API key authentication using `langgraph_sdk.Auth`
+- `examples/auth/bearer_token_auth.py`: bearer token authentication
+- `examples/auth/jwt_auth.py`: JWT authentication with JWKS validation
 - `examples/auth/custom_backend.py`: custom auth backend
 - `examples/auth/jwt.md`: JWT auth environment contract
 - `examples/custom_routes/app.py`: mounting custom FastAPI routes around the
