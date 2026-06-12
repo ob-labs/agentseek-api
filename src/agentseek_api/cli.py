@@ -19,6 +19,17 @@ from agentseek_api.settings import DEFAULT_API_PORT
 
 DEFAULT_CLI_NAME = "agentseek-api"
 
+AGENTSEEK_ONBOARD_BANNER = (
+    "\n"
+    "        Welcome to\n"
+    "\n"
+    "╔═╗┌─┐┌─┐┌┐┌┌┬┐╔═╗┌─┐┌─┐┬┌─\n"
+    "╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐\n"
+    "╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴\n"
+    "\n"
+    "        AgentSeek v{version}\n"
+)
+
 __all__ = [
     "CliError",
     "build_container_env",
@@ -286,7 +297,7 @@ def build_runtime_env(
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
-    command = ["uvicorn", "agentseek_api.main:app", "--host", host, "--port", str(port)]
+    command = [sys.executable, "-m", "uvicorn", "agentseek_api.main:app", "--host", host, "--port", str(port)]
     if reload_enabled:
         command.append("--reload")
     return command
@@ -442,6 +453,8 @@ def _execute_dev_command(
     cwd: Path,
     stdout: TextIO,
 ) -> int:
+    stdout.write(AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n")
+    stdout.flush()
     args.reload = not args.no_reload
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
@@ -972,6 +985,8 @@ def run_namespace(
             )
             return _execute_dev_command(args, runner=run, cwd=workdir, stdout=out)
         if command == "serve":
+            out.write(AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n")
+            out.flush()
             args.reload = False
             return _execute_runtime_command(args, runner=run, cwd=workdir)
         if command == "worker":

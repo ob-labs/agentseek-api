@@ -45,15 +45,27 @@
 
 ### 1. 安装
 
-**从 PyPI 安装**（推荐终端用户使用）：
+**作为项目依赖安装**（推荐）：
 
 ```bash
-# 基础安装
-uv tool install agentseek-api
+# 在你的项目目录中
+uv add agentseek-api
 
 # 附带嵌入式 seekdb 后端（无需 Docker）
-uv tool install agentseek-api[embedded]
+uv add agentseek-api[embedded]
 ```
+
+**全局安装**（如果你需要系统级命令）：
+
+```bash
+pip install agentseek-api
+
+# 然后将 graph 的依赖安装到同一个环境
+pip install  ...
+```
+
+> [!WARNING]
+> 全局安装仅限 `pip install`，**不要使用 `uv tool install`**。
 
 **从源码安装**（贡献者使用）：
 
@@ -158,14 +170,24 @@ uv run agentseek-api dev
 uv run agentseek-api dev --config ./langgraph.json
 ```
 
-服务启动就绪后会打印本地 API、文档以及 Studio 的 URL：
+服务启动就绪后会打印 banner 和本地 URL：
 
 ```text
+        Welcome to
+
+╔═╗┌─┐┌─┐┌┐┌┌┬┐╔═╗┌─┐┌─┐┬┌─
+╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
+╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
+
+        AgentSeek v0.1.0
+
 > Ready!
 >
 > - API: http://localhost:2024
 >
-> - Docs: http://localhost:2024/docs
+> - Docs (Swagger): http://localhost:2024/docs
+>
+> - Docs (Scalar): http://localhost:2024/scalar-docs
 >
 > - LangSmith Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
 ```
