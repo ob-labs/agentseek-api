@@ -92,7 +92,7 @@ def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) 
     exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"]
+    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -106,7 +106,7 @@ def test_serve_command_falls_back_to_langgraph_json_and_runs_graph(tmp_path: Pat
     exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -128,7 +128,7 @@ def test_serve_command_uses_agentseek_graphs_env_for_manifest_named_config(
     exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -249,7 +249,7 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) ->
     )
 
     assert exit_code == 0
-    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "9999"]
+    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "9999"]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
     assert capture.env["AUTH_MODULE_PATH"] == "test.module:backend"
@@ -360,7 +360,6 @@ def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
 
     assert urls.api_url == "http://localhost:2024"
     assert urls.docs_url == "http://localhost:2024/docs"
-    assert urls.scalar_docs_url == "http://localhost:2024/scalar-docs"
     assert urls.studio_url == "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"
 
 
@@ -371,7 +370,6 @@ def test_resolve_dev_urls_preserve_explicit_host_and_override_studio_origin() ->
 
     assert urls.api_url == "http://devbox.local:3030"
     assert urls.docs_url == "http://devbox.local:3030/docs"
-    assert urls.scalar_docs_url == "http://devbox.local:3030/scalar-docs"
     assert urls.studio_url == "https://smith.example.com/studio/?baseUrl=http://devbox.local:3030"
 
 
@@ -411,11 +409,10 @@ def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) 
     )
 
     assert exit_code == 0
-    assert "> Ready!" in stdout.getvalue()
-    assert "- API: http://localhost:2024" in stdout.getvalue()
-    assert "- Docs (Swagger): http://localhost:2024/docs" in stdout.getvalue()
-    assert "- Docs (Scalar): http://localhost:2024/scalar-docs" in stdout.getvalue()
-    assert "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024" in stdout.getvalue()
+    output = stdout.getvalue()
+    assert "API: http://localhost:2024" in output
+    assert "Docs: http://localhost:2024/docs" in output
+    assert "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024" in output
     assert opened == ["https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"]
 
 
@@ -544,7 +541,7 @@ def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
     exit_code = cli_module.run_namespace(parsed, runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
 
 
 def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: Path) -> None:

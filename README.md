@@ -47,15 +47,27 @@ ships.
 
 ### 1. Install
 
-**Install from PyPI** (recommended for end users):
+**Install as a project dependency** (recommended):
 
 ```bash
-# Base install
-uv tool install agentseek-api
+# In your project directory
+uv add agentseek-api
 
 # With embedded seekdb backend (no Docker needed)
-uv tool install agentseek-api[embedded]
+uv add agentseek-api[embedded]
 ```
+
+**Global install** (if you prefer a system-wide command):
+
+```bash
+pip install agentseek-api
+
+# Then install your graph's dependencies into the same environment
+pip install ...
+```
+
+> [!WARNING]
+> Global install only supports `pip install`. **Do NOT use `uv tool install`**.
 
 **Install from source** (for contributors):
 
@@ -162,16 +174,21 @@ Run with an explicit config when needed:
 uv run agentseek-api dev --config ./langgraph.json
 ```
 
-When the server is ready it prints the local API, docs, and Studio URLs:
+When the server starts it prints the banner and local URLs:
 
 ```text
-> Ready!
->
-> - API: http://localhost:2024
->
-> - Docs: http://localhost:2024/docs
->
-> - LangSmith Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+        Welcome to
+
+╔═╗┌─┐┌─┐┌┐┌┌┬┐╔═╗┌─┐┌─┐┬┌─
+╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
+╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
+
+     AgentSeek v0.1.0
+
+- 🚀 API: http://localhost:2024
+- 📚 Docs: http://localhost:2024/docs
+- 🎨 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+
 ```
 
 ### 5. Check that it is up
