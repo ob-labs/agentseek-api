@@ -47,8 +47,6 @@ from agentseek_api.settings import settings
 _FASTAPI_DEFAULT_PATHS = frozenset({
     "/openapi.json",
     "/docs",
-    "/docs/oauth2-redirect",
-    "/redoc",
 })
 
 
@@ -233,7 +231,7 @@ def _merge_custom_app(app: FastAPI) -> None:
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
+    app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None)
     _add_cors_middleware(app, get_cors_config())
     app.add_middleware(ContentTypeFixMiddleware)
     _apply_auth_openapi(app)
@@ -256,7 +254,7 @@ def create_app() -> FastAPI:
     async def ok() -> dict[str, bool]:
         return {"ok": True}
 
-    @app.get("/scalar-docs", include_in_schema=False)
+    @app.get("/docs", include_in_schema=False)
     async def scalar_docs() -> HTMLResponse:
         return get_scalar_api_reference(
             openapi_url=app.openapi_url,

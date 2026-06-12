@@ -174,7 +174,7 @@ Run with an explicit config when needed:
 uv run agentseek-api dev --config ./langgraph.json
 ```
 
-When the server is ready it prints the banner and local URLs:
+When the server starts it prints the banner and local URLs:
 
 ```text
         Welcome to
@@ -183,17 +183,12 @@ When the server is ready it prints the banner and local URLs:
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-        AgentSeek v0.1.0
+     AgentSeek v0.1.0
 
-> Ready!
->
-> - API: http://localhost:2024
->
-> - Docs (Swagger): http://localhost:2024/docs
->
-> - Docs (Scalar): http://localhost:2024/scalar-docs
->
-> - LangSmith Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+- 🚀 API: http://localhost:2024
+- 📚 Docs: http://localhost:2024/docs
+- 🎨 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+
 ```
 
 ### 5. Check that it is up

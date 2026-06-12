@@ -27,7 +27,7 @@ AGENTSEEK_ONBOARD_BANNER = (
     "╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐\n"
     "╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴\n"
     "\n"
-    "        AgentSeek v{version}\n"
+    "     AgentSeek v{version}\n"
 )
 
 __all__ = [
@@ -78,7 +78,6 @@ class CliConfig:
 class DevServerUrls:
     api_url: str
     docs_url: str
-    scalar_docs_url: str
     studio_url: str
 
 
@@ -335,22 +334,16 @@ def _resolve_dev_urls(*, host: str, port: int, studio_url: str | None) -> DevSer
     return DevServerUrls(
         api_url=api_url,
         docs_url=f"{api_url}/docs",
-        scalar_docs_url=f"{api_url}/scalar-docs",
         studio_url=f"{studio_origin}/studio/?baseUrl={studio_base_url}",
     )
 
 
 def _render_dev_ready_banner(urls: DevServerUrls) -> str:
     return (
-        "> Ready!\n"
-        ">\n"
-        f"> - API: {urls.api_url}\n"
-        ">\n"
-        f"> - Docs (Swagger): {urls.docs_url}\n"
-        ">\n"
-        f"> - Docs (Scalar): {urls.scalar_docs_url}\n"
-        ">\n"
-        f"> - LangSmith Studio Web UI: {urls.studio_url}\n"
+        f"- \U0001f680 API: {urls.api_url}\n"
+        f"- \U0001f4da Docs: {urls.docs_url}\n"
+        f"- \U0001f3a8 Studio UI: {urls.studio_url}\n"
+        "\n\n"
     )
 
 
@@ -410,9 +403,9 @@ def _run_managed_dev_server(
             continue
 
     try:
-        wait_for_ready(urls.api_url, process=process, sleep=sleep)
         stdout.write(_render_dev_ready_banner(urls))
         stdout.flush()
+        wait_for_ready(urls.api_url, process=process, sleep=sleep)
         if open_browser:
             if browser_opener is None:
                 import webbrowser

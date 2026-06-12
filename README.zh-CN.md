@@ -170,7 +170,7 @@ uv run agentseek-api dev
 uv run agentseek-api dev --config ./langgraph.json
 ```
 
-服务启动就绪后会打印 banner 和本地 URL：
+服务启动时会打印 banner 和本地 URL：
 
 ```text
         Welcome to
@@ -179,17 +179,12 @@ uv run agentseek-api dev --config ./langgraph.json
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-        AgentSeek v0.1.0
+     AgentSeek v0.1.0
 
-> Ready!
->
-> - API: http://localhost:2024
->
-> - Docs (Swagger): http://localhost:2024/docs
->
-> - Docs (Scalar): http://localhost:2024/scalar-docs
->
-> - LangSmith Studio Web UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+- 🚀 API: http://localhost:2024
+- 📚 Docs: http://localhost:2024/docs
+- 🎨 Studio UI: https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024
+
 ```
 
 ### 5. 验证服务是否启动
