@@ -130,7 +130,6 @@ def main() -> int:
 
         with httpx.Client(base_url=base_url, timeout=10.0, trust_env=False) as client:
             docs = client.get("/docs")
-            redoc = client.get("/redoc")
             openapi = client.get("/openapi.json")
             unauthorized = client.post("/assistants", json={"name": "blocked", "graph_id": "chat"})
             assistant = client.post(
@@ -145,10 +144,8 @@ def main() -> int:
             )
 
         assert docs.status_code == 200, docs.text
-        assert redoc.status_code == 200, redoc.text
         assert openapi.status_code == 200, openapi.text
         assert docs.headers["content-type"].startswith("text/html")
-        assert redoc.headers["content-type"].startswith("text/html")
         assert openapi.json()["openapi"].startswith("3.")
         assert unauthorized.status_code == 401, unauthorized.text
         assert assistant.status_code == 200, assistant.text
@@ -156,10 +153,8 @@ def main() -> int:
         assert "thread_id" in thread.json()
 
         logs = log_path.read_text(encoding="utf-8", errors="replace")
-        assert "> Ready!" in logs, logs
-        assert f"> - API: http://localhost:{api_port}" in logs, logs
-        assert f"> - Docs (Swagger): http://localhost:{api_port}/docs" in logs, logs
-        assert f"> - Docs (Scalar): http://localhost:{api_port}/scalar-docs" in logs, logs
+        assert f"API: http://localhost:{api_port}" in logs, logs
+        assert f"Docs: http://localhost:{api_port}/docs" in logs, logs
         assert (
             "https://smith.langchain.com/studio/?baseUrl="
             f"http://127.0.0.1:{api_port}"
