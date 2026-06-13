@@ -327,6 +327,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
                     "scheduled_for": scheduled_for_iso,
                 },
                 kwargs=claim.kwargs_json,
+                multitask_strategy=claim.multitask_strategy,
                 tick_id=claim.tick_id,
             )
             queued_run_id = run.run_id
@@ -358,6 +359,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
                 "scheduled_for": scheduled_for_iso,
             },
             kwargs=claim.kwargs_json,
+            multitask_strategy=claim.multitask_strategy,
             tick_id=claim.tick_id,
         )
         queued_run_id = run.run_id

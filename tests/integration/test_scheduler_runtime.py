@@ -670,3 +670,35 @@ def test_dispatch_due_crons_disables_cron_when_next_run_crosses_end_time(client:
     assert persisted is not None
     assert persisted.enabled is False
     assert _as_utc(persisted.next_run_at) > _as_utc(persisted.end_time)
+
+
+def test_dispatch_due_crons_passes_multitask_strategy_to_thread_run(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+
+    created = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "thread-bound"},
+            "multitask_strategy": "interrupt",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(created.json()["cron_id"], when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+
+    assert len(results) == 1
+    assert results[0].status == "queued"
+    assert results[0].thread_id == thread_id
+
+    runs = asyncio.run(_list_runs_for_thread(thread_id))
+    assert len(runs) == 1
+    assert runs[0].multitask_strategy == "interrupt"
