@@ -106,7 +106,7 @@ def _to_read_model(row: CronJob) -> CronRead:
     )
 
 
-def _search_stmt(*, payload: CronSearchRequest):
+def _search_stmt(*, payload: CronSearchRequest | CronCountRequest):
     stmt = select(CronJob)
     if payload.assistant_id is not None:
         stmt = stmt.where(CronJob.assistant_id == payload.assistant_id)
@@ -114,6 +114,9 @@ def _search_stmt(*, payload: CronSearchRequest):
         stmt = stmt.where(CronJob.enabled == payload.enabled)
     if payload.thread_id is not None:
         stmt = stmt.where(CronJob.thread_id == payload.thread_id)
+    if payload.metadata is not None:
+        for key, value in payload.metadata.items():
+            stmt = stmt.where(CronJob.metadata_json[key].as_string() == str(value))
     return stmt
 
 
@@ -269,12 +272,19 @@ async def search_crons(*, payload: CronSearchRequest, user: User, filters: dict[
     async with session_factory() as session:
         stmt = _search_stmt(payload=payload)
         stmt = apply_metadata_filters(stmt, CronJob, filters)
-        stmt = (
-            stmt
-            .order_by(CronJob.created_at.desc(), CronJob.cron_id.desc())
-            .limit(payload.limit)
-            .offset(payload.offset)
-        )
+
+        sort_columns = {
+            "next_run_date": CronJob.next_run_at,
+            "end_time": CronJob.end_time,
+        }
+        if payload.sort_by is not None:
+            sort_column = sort_columns.get(payload.sort_by, getattr(CronJob, payload.sort_by, CronJob.created_at))
+            order = sort_column.asc() if payload.sort_order == "asc" else sort_column.desc()
+            stmt = stmt.order_by(order, CronJob.cron_id.desc())
+        else:
+            stmt = stmt.order_by(CronJob.created_at.desc(), CronJob.cron_id.desc())
+
+        stmt = stmt.limit(payload.limit).offset(payload.offset)
         rows = list((await session.scalars(stmt)).all())
     return CronSearchResponse(items=[_to_read_model(row) for row in rows])
 

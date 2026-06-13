@@ -1,7 +1,7 @@
 from sqlalchemy import select
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
 from agentseek_api.core.auth_deps import authorize, apply_metadata_filters, get_current_user
 from agentseek_api.core.database import db_manager
@@ -77,9 +77,15 @@ async def create_thread_cron(thread_id: str, payload: ThreadCronCreate, user: Us
 
 
 @router.post("/runs/crons/search", response_model=CronSearchResponse)
-async def search_crons(payload: CronSearchRequest, user: User = Depends(get_current_user)) -> CronSearchResponse:
+async def search_crons(payload: CronSearchRequest, user: User = Depends(get_current_user)) -> CronSearchResponse | JSONResponse:
     filters = await authorize(user, "crons", "search", {})
-    return await cron_service.search_crons(payload=payload, user=user, filters=filters)
+    result = await cron_service.search_crons(payload=payload, user=user, filters=filters)
+    if payload.select is not None:
+        fields = set(payload.select)
+        return JSONResponse(
+            content={"items": [item.model_dump(mode="json", include=fields) for item in result.items]}
+        )
+    return result
 
 
 @router.post("/runs/crons/count", response_model=CronCountResponse)

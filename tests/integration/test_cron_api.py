@@ -432,3 +432,76 @@ def test_patch_cron_config_only_preserves_run_control(client: TestClient) -> Non
     assert persisted.kwargs_json["context"] == {"tenant": "acme"}
     assert persisted.kwargs_json["stream_modes"] == ["messages"]
     assert persisted.kwargs_json["durability"] == "sync"
+
+
+def test_search_crons_sorts_by_next_run_date_asc(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    hourly = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=HOURLY;INTERVAL=1", "input": {"k": "hourly"}},
+    ).json()
+    minutely = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"k": "minutely"}},
+    ).json()
+
+    response = client.post(
+        "/runs/crons/search",
+        json={"assistant_id": assistant_id, "sort_by": "next_run_date", "sort_order": "asc"},
+    )
+    assert response.status_code == 200
+    ids = [item["cron_id"] for item in response.json()["items"]]
+    assert ids == [minutely["cron_id"], hourly["cron_id"]]
+
+
+def test_search_crons_filters_by_metadata(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    matching = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=5", "input": {"k": 1}, "metadata": {"team": "alpha"}},
+    ).json()
+    client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=5", "input": {"k": 2}, "metadata": {"team": "beta"}},
+    )
+
+    response = client.post(
+        "/runs/crons/search",
+        json={"assistant_id": assistant_id, "metadata": {"team": "alpha"}},
+    )
+    assert response.status_code == 200
+    ids = [item["cron_id"] for item in response.json()["items"]]
+    assert ids == [matching["cron_id"]]
+
+    count_response = client.post(
+        "/runs/crons/count",
+        json={"assistant_id": assistant_id, "metadata": {"team": "alpha"}},
+    )
+    assert count_response.status_code == 200
+    assert count_response.json() == {"count": 1}
+
+
+def test_search_crons_select_returns_subset(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=5", "input": {"k": 1}},
+    ).json()
+
+    response = client.post(
+        "/runs/crons/search",
+        json={"assistant_id": assistant_id, "select": ["cron_id", "schedule"]},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert items == [{"cron_id": created["cron_id"], "schedule": "FREQ=MINUTELY;INTERVAL=5"}]
+
+
+def test_search_crons_limit_bounds(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+
+    zero = client.post("/runs/crons/search", json={"assistant_id": assistant_id, "limit": 0})
+    assert zero.status_code == 422
+
+    one = client.post("/runs/crons/search", json={"assistant_id": assistant_id, "limit": 1})
+    assert one.status_code == 200

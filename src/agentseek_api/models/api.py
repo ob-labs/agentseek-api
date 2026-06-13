@@ -366,8 +366,12 @@ class CronSearchRequest(BaseModel):
     assistant_id: str | None = None
     enabled: bool | None = None
     thread_id: str | None = None
-    limit: int = Field(default=10, ge=0)
+    metadata: dict[str, Any] | None = None
+    limit: int = Field(default=10, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
+    sort_by: CronSortBy | None = None
+    sort_order: CronSortOrder | None = None
+    select: list[CronSelectField] | None = None
 
 
 class CronCountRequest(BaseModel):
@@ -376,6 +380,7 @@ class CronCountRequest(BaseModel):
     assistant_id: str | None = None
     enabled: bool | None = None
     thread_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class CronPatch(BaseModel):
