@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from fastapi.testclient import TestClient
 
@@ -645,6 +646,31 @@ def test_dispatch_due_crons_skips_cron_past_end_time(client: TestClient) -> None
     assert ticks == []
 
 
+def test_dispatch_due_crons_end_time_equal_now_is_exclusive(client: TestClient) -> None:
+    """Boundary: the claim query uses strict `end_time > now`, so a cron whose
+    end_time exactly equals the current tick time is NOT fired (end_time is the
+    last instant the cron may NOT run at)."""
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "boundary"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    asyncio.run(_mark_cron_due(cron_id, when=now - timedelta(minutes=1)))
+    asyncio.run(_set_cron_end_time(cron_id, end_time=now))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=now))
+
+    assert results == []
+    assert asyncio.run(_list_ticks_for_cron(cron_id)) == []
+
+
 def test_reclaim_started_tick_skipped_when_cron_past_end_time(client: TestClient) -> None:
     """A stale 'started' tick (dispatch never ran) must NOT be reclaimed and
     re-dispatched once the cron's end_time has passed."""
@@ -745,6 +771,12 @@ async def _fetch_thread(thread_id: str) -> Thread | None:
         return await session.scalar(select(Thread).where(Thread.thread_id == thread_id))
 
 
+async def _fetch_run(run_id: str) -> Run | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        return await session.scalar(select(Run).where(Run.run_id == run_id))
+
+
 def test_dispatch_due_crons_deletes_stateless_thread_on_run_completed_delete(client: TestClient) -> None:
     from agentseek_api.services import cron_scheduler as cron_scheduler_module
 
@@ -768,10 +800,19 @@ def test_dispatch_due_crons_deletes_stateless_thread_on_run_completed_delete(cli
     results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
     assert len(results) == 1
     assert results[0].status == "queued"
+    deleted_thread_id = results[0].thread_id
+    deleted_run_id = results[0].run_id
+    assert deleted_thread_id is not None
+    assert deleted_run_id is not None
 
     user_threads = asyncio.run(_list_threads_for_user("owner"))
     stateless_threads = [t for t in user_threads if t.metadata_json.get("cron_id") == cron_id]
     assert stateless_threads == []
+
+    # The cascade must remove the Run too, not just the Thread — otherwise runs
+    # leak as orphans. Verify against the real DB by run_id and by thread_id.
+    assert asyncio.run(_fetch_run(deleted_run_id)) is None
+    assert asyncio.run(_list_runs_for_thread(deleted_thread_id)) == []
 
     ticks = asyncio.run(_list_ticks_for_cron(cron_id))
     assert len(ticks) == 1
@@ -809,10 +850,11 @@ def test_dispatch_due_crons_keeps_stateless_thread_on_run_completed_keep(client:
     assert persisted is not None
 
 
-def test_reconcile_does_not_delete_interrupted_stateless_run(client: TestClient) -> None:
-    """on_run_completed='delete' must NOT delete a thread whose run is
-    interrupted: interrupted runs are resumable, and deleting them makes the
-    human-in-the-loop workflow unrecoverable."""
+@pytest.mark.parametrize("terminal_status", ["interrupted", "error"])
+def test_reconcile_does_not_delete_non_success_stateless_run(client: TestClient, terminal_status: str) -> None:
+    """on_run_completed='delete' deletes ONLY on success. An interrupted run is
+    resumable; an error run is worth inspecting — both threads must survive so
+    the gate condition (tick.status == 'success') is exercised on both sides."""
     from agentseek_api.services import cron_scheduler as cron_scheduler_module
 
     assistant_id = _create_assistant(client)
@@ -821,7 +863,7 @@ def test_reconcile_does_not_delete_interrupted_stateless_run(client: TestClient)
         json={
             "assistant_id": assistant_id,
             "schedule": "FREQ=MINUTELY;INTERVAL=1",
-            "input": {"kind": "stateless-interrupt"},
+            "input": {"kind": f"stateless-{terminal_status}"},
             "on_run_completed": "delete",
         },
         headers={"x-user-id": "owner"},
@@ -829,15 +871,15 @@ def test_reconcile_does_not_delete_interrupted_stateless_run(client: TestClient)
     assert created.status_code == 200
     cron_id = created.json()["cron_id"]
 
-    # Seed a stateless ephemeral thread + interrupted run + a queued tick that
-    # points at it, mirroring what dispatch produces when a graph interrupts.
+    # Seed a stateless ephemeral thread + terminal run + a queued tick that
+    # points at it, mirroring what dispatch produces when a graph ends.
     async def _seed() -> tuple[str, str]:
         session_factory = db_manager.get_session_factory()
         async with session_factory() as session:
             thread = Thread(
                 user_id="owner",
                 metadata_json={"stateless": True, "cron_id": cron_id},
-                status="interrupted",
+                status=terminal_status,
             )
             session.add(thread)
             await session.flush()
@@ -845,8 +887,9 @@ def test_reconcile_does_not_delete_interrupted_stateless_run(client: TestClient)
                 thread_id=thread.thread_id,
                 assistant_id=assistant_id,
                 user_id="owner",
-                status="interrupted",
-                input_json={"kind": "stateless-interrupt"},
+                status=terminal_status,
+                input_json={"kind": f"stateless-{terminal_status}"},
+                last_error="boom" if terminal_status == "error" else None,
             )
             session.add(run)
             await session.flush()
@@ -869,10 +912,10 @@ def test_reconcile_does_not_delete_interrupted_stateless_run(client: TestClient)
 
     asyncio.run(cron_scheduler_module._reconcile_terminal_ticks(sleep=_no_sleep))
 
-    # Tick reconciled to interrupted, but the thread + run must survive.
+    # Tick reconciled to the terminal status, but the thread + run must survive.
     ticks = asyncio.run(_list_ticks_for_cron(cron_id))
     assert len(ticks) == 1
-    assert ticks[0].status == "interrupted"
+    assert ticks[0].status == terminal_status
     persisted_thread = asyncio.run(_fetch_thread(thread_id))
     assert persisted_thread is not None
     runs = asyncio.run(_list_runs_for_thread(thread_id))

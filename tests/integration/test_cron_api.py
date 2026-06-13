@@ -54,6 +54,8 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
     assert body.get("last_tick_status") is None
     assert body.get("last_error") is None
     assert body["next_run_at"] is not None
+    # Spec field next_run_date is present in the response body and aliases next_run_at.
+    assert body["next_run_date"] == body["next_run_at"]
     assert body["created_at"] is not None
     assert body["updated_at"] is not None
     assert body["cron_id"]
@@ -481,6 +483,41 @@ def test_patch_cron_explicit_null_durability_resets_to_default(client: TestClien
     assert "durability" not in persisted.kwargs_json
 
 
+def test_patch_cron_explicit_null_clears_interrupt_and_stream_mode(client: TestClient) -> None:
+    # The null-clear path must work for every run-control field, not just
+    # durability. stream_mode is the subtle one: it is stored under the key
+    # "stream_modes" but cleared via the "stream_mode" kwarg (key remap).
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "original"},
+            "interrupt_before": ["node_a"],
+            "stream_mode": ["messages", "updates"],
+        },
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted.kwargs_json["interrupt_before"] == ["node_a"]
+    assert persisted.kwargs_json["stream_modes"] == ["messages", "updates"]
+
+    response = client.patch(
+        f"/runs/crons/{cron_id}",
+        json={"interrupt_before": None, "stream_mode": None},
+    )
+    assert response.status_code == 200
+
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted is not None
+    # interrupt_before fully cleared; stream_mode reset to its default.
+    assert "interrupt_before" not in persisted.kwargs_json
+    assert persisted.kwargs_json["stream_modes"] == ["values"]
+
+
 def test_create_cron_rejects_unsupported_stream_mode(client: TestClient) -> None:
     # An unsupported stream mode is rejected at creation time (Pydantic's
     # RunStreamMode Literal catches it as 422), not silently persisted to be
@@ -543,6 +580,38 @@ def test_search_crons_filters_by_metadata(client: TestClient) -> None:
     )
     assert count_response.status_code == 200
     assert count_response.json() == {"count": 1}
+
+
+def test_search_crons_metadata_filter_known_limitation_non_string_values(client: TestClient) -> None:
+    # KNOWN LIMITATION (shared with the thread-search filter): the metadata filter
+    # compares metadata_json[key].as_string() == str(value). For a JSON numeric
+    # value, as_string() yields the number (not its decimal text), so it never
+    # equals str(value) and the row does NOT match. This test PINS that current
+    # behavior so any future move to type-aware matching is a deliberate change,
+    # not an accident. String metadata values match (see the test above).
+    assistant_id = _create_assistant(client)
+    client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"k": 1},
+            "metadata": {"priority": 7},
+        },
+    )
+
+    # Numeric filter currently matches nothing (the limitation).
+    numeric = client.post(
+        "/runs/crons/search",
+        json={"assistant_id": assistant_id, "metadata": {"priority": 7}},
+    )
+    assert numeric.status_code == 200
+    assert numeric.json()["items"] == []
+
+    # The cron is still findable by a string-valued filter / no filter.
+    unfiltered = client.post("/runs/crons/search", json={"assistant_id": assistant_id})
+    assert unfiltered.status_code == 200
+    assert len(unfiltered.json()["items"]) == 1
 
 
 def test_search_crons_select_returns_subset(client: TestClient) -> None:
