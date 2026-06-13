@@ -301,3 +301,58 @@ def test_create_stateless_cron_omits_default_run_control_from_kwargs(client: Tes
         "context": {"tenant": "acme"},
         "stream_modes": ["values"],
     }
+
+
+def test_create_thread_cron_persists_multitask_strategy(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=HOURLY;INTERVAL=1",
+            "input": {"kind": "thread-cron"},
+            "config": {"model": "gpt-test"},
+            "context": {"tenant": "acme"},
+            "multitask_strategy": "rollback",
+        },
+        headers={"x-user-id": "owner"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+
+    persisted = asyncio.run(_fetch_cron(body["cron_id"]))
+    assert persisted is not None
+    assert persisted.kwargs_json["multitask_strategy"] == "rollback"
+
+
+def test_create_thread_cron_ignores_on_run_completed(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+
+    # extra="allow" means on_run_completed is silently accepted (not 422) on the
+    # thread-cron schema, which has no such field. It must NOT be persisted as a
+    # column and must NOT leak into kwargs.
+    response = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=HOURLY;INTERVAL=1",
+            "input": {"kind": "thread-cron"},
+            "on_run_completed": "keep",
+        },
+        headers={"x-user-id": "owner"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # on_run_completed is a persisted column, not a CronRead response field (per spec),
+    # so it is never present in the response body.
+    assert "on_run_completed" not in body
+
+    persisted = asyncio.run(_fetch_cron(body["cron_id"]))
+    assert persisted is not None
+    assert persisted.on_run_completed == "delete"
+    assert "on_run_completed" not in persisted.kwargs_json

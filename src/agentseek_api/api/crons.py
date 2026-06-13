@@ -14,6 +14,7 @@ from agentseek_api.models.api import (
     CronRead,
     CronSearchRequest,
     CronSearchResponse,
+    ThreadCronCreate,
 )
 from agentseek_api.models.auth import User
 from agentseek_api.services import cron_service
@@ -36,7 +37,7 @@ async def _create_cron(
     *,
     assistant_id: str,
     thread_id: str | None,
-    payload: CronCreate,
+    payload: CronCreate | ThreadCronCreate,
     user: User,
 ) -> CronRead:
     try:
@@ -58,7 +59,7 @@ async def create_stateless_cron(payload: CronCreate, user: User = Depends(get_cu
 
 
 @router.post("/threads/{thread_id}/runs/crons", response_model=CronRead, response_model_exclude_none=True)
-async def create_thread_cron(thread_id: str, payload: CronCreate, user: User = Depends(get_current_user)) -> CronRead:
+async def create_thread_cron(thread_id: str, payload: ThreadCronCreate, user: User = Depends(get_current_user)) -> CronRead:
     value: dict = {
         "metadata": dict(payload.metadata) if payload.metadata else {},
         "assistant_id": payload.assistant_id,

@@ -338,6 +338,28 @@ class CronCreate(BaseModel):
     durability: RunDurability = "async"
 
 
+class ThreadCronCreate(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    assistant_id: str
+    schedule: str
+    timezone: str | None = None
+    input: Any
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    webhook: str | None = None
+    enabled: bool = True
+    end_time: datetime | None = None
+    interrupt_before: RunInterrupt | None = None
+    interrupt_after: RunInterrupt | None = None
+    multitask_strategy: RunMultitaskStrategy = "enqueue"
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = Field(default_factory=lambda: ["values"])
+    stream_subgraphs: bool = False
+    stream_resumable: bool = False
+    durability: RunDurability = "async"
+
+
 class CronSearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

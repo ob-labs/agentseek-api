@@ -16,6 +16,7 @@ from agentseek_api.models.api import (
     CronRead,
     CronSearchRequest,
     CronSearchResponse,
+    ThreadCronCreate,
 )
 from agentseek_api.models.auth import User
 from agentseek_api.services.cron_rrule import compute_next_run_at, validate_schedule
@@ -116,7 +117,7 @@ def _search_stmt(*, payload: CronSearchRequest):
     return stmt
 
 
-async def create_cron(*, assistant_id: str, thread_id: str | None, payload: CronCreate, user: User) -> CronRead:
+async def create_cron(*, assistant_id: str, thread_id: str | None, payload: CronCreate | ThreadCronCreate, user: User) -> CronRead:
     timezone_name = _normalize_timezone(payload.timezone)
     validate_schedule(payload.schedule, timezone_name=timezone_name)
     webhook = _validate_webhook(payload.webhook)
@@ -140,11 +141,19 @@ async def create_cron(*, assistant_id: str, thread_id: str | None, payload: Cron
                 durability=payload.durability,
                 stream_subgraphs=payload.stream_subgraphs,
                 stream_resumable=payload.stream_resumable,
-                multitask_strategy=getattr(payload, "multitask_strategy", "enqueue"),
+                multitask_strategy=(
+                    getattr(payload, "multitask_strategy", "enqueue")
+                    if "multitask_strategy" in type(payload).model_fields
+                    else "enqueue"
+                ),
             ),
             webhook=webhook,
             end_time=payload.end_time,
-            on_run_completed=getattr(payload, "on_run_completed", "delete"),
+            on_run_completed=(
+                getattr(payload, "on_run_completed", "delete")
+                if "on_run_completed" in type(payload).model_fields
+                else "delete"
+            ),
             next_run_at=compute_next_run_at(payload.schedule, timezone_name=timezone_name),
         )
         session.add(row)
