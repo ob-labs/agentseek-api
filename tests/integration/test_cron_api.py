@@ -561,6 +561,25 @@ def test_search_crons_select_returns_subset(client: TestClient) -> None:
     assert items == [{"cron_id": created["cron_id"], "schedule": "FREQ=MINUTELY;INTERVAL=5"}]
 
 
+def test_search_crons_select_omits_null_fields(client: TestClient) -> None:
+    # Documents the chosen behavior: a selected-but-null field (e.g. webhook on a
+    # cron created without one) is omitted, consistent with the default path's
+    # response_model_exclude_none, rather than returned as an explicit null.
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=5", "input": {"k": 1}},
+    ).json()
+
+    response = client.post(
+        "/runs/crons/search",
+        json={"assistant_id": assistant_id, "select": ["cron_id", "webhook"]},
+    )
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert items == [{"cron_id": created["cron_id"]}]
+
+
 def test_search_crons_limit_bounds(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
 

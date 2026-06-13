@@ -387,3 +387,48 @@ async def test_apply_additive_migrations_adds_missing_columns_to_legacy_table() 
             await conn.run_sync(DatabaseManager._apply_additive_migrations)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_apply_additive_migrations_skips_unsafe_not_null_column(caplog) -> None:
+    """A NOT NULL column without a server_default cannot be added to a populated
+    table; the real migration must skip it with a logged error rather than emit
+    failing DDL or crash startup."""
+    import logging
+
+    from sqlalchemy import Column, Integer, String, Table, inspect, text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from agentseek_api.core.orm import Base
+
+    # Temporarily register an unsafe table on the real metadata that
+    # _apply_additive_migrations iterates, then remove it afterward.
+    unsafe = Table(
+        "widget_unsafe_migration",
+        Base.metadata,
+        Column("id", Integer, primary_key=True),
+        Column("name", String(32), nullable=False),  # NOT NULL, no server_default
+    )
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        # Legacy table predates the `name` column and already has a row.
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE TABLE widget_unsafe_migration (id INTEGER PRIMARY KEY)"))
+            await conn.execute(text("INSERT INTO widget_unsafe_migration (id) VALUES (1)"))
+
+        with caplog.at_level(logging.ERROR):
+            async with engine.begin() as conn:
+                await conn.run_sync(DatabaseManager._apply_additive_migrations)
+
+        # Column was NOT added (skipped), and the legacy row is intact.
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda c: {col["name"] for col in inspect(c).get_columns("widget_unsafe_migration")}
+            )
+            assert "name" not in columns
+            count = (await conn.execute(text("SELECT COUNT(*) FROM widget_unsafe_migration"))).scalar()
+            assert count == 1
+        assert any("without a server_default" in r.message for r in caplog.records)
+    finally:
+        await engine.dispose()
+        Base.metadata.remove(unsafe)

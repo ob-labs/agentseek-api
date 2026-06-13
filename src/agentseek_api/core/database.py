@@ -232,6 +232,13 @@ class DatabaseManager:
         it. This inspects each mapped table and issues ``ALTER TABLE ADD
         COLUMN`` for any column present in the model but absent in the DB.
         Idempotent and safe to run on every startup.
+
+        Invariant for new columns: they must be either nullable or carry a
+        ``server_default``. ``ADD COLUMN ... NOT NULL`` without a server-side
+        default fails on a populated table (there is no value for existing
+        rows). Such a column cannot be added automatically here — it requires a
+        deliberate data migration — so we skip it with a loud error rather than
+        crash startup or emit failing DDL.
         """
         from sqlalchemy import inspect
         from sqlalchemy.schema import CreateColumn
@@ -246,6 +253,14 @@ class DatabaseManager:
             db_columns = {col["name"] for col in inspector.get_columns(table.name)}
             for column in table.columns:
                 if column.name in db_columns:
+                    continue
+                if not column.nullable and column.server_default is None:
+                    logger.error(
+                        "Cannot auto-add NOT NULL column %s.%s without a server_default; "
+                        "a manual data migration is required. Skipping.",
+                        table.name,
+                        column.name,
+                    )
                     continue
                 column_spec = CreateColumn(column).compile(dialect=dialect)
                 table_name = preparer.format_table(table)

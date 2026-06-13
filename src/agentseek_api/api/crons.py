@@ -3,7 +3,7 @@ from sqlalchemy import select
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 
-from agentseek_api.core.auth_deps import authorize, apply_metadata_filters, get_current_user
+from agentseek_api.core.auth_deps import authorize, get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant, Thread
 from agentseek_api.models.api import (
