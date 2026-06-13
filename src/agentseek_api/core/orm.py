@@ -74,6 +74,8 @@ class CronJob(Base):
     metadata_json: Mapped[dict] = mapped_column("metadata", JSON, default=dict, nullable=False)
     kwargs_json: Mapped[dict] = mapped_column("kwargs", JSON, default=dict, nullable=False)
     webhook: Mapped[str | None] = mapped_column(Text, nullable=True)
+    end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    on_run_completed: Mapped[str] = mapped_column(String(16), nullable=False, default="delete")
     max_webhook_attempts: Mapped[int] = mapped_column(nullable=False, default=3)
     next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
