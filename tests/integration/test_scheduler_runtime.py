@@ -106,6 +106,15 @@ async def _set_cron_webhook(cron_id: str, *, webhook: str, max_attempts: int = 3
         await session.commit()
 
 
+async def _set_cron_end_time(cron_id: str, *, end_time: datetime | None) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        cron = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+        assert cron is not None
+        cron.end_time = end_time
+        await session.commit()
+
+
 def _create_assistant(client: TestClient) -> str:
     response = client.post("/assistants", json={"name": "scheduler-assistant", "graph_id": "default"})
     assert response.status_code == 200
@@ -610,3 +619,54 @@ def test_reconcile_terminal_ticks_reclaims_stale_delivering_webhook_reservation(
     assert ticks[0].webhook_delivery_status == "delivered"
     assert len(attempts) == 1
     assert attempts[0].attempt_number == 1
+
+
+def test_dispatch_due_crons_skips_cron_past_end_time(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "past-end-time"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+    asyncio.run(_set_cron_end_time(cron_id, end_time=due_at - timedelta(minutes=5)))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+
+    assert results == []
+    ticks = asyncio.run(_list_ticks_for_cron(cron_id))
+    assert ticks == []
+
+
+def test_dispatch_due_crons_disables_cron_when_next_run_crosses_end_time(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "cross-end-time"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+    # end_time is after this fire (so it fires now) but before the next computed run_at.
+    asyncio.run(_set_cron_end_time(cron_id, end_time=due_at + timedelta(seconds=30)))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+
+    assert len(results) == 1
+    assert results[0].status == "queued"
+
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted is not None
+    assert persisted.enabled is False
+    assert _as_utc(persisted.next_run_at) > _as_utc(persisted.end_time)

@@ -258,6 +258,7 @@ async def claim_due_crons(
                         .where(
                             CronJob.enabled.is_(True),
                             CronJob.next_run_at <= current_time,
+                            ((CronJob.end_time.is_(None)) | (CronJob.end_time > current_time)),
                         )
                         .order_by(CronJob.next_run_at.asc(), CronJob.cron_id.asc())
                         .limit(remaining)
@@ -284,6 +285,9 @@ async def claim_due_crons(
                     row.next_run_at = compute_next_run_at(row.schedule, timezone_name=row.timezone, now=current_time)
                 except ValueError:
                     row.enabled = False
+                else:
+                    if row.end_time is not None and _as_utc(row.next_run_at) > _as_utc(row.end_time):
+                        row.enabled = False
             await session.commit()
         return claimed
     finally:
