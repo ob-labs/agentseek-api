@@ -76,14 +76,16 @@ async def create_thread_cron(thread_id: str, payload: ThreadCronCreate, user: Us
     return await _create_cron(assistant_id=resolved_id, thread_id=thread_id, payload=payload, user=user)
 
 
-@router.post("/runs/crons/search", response_model=CronSearchResponse)
+@router.post("/runs/crons/search", response_model=CronSearchResponse, response_model_exclude_none=True)
 async def search_crons(payload: CronSearchRequest, user: User = Depends(get_current_user)) -> CronSearchResponse | JSONResponse:
     filters = await authorize(user, "crons", "search", {})
     result = await cron_service.search_crons(payload=payload, user=user, filters=filters)
     if payload.select is not None:
         fields = set(payload.select)
+        # exclude_none keeps the select path's null handling consistent with the
+        # default path (response_model_exclude_none) and the single-cron routes.
         return JSONResponse(
-            content={"items": [item.model_dump(mode="json", include=fields) for item in result.items]}
+            content={"items": [item.model_dump(mode="json", include=fields, exclude_none=True) for item in result.items]}
         )
     return result
 

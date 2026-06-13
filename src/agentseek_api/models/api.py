@@ -402,6 +402,7 @@ class CronPatch(BaseModel):
     stream_subgraphs: bool | None = None
     stream_resumable: bool | None = None
     durability: RunDurability | None = None
+    multitask_strategy: RunMultitaskStrategy | None = None
 
 
 class CronRead(BaseModel):

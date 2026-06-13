@@ -3,7 +3,7 @@ from typing import Any
 from datetime import UTC, datetime
 from uuid import uuid4
 
-from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -75,7 +75,9 @@ class CronJob(Base):
     kwargs_json: Mapped[dict] = mapped_column("kwargs", JSON, default=dict, nullable=False)
     webhook: Mapped[str | None] = mapped_column(Text, nullable=True)
     end_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    on_run_completed: Mapped[str] = mapped_column(String(16), nullable=False, default="delete")
+    on_run_completed: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="delete", server_default=text("'delete'")
+    )
     max_webhook_attempts: Mapped[int] = mapped_column(nullable=False, default=3)
     next_run_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_run_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

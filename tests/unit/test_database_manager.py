@@ -307,3 +307,83 @@ async def test_initialize_uses_embedded_seekdb_when_seekdb_embed_enabled(
     assert (tmp_path / "embed_data" / "metadata.db").exists()
 
     await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_apply_additive_migrations_adds_missing_columns_to_legacy_table() -> None:
+    """A cron_jobs table created before end_time/on_run_completed existed must
+    gain those columns on startup (create_all never alters existing tables)."""
+    from sqlalchemy import inspect, text
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from agentseek_api.core.orm import Base
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    try:
+        # Legacy schema: cron_jobs WITHOUT end_time / on_run_completed, with a row.
+        async with engine.begin() as conn:
+            await conn.execute(
+                text(
+                    """
+                    CREATE TABLE cron_jobs (
+                        cron_id VARCHAR(36) PRIMARY KEY,
+                        assistant_id VARCHAR(36) NOT NULL,
+                        thread_id VARCHAR(36),
+                        user_id VARCHAR(255) NOT NULL,
+                        schedule VARCHAR(255) NOT NULL,
+                        timezone VARCHAR(128) NOT NULL DEFAULT 'UTC',
+                        enabled BOOLEAN NOT NULL DEFAULT 1,
+                        input JSON NOT NULL,
+                        metadata JSON NOT NULL,
+                        kwargs JSON NOT NULL,
+                        webhook TEXT,
+                        max_webhook_attempts INTEGER NOT NULL DEFAULT 3,
+                        next_run_at DATETIME NOT NULL,
+                        last_run_at DATETIME,
+                        last_tick_status VARCHAR(32),
+                        last_error TEXT,
+                        created_at DATETIME NOT NULL,
+                        updated_at DATETIME NOT NULL
+                    )
+                    """
+                )
+            )
+            await conn.execute(
+                text(
+                    """
+                    INSERT INTO cron_jobs
+                        (cron_id, assistant_id, user_id, schedule, timezone, enabled,
+                         input, metadata, kwargs, max_webhook_attempts, next_run_at,
+                         created_at, updated_at)
+                    VALUES
+                        ('c1', 'a1', 'u1', 'FREQ=MINUTELY;INTERVAL=1', 'UTC', 1,
+                         '{}', '{}', '{}', 3, '2030-01-01 00:00:00',
+                         '2026-01-01 00:00:00', '2026-01-01 00:00:00')
+                    """
+                )
+            )
+
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            await conn.run_sync(DatabaseManager._apply_additive_migrations)
+
+        async with engine.connect() as conn:
+            columns = await conn.run_sync(
+                lambda c: {col["name"] for col in inspect(c).get_columns("cron_jobs")}
+            )
+            assert "end_time" in columns
+            assert "on_run_completed" in columns
+            # Legacy row backfilled via server_default on the NOT NULL column.
+            value = (
+                await conn.execute(
+                    text("SELECT on_run_completed FROM cron_jobs WHERE cron_id = :i"),
+                    {"i": "c1"},
+                )
+            ).scalar()
+            assert value == "delete"
+
+        # Idempotent: a second pass must not error.
+        async with engine.begin() as conn:
+            await conn.run_sync(DatabaseManager._apply_additive_migrations)
+    finally:
+        await engine.dispose()

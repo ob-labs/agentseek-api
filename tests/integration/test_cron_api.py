@@ -434,6 +434,70 @@ def test_patch_cron_config_only_preserves_run_control(client: TestClient) -> Non
     assert persisted.kwargs_json["durability"] == "sync"
 
 
+def test_patch_thread_cron_updates_multitask_strategy(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+    created = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=HOURLY;INTERVAL=1",
+            "input": {"kind": "thread-cron"},
+            "multitask_strategy": "interrupt",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    response = client.patch(f"/runs/crons/{cron_id}", json={"multitask_strategy": "rollback"})
+    assert response.status_code == 200
+
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted is not None
+    assert persisted.kwargs_json["multitask_strategy"] == "rollback"
+
+
+def test_patch_cron_explicit_null_durability_resets_to_default(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "original"},
+            "durability": "sync",
+        },
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    response = client.patch(f"/runs/crons/{cron_id}", json={"durability": None})
+    assert response.status_code == 200
+
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted is not None
+    # Default durability is omitted from kwargs (no junk None stored).
+    assert "durability" not in persisted.kwargs_json
+
+
+def test_create_cron_rejects_unsupported_stream_mode(client: TestClient) -> None:
+    # An unsupported stream mode is rejected at creation time (Pydantic's
+    # RunStreamMode Literal catches it as 422), not silently persisted to be
+    # discovered later when the tick fires.
+    assistant_id = _create_assistant(client)
+    response = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "bad-stream"},
+            "stream_mode": ["valeus"],
+        },
+    )
+    assert response.status_code == 422
+
+
 def test_search_crons_sorts_by_next_run_date_asc(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     hourly = client.post(
