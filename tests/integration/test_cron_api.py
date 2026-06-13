@@ -356,3 +356,79 @@ def test_create_thread_cron_ignores_on_run_completed(client: TestClient) -> None
     assert persisted is not None
     assert persisted.on_run_completed == "delete"
     assert "on_run_completed" not in persisted.kwargs_json
+
+
+def test_patch_cron_updates_lifecycle_and_run_control(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "original"},
+            "config": {"model": "gpt-test"},
+            "context": {"tenant": "acme"},
+        },
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    response = client.patch(
+        f"/runs/crons/{cron_id}",
+        json={
+            "end_time": "2031-06-01T12:00:00+00:00",
+            "durability": "sync",
+            "stream_mode": ["updates", "values"],
+            "on_run_completed": "keep",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # CronRead serializes end_time; SQLite drops tzinfo on round-trip so the body
+    # mirrors the naive round-tripped value (matches the existing-resource tests).
+    assert body["end_time"] == "2031-06-01T12:00:00"
+    # on_run_completed is a persisted column, not a CronRead response field (per spec),
+    # so it is not present in the response body.
+    assert "on_run_completed" not in body
+
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted is not None
+    assert persisted.end_time is not None
+    assert persisted.end_time.isoformat() == "2031-06-01T12:00:00"
+    assert persisted.on_run_completed == "keep"
+    assert persisted.kwargs_json["config"] == {"model": "gpt-test"}
+    assert persisted.kwargs_json["context"] == {"tenant": "acme"}
+    assert persisted.kwargs_json["durability"] == "sync"
+    assert persisted.kwargs_json["stream_modes"] == ["updates", "values"]
+
+
+def test_patch_cron_config_only_preserves_run_control(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "original"},
+            "config": {"model": "gpt-test"},
+            "context": {"tenant": "acme"},
+            "stream_mode": ["messages"],
+            "durability": "sync",
+        },
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    response = client.patch(
+        f"/runs/crons/{cron_id}",
+        json={"config": {"model": "gpt-next"}},
+    )
+
+    assert response.status_code == 200
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted is not None
+    assert persisted.kwargs_json["config"] == {"model": "gpt-next"}
+    assert persisted.kwargs_json["context"] == {"tenant": "acme"}
+    assert persisted.kwargs_json["stream_modes"] == ["messages"]
+    assert persisted.kwargs_json["durability"] == "sync"

@@ -207,20 +207,43 @@ async def patch_cron(*, cron_id: str, payload: CronPatch, user: User, filters: d
             if payload.metadata is None:
                 raise ValueError("metadata cannot be null")
             row.metadata_json = payload.metadata
-        if "config" in payload.model_fields_set:
-            if payload.config is None:
-                raise ValueError("config cannot be null")
+        if "config" in payload.model_fields_set and payload.config is None:
+            raise ValueError("config cannot be null")
+        if "context" in payload.model_fields_set and payload.context is None:
+            raise ValueError("context cannot be null")
+
+        run_control_keys = {
+            "config",
+            "context",
+            "stream_mode",
+            "interrupt_before",
+            "interrupt_after",
+            "durability",
+            "stream_subgraphs",
+            "stream_resumable",
+        }
+        if run_control_keys & payload.model_fields_set:
+            existing = row.kwargs_json or {}
+            existing_stream = existing.get("stream_modes")
             row.kwargs_json = _cron_kwargs(
-                config=payload.config,
-                context=row.kwargs_json.get("context", {}),
+                config=payload.config if "config" in payload.model_fields_set else existing.get("config", {}),
+                context=payload.context if "context" in payload.model_fields_set else existing.get("context", {}),
+                stream_mode=payload.stream_mode if "stream_mode" in payload.model_fields_set else existing_stream,
+                interrupt_before=payload.interrupt_before if "interrupt_before" in payload.model_fields_set else existing.get("interrupt_before"),
+                interrupt_after=payload.interrupt_after if "interrupt_after" in payload.model_fields_set else existing.get("interrupt_after"),
+                durability=payload.durability if "durability" in payload.model_fields_set else existing.get("durability", "async"),
+                stream_subgraphs=payload.stream_subgraphs if "stream_subgraphs" in payload.model_fields_set else existing.get("stream_subgraphs", False),
+                stream_resumable=payload.stream_resumable if "stream_resumable" in payload.model_fields_set else existing.get("stream_resumable", False),
+                multitask_strategy=existing.get("multitask_strategy", "enqueue"),
             )
-        if "context" in payload.model_fields_set:
-            if payload.context is None:
-                raise ValueError("context cannot be null")
-            row.kwargs_json = _cron_kwargs(
-                config=row.kwargs_json.get("config", {}),
-                context=payload.context,
-            )
+
+        if "end_time" in payload.model_fields_set:
+            row.end_time = payload.end_time
+        if "on_run_completed" in payload.model_fields_set:
+            if payload.on_run_completed is None:
+                raise ValueError("on_run_completed cannot be null")
+            row.on_run_completed = payload.on_run_completed
+
         if "timezone" in payload.model_fields_set and payload.schedule is None and row.enabled:
             row.next_run_at = compute_next_run_at(row.schedule, timezone_name=current_timezone)
 

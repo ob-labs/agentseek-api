@@ -379,7 +379,7 @@ class CronCountRequest(BaseModel):
 
 
 class CronPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     schedule: str | None = None
     timezone: str | None = None
@@ -389,6 +389,14 @@ class CronPatch(BaseModel):
     context: dict[str, Any] | None = None
     webhook: str | None = None
     enabled: bool | None = None
+    end_time: datetime | None = None
+    interrupt_before: RunInterrupt | None = None
+    interrupt_after: RunInterrupt | None = None
+    on_run_completed: CronOnRunCompleted | None = None
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = None
+    stream_subgraphs: bool | None = None
+    stream_resumable: bool | None = None
+    durability: RunDurability | None = None
 
 
 class CronRead(BaseModel):
