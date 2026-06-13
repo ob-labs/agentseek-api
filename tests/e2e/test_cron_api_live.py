@@ -172,6 +172,35 @@ async def test_cron_search_sort_filter_select_against_real_db(e2e_base_url: str)
         for item in items:
             assert set(item.keys()) == {"cron_id", "schedule"}
 
+        # Numeric metadata value on the real backend. The JSON string-coercion
+        # filter (metadata_json[k].as_string() == str(value)) is a known
+        # limitation whose behavior can differ between SQLite and MySQL/OB. We do
+        # not assume which way the backend coerces — we PIN the safety invariant
+        # that matters: a numeric filter must never return a NON-matching cron
+        # (no false positives / no cross-cron leakage), only the owning cron or
+        # nothing. This locks real-backend behavior without over-fitting to it.
+        numeric_owner = (
+            await client.post(
+                "/runs/crons",
+                json={
+                    "assistant_id": assistant_id,
+                    "schedule": "FREQ=MINUTELY;INTERVAL=1",
+                    "input": {"k": "numeric"},
+                    "metadata": {"priority": 7},
+                },
+                headers=_headers(user),
+            )
+        ).json()
+        numeric = await client.post(
+            "/runs/crons/search",
+            json={"assistant_id": assistant_id, "metadata": {"priority": 7}},
+            headers=_headers(user),
+        )
+        assert numeric.status_code == 200, numeric.text
+        numeric_ids = {item["cron_id"] for item in numeric.json()["items"]}
+        # Never matches hourly/minutely (which have no "priority" key).
+        assert numeric_ids <= {numeric_owner["cron_id"]}
+
         # Cleanup.
-        for cron in (hourly, minutely):
+        for cron in (hourly, minutely, numeric_owner):
             await client.delete(f"/runs/crons/{cron['cron_id']}", headers=_headers(user))
