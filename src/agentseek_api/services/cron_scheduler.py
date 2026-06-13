@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import CronJob, CronTick, Run, Thread
@@ -22,8 +23,15 @@ from agentseek_api.services.run_preparation import (
     prepare_run,
     submit_existing_run,
 )
+from agentseek_api.services.stream_persistence import (
+    delete_run_stream_events,
+    delete_thread_stream_events,
+)
+from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.services.thread_service import create_thread_for_user
 from agentseek_api.settings import settings
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
 TERMINAL_TICK_STATUSES = {"success", "error", "interrupted", "skipped"}
@@ -35,6 +43,41 @@ def _cron_user(user_id: str) -> User:
 
 def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def _best_effort_checkpointer_call(method_name: str, *args: object, **kwargs: object) -> None:
+    method = getattr(db_manager.get_langgraph_checkpointer(), method_name, None)
+    if method is None:
+        return
+    try:
+        result = method(*args, **kwargs)
+        if hasattr(result, "__await__"):
+            await result
+    except NotImplementedError:
+        return
+
+
+async def _delete_stateless_thread(thread_id: str) -> None:
+    try:
+        session_factory = db_manager.get_session_factory()
+        async with session_factory() as session:
+            row = await session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+            if row is None:
+                return
+            run_ids = (
+                await session.scalars(select(Run.run_id).where(Run.thread_id == thread_id))
+            ).all()
+            await session.execute(delete(Run).where(Run.thread_id == thread_id))
+            await session.delete(row)
+            await session.commit()
+        await _best_effort_checkpointer_call("adelete_thread", thread_id)
+        if run_ids:
+            await _best_effort_checkpointer_call("adelete_for_runs", list(run_ids))
+            await delete_run_stream_events(list(run_ids))
+        thread_protocol_broker.delete_thread(thread_id)
+        await delete_thread_stream_events(thread_id)
+    except Exception:
+        logger.exception("Failed to delete stateless cron thread %s", thread_id)
 
 
 def _started_tick_stale_after_seconds() -> int:
@@ -121,6 +164,7 @@ async def _reconcile_terminal_ticks(
         )
 
         deliveries: list[tuple[int, str, int, dict[str, object]]] = []
+        threads_to_delete: list[str] = []
         for tick in ticks:
             cron = await session.scalar(select(CronJob).where(CronJob.cron_id == tick.cron_id))
             if cron is None:
@@ -136,6 +180,13 @@ async def _reconcile_terminal_ticks(
                 cron.last_error = tick.skip_reason if tick.status == "error" else None
                 if tick.status != "skipped":
                     cron.last_run_at = current_time
+                if (
+                    cron.thread_id is None
+                    and cron.on_run_completed == "delete"
+                    and tick.thread_id is not None
+                    and tick.status != "skipped"
+                ):
+                    threads_to_delete.append(tick.thread_id)
             delivery_is_available = tick.webhook_delivery_status is None or (
                 tick.webhook_delivery_status == "delivering" and _as_utc(tick.updated_at) <= stale_before
             )
@@ -161,6 +212,9 @@ async def _reconcile_terminal_ticks(
             http_client=webhook_client,
             sleep=sleep,
         )
+
+    for thread_id in threads_to_delete:
+        await _delete_stateless_thread(thread_id)
 
 
 async def claim_due_crons(

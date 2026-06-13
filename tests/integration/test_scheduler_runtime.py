@@ -142,6 +142,7 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
             "metadata": {"source": "scheduler-runtime"},
             "config": {"model": "gpt-test"},
             "context": {"tenant": "acme"},
+            "on_run_completed": "keep",
         },
         headers={"x-user-id": "owner"},
     )
@@ -702,3 +703,97 @@ def test_dispatch_due_crons_passes_multitask_strategy_to_thread_run(client: Test
     runs = asyncio.run(_list_runs_for_thread(thread_id))
     assert len(runs) == 1
     assert runs[0].multitask_strategy == "interrupt"
+
+
+async def _fetch_thread(thread_id: str) -> Thread | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        return await session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+
+
+def test_dispatch_due_crons_deletes_stateless_thread_on_run_completed_delete(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "stateless-delete"},
+            "on_run_completed": "delete",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+    assert len(results) == 1
+    assert results[0].status == "queued"
+
+    user_threads = asyncio.run(_list_threads_for_user("owner"))
+    stateless_threads = [t for t in user_threads if t.metadata_json.get("cron_id") == cron_id]
+    assert stateless_threads == []
+
+    ticks = asyncio.run(_list_ticks_for_cron(cron_id))
+    assert len(ticks) == 1
+    assert ticks[0].status == "success"
+
+
+def test_dispatch_due_crons_keeps_stateless_thread_on_run_completed_keep(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "stateless-keep"},
+            "on_run_completed": "keep",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+    assert len(results) == 1
+    assert results[0].status == "queued"
+
+    user_threads = asyncio.run(_list_threads_for_user("owner"))
+    stateless_threads = [t for t in user_threads if t.metadata_json.get("cron_id") == cron_id]
+    assert len(stateless_threads) == 1
+    persisted = asyncio.run(_fetch_thread(stateless_threads[0].thread_id))
+    assert persisted is not None
+
+
+def test_dispatch_due_crons_never_deletes_caller_owned_thread(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+    created = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "thread-bound"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+    assert len(results) == 1
+    assert results[0].status == "queued"
+
+    persisted = asyncio.run(_fetch_thread(thread_id))
+    assert persisted is not None
