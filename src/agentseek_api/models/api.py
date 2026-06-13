@@ -361,16 +361,22 @@ class CronRead(BaseModel):
     cron_id: str
     assistant_id: str
     thread_id: str | None
+    user_id: str | None = None
     enabled: bool
     schedule: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    next_run_date: datetime
+    next_run_at: datetime  # deprecated extension alias of next_run_date
+    end_time: datetime | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+    # Non-standard extensions (not in LangGraph spec):
     timezone: str
     webhook: str | None = None
-    next_run_at: datetime
     last_run_at: datetime | None = None
     last_tick_status: str | None = None
     last_error: str | None = None
-    created_at: datetime
-    updated_at: datetime | None = None
 
 
 class CronSearchResponse(BaseModel):

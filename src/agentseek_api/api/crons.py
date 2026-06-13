@@ -45,7 +45,7 @@ async def _create_cron(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/runs/crons", response_model=CronRead)
+@router.post("/runs/crons", response_model=CronRead, response_model_exclude_none=True)
 async def create_stateless_cron(payload: CronCreate, user: User = Depends(get_current_user)) -> CronRead:
     value: dict = {
         "metadata": dict(payload.metadata) if payload.metadata else {},
@@ -57,7 +57,7 @@ async def create_stateless_cron(payload: CronCreate, user: User = Depends(get_cu
     return await _create_cron(assistant_id=resolved_id, thread_id=None, payload=payload, user=user)
 
 
-@router.post("/threads/{thread_id}/runs/crons", response_model=CronRead)
+@router.post("/threads/{thread_id}/runs/crons", response_model=CronRead, response_model_exclude_none=True)
 async def create_thread_cron(thread_id: str, payload: CronCreate, user: User = Depends(get_current_user)) -> CronRead:
     value: dict = {
         "metadata": dict(payload.metadata) if payload.metadata else {},
@@ -87,13 +87,13 @@ async def count_crons(payload: CronCountRequest, user: User = Depends(get_curren
     return await cron_service.count_crons(payload=payload, user=user, filters=filters)
 
 
-@router.get("/runs/crons/{cron_id}", response_model=CronRead)
+@router.get("/runs/crons/{cron_id}", response_model=CronRead, response_model_exclude_none=True)
 async def get_cron(cron_id: str, user: User = Depends(get_current_user)) -> CronRead:
     filters = await authorize(user, "crons", "read", {"cron_id": cron_id})
     return await cron_service.get_cron(cron_id=cron_id, user=user, filters=filters)
 
 
-@router.patch("/runs/crons/{cron_id}", response_model=CronRead)
+@router.patch("/runs/crons/{cron_id}", response_model=CronRead, response_model_exclude_none=True)
 async def patch_cron(cron_id: str, payload: CronPatch, user: User = Depends(get_current_user)) -> CronRead:
     filters = await authorize(user, "crons", "update", {"cron_id": cron_id})
     try:

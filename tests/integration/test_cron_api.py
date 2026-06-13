@@ -45,14 +45,14 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
     assert response.status_code == 200
     body = response.json()
     assert body["assistant_id"] == assistant_id
-    assert body["thread_id"] is None
+    assert body.get("thread_id") is None  # excluded when None via response_model_exclude_none
     assert body["enabled"] is True
     assert body["schedule"] == "FREQ=MINUTELY;INTERVAL=5"
     assert body["timezone"] == "Asia/Shanghai"
     assert body["webhook"] == "https://example.com/hook"
-    assert body["last_run_at"] is None
-    assert body["last_tick_status"] is None
-    assert body["last_error"] is None
+    assert body.get("last_run_at") is None  # excluded when None via response_model_exclude_none
+    assert body.get("last_tick_status") is None
+    assert body.get("last_error") is None
     assert body["next_run_at"] is not None
     assert body["created_at"] is not None
     assert body["updated_at"] is not None

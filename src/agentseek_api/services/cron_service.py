@@ -39,20 +39,31 @@ def _cron_kwargs(*, config: dict, context: dict) -> dict:
 
 
 def _to_read_model(row: CronJob) -> CronRead:
+    kwargs = row.kwargs_json or {}
+    payload = {
+        "input": row.input_json,
+        "config": kwargs.get("config", {}),
+        "context": kwargs.get("context", {}),
+    }
     return CronRead(
         cron_id=row.cron_id,
         assistant_id=row.assistant_id,
         thread_id=row.thread_id,
+        user_id=row.user_id,
         enabled=row.enabled,
         schedule=row.schedule,
+        payload=payload,
+        metadata=row.metadata_json or {},
+        next_run_date=row.next_run_at,
+        next_run_at=row.next_run_at,
+        end_time=row.end_time,
+        created_at=row.created_at,
+        updated_at=row.updated_at,
         timezone=row.timezone,
         webhook=row.webhook,
-        next_run_at=row.next_run_at,
         last_run_at=row.last_run_at,
         last_tick_status=row.last_tick_status,
         last_error=row.last_error,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
     )
 
 
