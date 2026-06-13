@@ -195,3 +195,92 @@ def test_cron_scheduler_tables_define_hot_path_indexes() -> None:
     assert "ix_cron_jobs_enabled_next_run_at" in cron_job_indexes
     assert "ix_cron_ticks_status_updated_at_scheduled_for" in cron_tick_indexes
     assert "ix_cron_ticks_status_webhook_delivery_status_updated_at" in cron_tick_indexes
+
+
+@pytest.mark.asyncio
+async def test_claim_due_crons_maps_run_control_fields(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from agentseek_api.services.cron_scheduler import claim_due_crons
+    from agentseek_api.settings import settings
+
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/scheduler-runctl.db")
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", _FakeCheckpointer)
+    await db_manager.close()
+    await db_manager.initialize()
+    try:
+        session_factory = db_manager.get_session_factory()
+        due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+        end_at = due_at + timedelta(days=1)
+        async with session_factory() as session:
+            assistant = Assistant(name="scheduler-runctl", graph_id="default")
+            session.add(assistant)
+            await session.flush()
+            cron = CronJob(
+                assistant_id=assistant.assistant_id,
+                thread_id=None,
+                user_id="u1",
+                schedule="FREQ=MINUTELY;INTERVAL=1",
+                enabled=True,
+                input_json={"kind": "unit"},
+                next_run_at=due_at,
+                end_time=end_at,
+                on_run_completed="keep",
+                kwargs_json={"config": {}, "context": {}, "multitask_strategy": "interrupt"},
+            )
+            session.add(cron)
+            await session.commit()
+            cron_id = cron.cron_id
+
+        claimed = await claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at)
+
+        assert [item.cron_id for item in claimed] == [cron_id]
+        item = claimed[0]
+        assert item.on_run_completed == "keep"
+        assert _as_utc(item.end_time) == end_at
+        assert item.multitask_strategy == "interrupt"
+    finally:
+        await db_manager.close()
+
+
+@pytest.mark.asyncio
+async def test_claim_due_crons_run_control_fields_default(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    from agentseek_api.services.cron_scheduler import claim_due_crons
+    from agentseek_api.settings import settings
+
+    monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/scheduler-runctl-default.db")
+    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", _FakeCheckpointer)
+    await db_manager.close()
+    await db_manager.initialize()
+    try:
+        session_factory = db_manager.get_session_factory()
+        due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+        async with session_factory() as session:
+            assistant = Assistant(name="scheduler-runctl-default", graph_id="default")
+            session.add(assistant)
+            await session.flush()
+            cron = CronJob(
+                assistant_id=assistant.assistant_id,
+                thread_id=None,
+                user_id="u1",
+                schedule="FREQ=MINUTELY;INTERVAL=1",
+                enabled=True,
+                input_json={"kind": "unit"},
+                next_run_at=due_at,
+            )
+            session.add(cron)
+            await session.commit()
+
+        claimed = await claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at)
+
+        assert len(claimed) == 1
+        item = claimed[0]
+        assert item.on_run_completed == "delete"
+        assert item.end_time is None
+        assert item.multitask_strategy == "enqueue"
+    finally:
+        await db_manager.close()
