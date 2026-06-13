@@ -66,7 +66,7 @@ def test_create_stateless_cron_persists_and_returns_resource(client: TestClient)
     assert persisted.schedule == "FREQ=MINUTELY;INTERVAL=5"
     assert persisted.input_json == ["stateless-cron", {"kind": "list-payload"}]
     assert persisted.metadata_json == {"source": "integration"}
-    assert persisted.kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}}
+    assert persisted.kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}, "stream_modes": ["values"]}
     assert persisted.webhook == "https://example.com/hook"
     assert persisted.next_run_at is not None
     assert persisted.next_run_at.isoformat() == body["next_run_at"]
@@ -221,3 +221,83 @@ def test_search_crons_rejects_negative_limit_and_offset(client: TestClient) -> N
     )
 
     assert response.status_code == 422
+
+
+def test_create_stateless_cron_persists_run_control_and_lifecycle(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+
+    response = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "run-control"},
+            "config": {"model": "gpt-test"},
+            "context": {"tenant": "acme"},
+            "end_time": "2030-01-01T00:00:00+00:00",
+            "on_run_completed": "keep",
+            "interrupt_before": ["node_a"],
+            "interrupt_after": "*",
+            "stream_mode": ["values", "messages", "values"],
+            "stream_subgraphs": True,
+            "stream_resumable": True,
+            "durability": "sync",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # CronRead serializes end_time; SQLite drops tzinfo on round-trip so the body
+    # mirrors the naive round-tripped value (matches the existing-resource test).
+    assert body["end_time"] == "2030-01-01T00:00:00"
+    # on_run_completed is a persisted column, not a CronRead response field (per spec),
+    # so it is not present in the response body.
+    assert "on_run_completed" not in body
+
+    persisted = asyncio.run(_fetch_cron(body["cron_id"]))
+    assert persisted is not None
+    assert persisted.end_time is not None
+    assert persisted.end_time.isoformat() == "2030-01-01T00:00:00"
+    assert persisted.on_run_completed == "keep"
+    assert persisted.kwargs_json == {
+        "config": {"model": "gpt-test"},
+        "context": {"tenant": "acme"},
+        "stream_modes": ["values", "messages"],
+        "interrupt_before": ["node_a"],
+        "interrupt_after": "*",
+        "durability": "sync",
+        "stream_subgraphs": True,
+        "stream_resumable": True,
+    }
+
+
+def test_create_stateless_cron_omits_default_run_control_from_kwargs(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+
+    response = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=5",
+            "input": {"kind": "defaults"},
+            "config": {"model": "gpt-test"},
+            "context": {"tenant": "acme"},
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    # end_time is None -> dropped by response_model_exclude_none on the route.
+    assert "end_time" not in body
+    # on_run_completed is a persisted column, not a CronRead response field (per spec).
+    assert "on_run_completed" not in body
+
+    persisted = asyncio.run(_fetch_cron(body["cron_id"]))
+    assert persisted is not None
+    assert persisted.end_time is None
+    assert persisted.on_run_completed == "delete"
+    assert persisted.kwargs_json == {
+        "config": {"model": "gpt-test"},
+        "context": {"tenant": "acme"},
+        "stream_modes": ["values"],
+    }

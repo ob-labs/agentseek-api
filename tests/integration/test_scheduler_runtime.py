@@ -177,7 +177,7 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
     assert persisted_metadata.get("cron_id") == stateless.json()["cron_id"]
     assert persisted_metadata.get("scheduled_for") == due_at.isoformat()
     assert isinstance(persisted_metadata.get("__agentseek_checkpoint_id"), str)
-    assert created_runs[0].kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}}
+    assert created_runs[0].kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}, "stream_modes": ["values"]}
 
     busy_thread_runs = asyncio.run(_list_runs_for_thread(thread_id))
     assert busy_thread_runs == []

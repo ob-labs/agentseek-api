@@ -59,7 +59,7 @@ async def test_create_cron_persists_webhook_timezone_and_runtime_kwargs(
         assert row.timezone == "Asia/Shanghai"
         assert row.webhook == "https://example.com/hook"
         assert row.metadata_json == {"source": "cron-test"}
-        assert row.kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}}
+        assert row.kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}, "stream_modes": ["values"]}
     finally:
         await manager.close()
 
@@ -225,7 +225,7 @@ async def test_patch_cron_updates_webhook_timezone_and_runtime_kwargs(monkeypatc
         assert row.timezone == "America/Los_Angeles"
         assert row.webhook == "https://example.com/patched"
         assert row.metadata_json == {"source": "patched"}
-        assert row.kwargs_json == {"config": {"temperature": 0.1}, "context": {"workspace": "west"}}
+        assert row.kwargs_json == {"config": {"temperature": 0.1}, "context": {"workspace": "west"}, "stream_modes": ["values"]}
     finally:
         await manager.close()
 

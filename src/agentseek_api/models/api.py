@@ -233,6 +233,10 @@ RunOnDisconnect = Literal["cancel", "continue"]
 RunOnCompletion = Literal["delete", "keep"]
 RunMultitaskStrategy = Literal["reject", "rollback", "interrupt", "enqueue"]
 RunIfNotExists = Literal["create", "reject"]
+CronOnRunCompleted = Literal["delete", "keep"]
+CronSortBy = Literal["cron_id", "assistant_id", "thread_id", "next_run_date", "end_time", "created_at", "updated_at"]
+CronSortOrder = Literal["asc", "desc"]
+CronSelectField = Literal["cron_id", "assistant_id", "thread_id", "user_id", "enabled", "schedule", "payload", "metadata", "next_run_date", "next_run_at", "end_time", "created_at", "updated_at", "timezone", "webhook", "last_run_at", "last_tick_status", "last_error"]
 
 
 class RunCreateStateful(BaseModel):
@@ -313,7 +317,7 @@ class RunRead(BaseModel):
 
 
 class CronCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     assistant_id: str
     schedule: str
@@ -324,6 +328,14 @@ class CronCreate(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     webhook: str | None = None
     enabled: bool = True
+    end_time: datetime | None = None
+    interrupt_before: RunInterrupt | None = None
+    interrupt_after: RunInterrupt | None = None
+    on_run_completed: CronOnRunCompleted = "delete"
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = Field(default_factory=lambda: ["values"])
+    stream_subgraphs: bool = False
+    stream_resumable: bool = False
+    durability: RunDurability = "async"
 
 
 class CronSearchRequest(BaseModel):

@@ -34,8 +34,46 @@ def _validate_webhook(webhook: str | None) -> str | None:
     return webhook
 
 
-def _cron_kwargs(*, config: dict, context: dict) -> dict:
-    return {"config": config, "context": context}
+def _cron_stream_modes(stream_mode: Any) -> list[str]:
+    if stream_mode is None:
+        return ["values"]
+    raw = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode)
+    seen: set[str] = set()
+    modes: list[str] = []
+    for mode in raw:
+        if mode not in seen:
+            seen.add(mode)
+            modes.append(mode)
+    return modes
+
+
+def _cron_kwargs(
+    *,
+    config: dict,
+    context: dict,
+    stream_mode: Any = None,
+    interrupt_before: Any = None,
+    interrupt_after: Any = None,
+    durability: str = "async",
+    stream_subgraphs: bool = False,
+    stream_resumable: bool = False,
+    multitask_strategy: str = "enqueue",
+) -> dict:
+    kwargs: dict[str, Any] = {"config": config, "context": context}
+    kwargs["stream_modes"] = _cron_stream_modes(stream_mode)
+    if interrupt_before is not None:
+        kwargs["interrupt_before"] = interrupt_before
+    if interrupt_after is not None:
+        kwargs["interrupt_after"] = interrupt_after
+    if durability != "async":
+        kwargs["durability"] = durability
+    if stream_subgraphs:
+        kwargs["stream_subgraphs"] = True
+    if stream_resumable:
+        kwargs["stream_resumable"] = True
+    if multitask_strategy != "enqueue":
+        kwargs["multitask_strategy"] = multitask_strategy
+    return kwargs
 
 
 def _to_read_model(row: CronJob) -> CronRead:
@@ -93,8 +131,20 @@ async def create_cron(*, assistant_id: str, thread_id: str | None, payload: Cron
             enabled=payload.enabled,
             input_json=payload.input,
             metadata_json=payload.metadata,
-            kwargs_json=_cron_kwargs(config=payload.config, context=payload.context),
+            kwargs_json=_cron_kwargs(
+                config=payload.config,
+                context=payload.context,
+                stream_mode=payload.stream_mode,
+                interrupt_before=payload.interrupt_before,
+                interrupt_after=payload.interrupt_after,
+                durability=payload.durability,
+                stream_subgraphs=payload.stream_subgraphs,
+                stream_resumable=payload.stream_resumable,
+                multitask_strategy=getattr(payload, "multitask_strategy", "enqueue"),
+            ),
             webhook=webhook,
+            end_time=payload.end_time,
+            on_run_completed=getattr(payload, "on_run_completed", "delete"),
             next_run_at=compute_next_run_at(payload.schedule, timezone_name=timezone_name),
         )
         session.add(row)
