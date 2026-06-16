@@ -7,6 +7,7 @@ from agentseek_api.api import threads as threads_module
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.api import ThreadCountRequest, ThreadPatch, ThreadPruneRequest, ThreadSearchRequest
 from agentseek_api.models.auth import User
+from agentseek_api.services import thread_service as thread_service_module
 from agentseek_api.services.thread_service import _public_thread_config
 
 
@@ -175,20 +176,20 @@ async def test_best_effort_checkpointer_call_covers_missing_and_not_implemented(
         pass
 
     monkeypatch.setattr(
-        "agentseek_api.api.threads.db_manager.get_langgraph_checkpointer",
+        "agentseek_api.services.thread_service.db_manager.get_langgraph_checkpointer",
         lambda: MissingMethodCheckpointer(),
     )
-    await threads_module._best_effort_checkpointer_call("aprune", ["t1"])
+    await thread_service_module._best_effort_checkpointer_call("aprune", ["t1"])
 
     class RaisingCheckpointer:
         async def aprune(self, *_args, **_kwargs) -> None:
             raise NotImplementedError
 
     monkeypatch.setattr(
-        "agentseek_api.api.threads.db_manager.get_langgraph_checkpointer",
+        "agentseek_api.services.thread_service.db_manager.get_langgraph_checkpointer",
         lambda: RaisingCheckpointer(),
     )
-    await threads_module._best_effort_checkpointer_call("aprune", ["t1"])
+    await thread_service_module._best_effort_checkpointer_call("aprune", ["t1"])
 
 
 def test_thread_helper_functions_cover_public_config_and_checkpoint_lookup() -> None:
@@ -343,10 +344,18 @@ async def test_patch_copy_and_delete_thread_routes_cover_new_paths(monkeypatch: 
     source_run = _run(thread_id=source.thread_id)
     patch_session = FakeSession(scalar_rows=[source])
     copy_session = FakeSession(scalar_rows=[source], scalars_rows=[[source_run]])
-    delete_session = FakeSession(scalar_rows=[source], scalars_rows=[[source_run.run_id]])
-    session_factory = FakeSessionFactory([patch_session, copy_session, delete_session])
+    # delete_thread: one session for the existence check (returns thread_id), then
+    # delete_threads_cascade opens its own session (returns the run_ids to clean up).
+    delete_check_session = FakeSession(scalar_rows=[source.thread_id])
+    cascade_session = FakeSession(scalars_rows=[[source_run.run_id]])
+    session_factory = FakeSessionFactory([patch_session, copy_session, delete_check_session, cascade_session])
     monkeypatch.setattr(
         "agentseek_api.api.threads.db_manager.get_session_factory",
+        lambda: session_factory,
+    )
+    # The cascade lives in thread_service and uses its own db_manager reference.
+    monkeypatch.setattr(
+        "agentseek_api.services.thread_service.db_manager.get_session_factory",
         lambda: session_factory,
     )
 
@@ -360,7 +369,12 @@ async def test_patch_copy_and_delete_thread_routes_cover_new_paths(monkeypatch: 
     async def fake_copy_checkpoints(source_thread_id: str, target_thread_id: str) -> None:
         copied_checkpoints.append((source_thread_id, target_thread_id))
 
-    monkeypatch.setattr("agentseek_api.api.threads._best_effort_checkpointer_call", fake_best_effort)
+    async def _noop_stream_cleanup(*args, **kwargs) -> None:
+        return None
+
+    monkeypatch.setattr("agentseek_api.services.thread_service._best_effort_checkpointer_call", fake_best_effort)
+    monkeypatch.setattr("agentseek_api.services.thread_service.delete_run_stream_events", _noop_stream_cleanup)
+    monkeypatch.setattr("agentseek_api.services.thread_service.delete_thread_stream_events", _noop_stream_cleanup)
     monkeypatch.setattr("agentseek_api.api.threads.copy_checkpoints", fake_copy_checkpoints)
 
     patched = await threads_module.patch_thread(

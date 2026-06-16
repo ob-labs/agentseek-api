@@ -22,6 +22,9 @@ class ClaimedCron:
     metadata_json: dict[str, Any]
     kwargs_json: dict[str, Any]
     scheduled_for: datetime
+    on_run_completed: str = "delete"
+    end_time: datetime | None = None
+    multitask_strategy: str = "enqueue"
 
     @classmethod
     def from_row(
@@ -45,6 +48,9 @@ class ClaimedCron:
             metadata_json=row.metadata_json,
             kwargs_json=row.kwargs_json,
             scheduled_for=scheduled_for,
+            on_run_completed=row.on_run_completed,
+            end_time=row.end_time,
+            multitask_strategy=(row.kwargs_json or {}).get("multitask_strategy", "enqueue"),
         )
 
 

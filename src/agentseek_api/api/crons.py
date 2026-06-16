@@ -1,9 +1,9 @@
 from sqlalchemy import select
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 
-from agentseek_api.core.auth_deps import authorize, apply_metadata_filters, get_current_user
+from agentseek_api.core.auth_deps import authorize, get_current_user
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Assistant, Thread
 from agentseek_api.models.api import (
@@ -14,6 +14,7 @@ from agentseek_api.models.api import (
     CronRead,
     CronSearchRequest,
     CronSearchResponse,
+    ThreadCronCreate,
 )
 from agentseek_api.models.auth import User
 from agentseek_api.services import cron_service
@@ -36,7 +37,7 @@ async def _create_cron(
     *,
     assistant_id: str,
     thread_id: str | None,
-    payload: CronCreate,
+    payload: CronCreate | ThreadCronCreate,
     user: User,
 ) -> CronRead:
     try:
@@ -45,7 +46,7 @@ async def _create_cron(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@router.post("/runs/crons", response_model=CronRead)
+@router.post("/runs/crons", response_model=CronRead, response_model_exclude_none=True)
 async def create_stateless_cron(payload: CronCreate, user: User = Depends(get_current_user)) -> CronRead:
     value: dict = {
         "metadata": dict(payload.metadata) if payload.metadata else {},
@@ -57,8 +58,8 @@ async def create_stateless_cron(payload: CronCreate, user: User = Depends(get_cu
     return await _create_cron(assistant_id=resolved_id, thread_id=None, payload=payload, user=user)
 
 
-@router.post("/threads/{thread_id}/runs/crons", response_model=CronRead)
-async def create_thread_cron(thread_id: str, payload: CronCreate, user: User = Depends(get_current_user)) -> CronRead:
+@router.post("/threads/{thread_id}/runs/crons", response_model=CronRead, response_model_exclude_none=True)
+async def create_thread_cron(thread_id: str, payload: ThreadCronCreate, user: User = Depends(get_current_user)) -> CronRead:
     value: dict = {
         "metadata": dict(payload.metadata) if payload.metadata else {},
         "assistant_id": payload.assistant_id,
@@ -75,10 +76,18 @@ async def create_thread_cron(thread_id: str, payload: CronCreate, user: User = D
     return await _create_cron(assistant_id=resolved_id, thread_id=thread_id, payload=payload, user=user)
 
 
-@router.post("/runs/crons/search", response_model=CronSearchResponse)
-async def search_crons(payload: CronSearchRequest, user: User = Depends(get_current_user)) -> CronSearchResponse:
+@router.post("/runs/crons/search", response_model=CronSearchResponse, response_model_exclude_none=True)
+async def search_crons(payload: CronSearchRequest, user: User = Depends(get_current_user)) -> CronSearchResponse | JSONResponse:
     filters = await authorize(user, "crons", "search", {})
-    return await cron_service.search_crons(payload=payload, user=user, filters=filters)
+    result = await cron_service.search_crons(payload=payload, user=user, filters=filters)
+    if payload.select is not None:
+        fields = set(payload.select)
+        # exclude_none keeps the select path's null handling consistent with the
+        # default path (response_model_exclude_none) and the single-cron routes.
+        return JSONResponse(
+            content={"items": [item.model_dump(mode="json", include=fields, exclude_none=True) for item in result.items]}
+        )
+    return result
 
 
 @router.post("/runs/crons/count", response_model=CronCountResponse)
@@ -87,13 +96,13 @@ async def count_crons(payload: CronCountRequest, user: User = Depends(get_curren
     return await cron_service.count_crons(payload=payload, user=user, filters=filters)
 
 
-@router.get("/runs/crons/{cron_id}", response_model=CronRead)
+@router.get("/runs/crons/{cron_id}", response_model=CronRead, response_model_exclude_none=True)
 async def get_cron(cron_id: str, user: User = Depends(get_current_user)) -> CronRead:
     filters = await authorize(user, "crons", "read", {"cron_id": cron_id})
     return await cron_service.get_cron(cron_id=cron_id, user=user, filters=filters)
 
 
-@router.patch("/runs/crons/{cron_id}", response_model=CronRead)
+@router.patch("/runs/crons/{cron_id}", response_model=CronRead, response_model_exclude_none=True)
 async def patch_cron(cron_id: str, payload: CronPatch, user: User = Depends(get_current_user)) -> CronRead:
     filters = await authorize(user, "crons", "update", {"cron_id": cron_id})
     try:

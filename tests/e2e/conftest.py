@@ -1,7 +1,7 @@
 import os
 import subprocess
 import time
-from collections.abc import Generator
+from collections.abc import AsyncGenerator, Generator
 from pathlib import Path
 
 import httpx
@@ -137,6 +137,40 @@ def _start_e2e_server(*, graphs_path: str) -> Generator[str, None, None]:
 def e2e_base_url() -> Generator[str, None, None]:
     graphs_path = str((Path(__file__).resolve().parent / "fixtures" / "langgraph.store-e2e.json").resolve())
     yield from _start_e2e_server(graphs_path=graphs_path)
+
+
+@pytest.fixture
+async def e2e_db() -> "AsyncGenerator[None, None]":
+    """Initialize the in-process ``db_manager`` against the real backend.
+
+    The e2e server runs as a subprocess, so HTTP-only tests cannot reach the
+    scheduler/migration functions (the scheduler is a separate process and those
+    helpers operate through the module-level ``db_manager``). This fixture wires
+    the in-process ``db_manager`` to the same real SeekDB/OceanBase/MySQL backend
+    so tests can invoke ``claim_due_crons``, ``dispatch_due_crons``,
+    ``_apply_additive_migrations``, etc. directly and assert real-DB behavior.
+
+    Async (not sync) so the engine's connection pool binds to pytest-asyncio's
+    event loop — the same loop the ``async def`` tests run on. A sync fixture
+    using ``asyncio.run`` would bind the pool to a throwaway loop and the tests
+    would hit "attached to a different loop".
+    """
+    running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
+    if not _seekdb_reachable():
+        message = "SeekDB/OceanBase backend is not reachable for e2e tests."
+        if running_in_ci:
+            pytest.fail(message)
+        pytest.skip(message)
+
+    os.environ.setdefault("SEEKDB_URL", _seekdb_url())
+
+    from agentseek_api.core.database import db_manager
+
+    await db_manager.initialize()
+    try:
+        yield
+    finally:
+        await db_manager.close()
 
 
 @pytest.fixture(scope="session")

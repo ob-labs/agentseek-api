@@ -169,6 +169,24 @@ def test_cron_operations_filter_by_owner(auth_client: TestClient) -> None:
     assert bob_search.status_code == 200
     assert not any(c["cron_id"] == cron_id for c in bob_search.json()["items"])
 
+    # The select-projection branch returns a raw JSONResponse, bypassing the
+    # response_model — confirm it still applies owner filters (no leak).
+    bob_select = auth_client.post(
+        "/runs/crons/search",
+        json={"select": ["cron_id"]},
+        headers=BOB_HEADERS,
+    )
+    assert bob_select.status_code == 200
+    assert not any(c.get("cron_id") == cron_id for c in bob_select.json()["items"])
+
+    alice_select = auth_client.post(
+        "/runs/crons/search",
+        json={"select": ["cron_id"]},
+        headers=ALICE_HEADERS,
+    )
+    assert alice_select.status_code == 200
+    assert any(c.get("cron_id") == cron_id for c in alice_select.json()["items"])
+
     alice_get = auth_client.get(f"/runs/crons/{cron_id}", headers=ALICE_HEADERS)
     assert alice_get.status_code == 200
 

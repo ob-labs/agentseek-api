@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
@@ -22,8 +23,10 @@ from agentseek_api.services.run_preparation import (
     prepare_run,
     submit_existing_run,
 )
-from agentseek_api.services.thread_service import create_thread_for_user
+from agentseek_api.services.thread_service import create_thread_for_user, delete_threads_cascade
 from agentseek_api.settings import settings
+
+logger = logging.getLogger(__name__)
 
 TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
 TERMINAL_TICK_STATUSES = {"success", "error", "interrupted", "skipped"}
@@ -35,6 +38,17 @@ def _cron_user(user_id: str) -> User:
 
 def _as_utc(value: datetime) -> datetime:
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+async def _delete_stateless_threads(thread_ids: list[str]) -> None:
+    """Best-effort cleanup of ephemeral stateless-cron threads. Never raises —
+    failures are logged so reconciliation/webhook delivery are not blocked."""
+    if not thread_ids:
+        return
+    try:
+        await delete_threads_cascade(thread_ids)
+    except Exception:
+        logger.exception("Failed to delete stateless cron threads %s", thread_ids)
 
 
 def _started_tick_stale_after_seconds() -> int:
@@ -121,6 +135,7 @@ async def _reconcile_terminal_ticks(
         )
 
         deliveries: list[tuple[int, str, int, dict[str, object]]] = []
+        threads_to_delete: list[str] = []
         for tick in ticks:
             cron = await session.scalar(select(CronJob).where(CronJob.cron_id == tick.cron_id))
             if cron is None:
@@ -136,6 +151,13 @@ async def _reconcile_terminal_ticks(
                 cron.last_error = tick.skip_reason if tick.status == "error" else None
                 if tick.status != "skipped":
                     cron.last_run_at = current_time
+                if (
+                    cron.thread_id is None
+                    and cron.on_run_completed == "delete"
+                    and tick.thread_id is not None
+                    and tick.status == "success"
+                ):
+                    threads_to_delete.append(tick.thread_id)
             delivery_is_available = tick.webhook_delivery_status is None or (
                 tick.webhook_delivery_status == "delivering" and _as_utc(tick.updated_at) <= stale_before
             )
@@ -161,6 +183,8 @@ async def _reconcile_terminal_ticks(
             http_client=webhook_client,
             sleep=sleep,
         )
+
+    await _delete_stateless_threads(threads_to_delete)
 
 
 async def claim_due_crons(
@@ -195,6 +219,14 @@ async def claim_due_crons(
             for tick in reclaimed_ticks:
                 row = await session.scalar(select(CronJob).where(CronJob.cron_id == tick.cron_id))
                 if row is None:
+                    continue
+                # A stale 'started' tick means dispatch never ran (no run was
+                # created yet). If the cron has since passed its end_time, do
+                # not resurrect it — mark it skipped so it stops being reclaimed.
+                if row.end_time is not None and _as_utc(row.end_time) <= current_time:
+                    tick.status = "skipped"
+                    tick.skip_reason = "past_end_time"
+                    tick.updated_at = current_time
                     continue
                 tick.scheduler_id = scheduler_id
                 tick.updated_at = current_time
@@ -258,6 +290,7 @@ async def claim_due_crons(
                         .where(
                             CronJob.enabled.is_(True),
                             CronJob.next_run_at <= current_time,
+                            ((CronJob.end_time.is_(None)) | (CronJob.end_time > current_time)),
                         )
                         .order_by(CronJob.next_run_at.asc(), CronJob.cron_id.asc())
                         .limit(remaining)
@@ -284,6 +317,9 @@ async def claim_due_crons(
                     row.next_run_at = compute_next_run_at(row.schedule, timezone_name=row.timezone, now=current_time)
                 except ValueError:
                     row.enabled = False
+                else:
+                    if row.end_time is not None and _as_utc(row.next_run_at) > _as_utc(row.end_time):
+                        row.enabled = False
             await session.commit()
         return claimed
     finally:
@@ -323,6 +359,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
                     "scheduled_for": scheduled_for_iso,
                 },
                 kwargs=claim.kwargs_json,
+                multitask_strategy=claim.multitask_strategy,
                 tick_id=claim.tick_id,
             )
             queued_run_id = run.run_id
@@ -354,6 +391,7 @@ async def dispatch_claimed_cron(claim: ClaimedCron) -> CronDispatchResult:
                 "scheduled_for": scheduled_for_iso,
             },
             kwargs=claim.kwargs_json,
+            multitask_strategy=claim.multitask_strategy,
             tick_id=claim.tick_id,
         )
         queued_run_id = run.run_id

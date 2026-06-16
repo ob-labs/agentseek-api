@@ -172,6 +172,7 @@ class DatabaseManager:
             self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                await conn.run_sync(self._apply_additive_migrations)
             embed_conn_args = {"path": embed_dir, "db_name": settings.OCEANBASE_DB_NAME}
             self._checkpointer = OceanBaseCheckpointSaver(
                 connection_args=embed_conn_args
@@ -195,6 +196,7 @@ class DatabaseManager:
             self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
+                await conn.run_sync(self._apply_additive_migrations)
             conn_args = _resolve_connection_args()
             self._checkpointer = OceanBaseCheckpointSaver(
                 connection_args=conn_args
@@ -219,6 +221,51 @@ class DatabaseManager:
         await self._setup_checkpointer_once()
         await self._setup_langgraph_checkpointer_once()
         await self._setup_store_once()
+
+    @staticmethod
+    def _apply_additive_migrations(connection) -> None:
+        """Add columns introduced after a table was first created.
+
+        ``Base.metadata.create_all`` only creates *missing* tables; it never
+        alters an existing one. Deployments whose tables predate a new ORM
+        column would therefore be missing it, breaking queries that reference
+        it. This inspects each mapped table and issues ``ALTER TABLE ADD
+        COLUMN`` for any column present in the model but absent in the DB.
+        Idempotent and safe to run on every startup.
+
+        Invariant for new columns: they must be either nullable or carry a
+        ``server_default``. ``ADD COLUMN ... NOT NULL`` without a server-side
+        default fails on a populated table (there is no value for existing
+        rows). Such a column cannot be added automatically here — it requires a
+        deliberate data migration — so we skip it with a loud error rather than
+        crash startup or emit failing DDL.
+        """
+        from sqlalchemy import inspect
+        from sqlalchemy.schema import CreateColumn
+
+        inspector = inspect(connection)
+        existing_tables = set(inspector.get_table_names())
+        dialect = connection.dialect
+        preparer = dialect.identifier_preparer
+        for table in Base.metadata.sorted_tables:
+            if table.name not in existing_tables:
+                continue  # create_all already built it with all columns
+            db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in db_columns:
+                    continue
+                if not column.nullable and column.server_default is None:
+                    logger.error(
+                        "Cannot auto-add NOT NULL column %s.%s without a server_default; "
+                        "a manual data migration is required. Skipping.",
+                        table.name,
+                        column.name,
+                    )
+                    continue
+                column_spec = CreateColumn(column).compile(dialect=dialect)
+                table_name = preparer.format_table(table)
+                logger.info("Adding missing column %s.%s", table.name, column.name)
+                connection.exec_driver_sql(f"ALTER TABLE {table_name} ADD COLUMN {column_spec}")
 
     async def _setup_checkpointer_once(self) -> None:
         if self._checkpointer_setup_done:

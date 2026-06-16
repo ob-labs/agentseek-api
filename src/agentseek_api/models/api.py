@@ -233,6 +233,10 @@ RunOnDisconnect = Literal["cancel", "continue"]
 RunOnCompletion = Literal["delete", "keep"]
 RunMultitaskStrategy = Literal["reject", "rollback", "interrupt", "enqueue"]
 RunIfNotExists = Literal["create", "reject"]
+CronOnRunCompleted = Literal["delete", "keep"]
+CronSortBy = Literal["cron_id", "assistant_id", "thread_id", "next_run_date", "end_time", "created_at", "updated_at"]
+CronSortOrder = Literal["asc", "desc"]
+CronSelectField = Literal["cron_id", "assistant_id", "thread_id", "user_id", "enabled", "schedule", "payload", "metadata", "next_run_date", "next_run_at", "end_time", "created_at", "updated_at", "timezone", "webhook", "last_run_at", "last_tick_status", "last_error"]
 
 
 class RunCreateStateful(BaseModel):
@@ -313,7 +317,7 @@ class RunRead(BaseModel):
 
 
 class CronCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     assistant_id: str
     schedule: str
@@ -324,6 +328,36 @@ class CronCreate(BaseModel):
     context: dict[str, Any] = Field(default_factory=dict)
     webhook: str | None = None
     enabled: bool = True
+    end_time: datetime | None = None
+    interrupt_before: RunInterrupt | None = None
+    interrupt_after: RunInterrupt | None = None
+    on_run_completed: CronOnRunCompleted = "delete"
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = Field(default_factory=lambda: ["values"])
+    stream_subgraphs: bool = False
+    stream_resumable: bool = False
+    durability: RunDurability = "async"
+
+
+class ThreadCronCreate(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    assistant_id: str
+    schedule: str
+    timezone: str | None = None
+    input: Any
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    config: dict[str, Any] = Field(default_factory=dict)
+    context: dict[str, Any] = Field(default_factory=dict)
+    webhook: str | None = None
+    enabled: bool = True
+    end_time: datetime | None = None
+    interrupt_before: RunInterrupt | None = None
+    interrupt_after: RunInterrupt | None = None
+    multitask_strategy: RunMultitaskStrategy = "enqueue"
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = Field(default_factory=lambda: ["values"])
+    stream_subgraphs: bool = False
+    stream_resumable: bool = False
+    durability: RunDurability = "async"
 
 
 class CronSearchRequest(BaseModel):
@@ -332,8 +366,12 @@ class CronSearchRequest(BaseModel):
     assistant_id: str | None = None
     enabled: bool | None = None
     thread_id: str | None = None
-    limit: int = Field(default=10, ge=0)
+    metadata: dict[str, Any] | None = None
+    limit: int = Field(default=10, ge=1, le=1000)
     offset: int = Field(default=0, ge=0)
+    sort_by: CronSortBy | None = None
+    sort_order: CronSortOrder | None = None
+    select: list[CronSelectField] | None = None
 
 
 class CronCountRequest(BaseModel):
@@ -342,10 +380,11 @@ class CronCountRequest(BaseModel):
     assistant_id: str | None = None
     enabled: bool | None = None
     thread_id: str | None = None
+    metadata: dict[str, Any] | None = None
 
 
 class CronPatch(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="allow")
 
     schedule: str | None = None
     timezone: str | None = None
@@ -355,22 +394,37 @@ class CronPatch(BaseModel):
     context: dict[str, Any] | None = None
     webhook: str | None = None
     enabled: bool | None = None
+    end_time: datetime | None = None
+    interrupt_before: RunInterrupt | None = None
+    interrupt_after: RunInterrupt | None = None
+    on_run_completed: CronOnRunCompleted | None = None
+    stream_mode: RunStreamMode | list[RunStreamMode] | None = None
+    stream_subgraphs: bool | None = None
+    stream_resumable: bool | None = None
+    durability: RunDurability | None = None
+    multitask_strategy: RunMultitaskStrategy | None = None
 
 
 class CronRead(BaseModel):
     cron_id: str
     assistant_id: str
     thread_id: str | None
+    user_id: str | None = None
     enabled: bool
     schedule: str
+    payload: dict[str, Any] = Field(default_factory=dict)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    next_run_date: datetime
+    next_run_at: datetime  # deprecated extension alias of next_run_date
+    end_time: datetime | None = None
+    created_at: datetime
+    updated_at: datetime | None = None
+    # Non-standard extensions (not in LangGraph spec):
     timezone: str
     webhook: str | None = None
-    next_run_at: datetime
     last_run_at: datetime | None = None
     last_tick_status: str | None = None
     last_error: str | None = None
-    created_at: datetime
-    updated_at: datetime | None = None
 
 
 class CronSearchResponse(BaseModel):

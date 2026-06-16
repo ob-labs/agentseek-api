@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy import select
 from fastapi.testclient import TestClient
 
@@ -106,6 +107,15 @@ async def _set_cron_webhook(cron_id: str, *, webhook: str, max_attempts: int = 3
         await session.commit()
 
 
+async def _set_cron_end_time(cron_id: str, *, end_time: datetime | None) -> None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        cron = await session.scalar(select(CronJob).where(CronJob.cron_id == cron_id))
+        assert cron is not None
+        cron.end_time = end_time
+        await session.commit()
+
+
 def _create_assistant(client: TestClient) -> str:
     response = client.post("/assistants", json={"name": "scheduler-assistant", "graph_id": "default"})
     assert response.status_code == 200
@@ -133,6 +143,7 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
             "metadata": {"source": "scheduler-runtime"},
             "config": {"model": "gpt-test"},
             "context": {"tenant": "acme"},
+            "on_run_completed": "keep",
         },
         headers={"x-user-id": "owner"},
     )
@@ -177,7 +188,7 @@ def test_dispatch_due_crons_creates_stateless_run_and_skips_busy_thread(client: 
     assert persisted_metadata.get("cron_id") == stateless.json()["cron_id"]
     assert persisted_metadata.get("scheduled_for") == due_at.isoformat()
     assert isinstance(persisted_metadata.get("__agentseek_checkpoint_id"), str)
-    assert created_runs[0].kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}}
+    assert created_runs[0].kwargs_json == {"config": {"model": "gpt-test"}, "context": {"tenant": "acme"}, "stream_modes": ["values"]}
 
     busy_thread_runs = asyncio.run(_list_runs_for_thread(thread_id))
     assert busy_thread_runs == []
@@ -610,3 +621,326 @@ def test_reconcile_terminal_ticks_reclaims_stale_delivering_webhook_reservation(
     assert ticks[0].webhook_delivery_status == "delivered"
     assert len(attempts) == 1
     assert attempts[0].attempt_number == 1
+
+
+def test_dispatch_due_crons_skips_cron_past_end_time(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "past-end-time"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+    asyncio.run(_set_cron_end_time(cron_id, end_time=due_at - timedelta(minutes=5)))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+
+    assert results == []
+    ticks = asyncio.run(_list_ticks_for_cron(cron_id))
+    assert ticks == []
+
+
+def test_dispatch_due_crons_end_time_equal_now_is_exclusive(client: TestClient) -> None:
+    """Boundary: the claim query uses strict `end_time > now`, so a cron whose
+    end_time exactly equals the current tick time is NOT fired (end_time is the
+    last instant the cron may NOT run at)."""
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "boundary"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    now = datetime.now(UTC).replace(second=0, microsecond=0)
+    asyncio.run(_mark_cron_due(cron_id, when=now - timedelta(minutes=1)))
+    asyncio.run(_set_cron_end_time(cron_id, end_time=now))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=now))
+
+    assert results == []
+    assert asyncio.run(_list_ticks_for_cron(cron_id)) == []
+
+
+def test_reclaim_started_tick_skipped_when_cron_past_end_time(client: TestClient) -> None:
+    """A stale 'started' tick (dispatch never ran) must NOT be reclaimed and
+    re-dispatched once the cron's end_time has passed."""
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "reclaim-end"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+
+    first = asyncio.run(cron_scheduler_module.claim_due_crons(limit=10, scheduler_id="scheduler-a", now=due_at))
+    assert len(first) == 1  # creates a 'started' tick
+
+    # Tick goes stale, and the cron's end_time passes before dispatch reclaims it.
+    asyncio.run(_age_tick(cron_id=cron_id, stale_at=due_at - timedelta(seconds=31)))
+    asyncio.run(_set_cron_end_time(cron_id, end_time=due_at - timedelta(minutes=5)))
+
+    reclaimed_at = due_at + timedelta(seconds=31)
+    second = asyncio.run(cron_scheduler_module.claim_due_crons(limit=10, scheduler_id="scheduler-b", now=reclaimed_at))
+
+    assert second == []
+    ticks = asyncio.run(_list_ticks_for_cron(cron_id))
+    assert len(ticks) == 1
+    assert ticks[0].status == "skipped"
+    assert ticks[0].skip_reason == "past_end_time"
+
+
+def test_dispatch_due_crons_disables_cron_when_next_run_crosses_end_time(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "cross-end-time"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+    # end_time is after this fire (so it fires now) but before the next computed run_at.
+    asyncio.run(_set_cron_end_time(cron_id, end_time=due_at + timedelta(seconds=30)))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+
+    assert len(results) == 1
+    assert results[0].status == "queued"
+
+    persisted = asyncio.run(_fetch_cron(cron_id))
+    assert persisted is not None
+    assert persisted.enabled is False
+    assert _as_utc(persisted.next_run_at) > _as_utc(persisted.end_time)
+
+
+def test_dispatch_due_crons_passes_multitask_strategy_to_thread_run(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+
+    created = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "thread-bound"},
+            "multitask_strategy": "interrupt",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(created.json()["cron_id"], when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+
+    assert len(results) == 1
+    assert results[0].status == "queued"
+    assert results[0].thread_id == thread_id
+
+    runs = asyncio.run(_list_runs_for_thread(thread_id))
+    assert len(runs) == 1
+    assert runs[0].multitask_strategy == "interrupt"
+
+
+async def _fetch_thread(thread_id: str) -> Thread | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        return await session.scalar(select(Thread).where(Thread.thread_id == thread_id))
+
+
+async def _fetch_run(run_id: str) -> Run | None:
+    session_factory = db_manager.get_session_factory()
+    async with session_factory() as session:
+        return await session.scalar(select(Run).where(Run.run_id == run_id))
+
+
+def test_dispatch_due_crons_deletes_stateless_thread_on_run_completed_delete(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "stateless-delete"},
+            "on_run_completed": "delete",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+    assert len(results) == 1
+    assert results[0].status == "queued"
+    deleted_thread_id = results[0].thread_id
+    deleted_run_id = results[0].run_id
+    assert deleted_thread_id is not None
+    assert deleted_run_id is not None
+
+    user_threads = asyncio.run(_list_threads_for_user("owner"))
+    stateless_threads = [t for t in user_threads if t.metadata_json.get("cron_id") == cron_id]
+    assert stateless_threads == []
+
+    # The cascade must remove the Run too, not just the Thread — otherwise runs
+    # leak as orphans. Verify against the real DB by run_id and by thread_id.
+    assert asyncio.run(_fetch_run(deleted_run_id)) is None
+    assert asyncio.run(_list_runs_for_thread(deleted_thread_id)) == []
+
+    ticks = asyncio.run(_list_ticks_for_cron(cron_id))
+    assert len(ticks) == 1
+    assert ticks[0].status == "success"
+
+
+def test_dispatch_due_crons_keeps_stateless_thread_on_run_completed_keep(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": "stateless-keep"},
+            "on_run_completed": "keep",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+    assert len(results) == 1
+    assert results[0].status == "queued"
+
+    user_threads = asyncio.run(_list_threads_for_user("owner"))
+    stateless_threads = [t for t in user_threads if t.metadata_json.get("cron_id") == cron_id]
+    assert len(stateless_threads) == 1
+    persisted = asyncio.run(_fetch_thread(stateless_threads[0].thread_id))
+    assert persisted is not None
+
+
+@pytest.mark.parametrize("terminal_status", ["interrupted", "error"])
+def test_reconcile_does_not_delete_non_success_stateless_run(client: TestClient, terminal_status: str) -> None:
+    """on_run_completed='delete' deletes ONLY on success. An interrupted run is
+    resumable; an error run is worth inspecting — both threads must survive so
+    the gate condition (tick.status == 'success') is exercised on both sides."""
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    created = client.post(
+        "/runs/crons",
+        json={
+            "assistant_id": assistant_id,
+            "schedule": "FREQ=MINUTELY;INTERVAL=1",
+            "input": {"kind": f"stateless-{terminal_status}"},
+            "on_run_completed": "delete",
+        },
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    # Seed a stateless ephemeral thread + terminal run + a queued tick that
+    # points at it, mirroring what dispatch produces when a graph ends.
+    async def _seed() -> tuple[str, str]:
+        session_factory = db_manager.get_session_factory()
+        async with session_factory() as session:
+            thread = Thread(
+                user_id="owner",
+                metadata_json={"stateless": True, "cron_id": cron_id},
+                status=terminal_status,
+            )
+            session.add(thread)
+            await session.flush()
+            run = Run(
+                thread_id=thread.thread_id,
+                assistant_id=assistant_id,
+                user_id="owner",
+                status=terminal_status,
+                input_json={"kind": f"stateless-{terminal_status}"},
+                last_error="boom" if terminal_status == "error" else None,
+            )
+            session.add(run)
+            await session.flush()
+            tick = CronTick(
+                cron_id=cron_id,
+                thread_id=thread.thread_id,
+                run_id=run.run_id,
+                scheduler_id="scheduler-1",
+                scheduled_for=datetime.now(UTC) - timedelta(minutes=1),
+                status="queued",
+            )
+            session.add(tick)
+            await session.commit()
+            return thread.thread_id, run.run_id
+
+    thread_id, run_id = asyncio.run(_seed())
+
+    async def _no_sleep(_: float) -> None:
+        return None
+
+    asyncio.run(cron_scheduler_module._reconcile_terminal_ticks(sleep=_no_sleep))
+
+    # Tick reconciled to the terminal status, but the thread + run must survive.
+    ticks = asyncio.run(_list_ticks_for_cron(cron_id))
+    assert len(ticks) == 1
+    assert ticks[0].status == terminal_status
+    persisted_thread = asyncio.run(_fetch_thread(thread_id))
+    assert persisted_thread is not None
+    runs = asyncio.run(_list_runs_for_thread(thread_id))
+    assert [r.run_id for r in runs] == [run_id]
+
+
+def test_dispatch_due_crons_never_deletes_caller_owned_thread(client: TestClient) -> None:
+    from agentseek_api.services import cron_scheduler as cron_scheduler_module
+
+    assistant_id = _create_assistant(client)
+    thread_id = _create_thread(client, user_id="owner")
+    created = client.post(
+        f"/threads/{thread_id}/runs/crons",
+        json={"assistant_id": assistant_id, "schedule": "FREQ=MINUTELY;INTERVAL=1", "input": {"kind": "thread-bound"}},
+        headers={"x-user-id": "owner"},
+    )
+    assert created.status_code == 200
+    cron_id = created.json()["cron_id"]
+
+    due_at = datetime.now(UTC) - timedelta(minutes=1)
+    asyncio.run(_mark_cron_due(cron_id, when=due_at))
+
+    results = asyncio.run(cron_scheduler_module.dispatch_due_crons(limit=10, scheduler_id="scheduler-1", now=due_at))
+    assert len(results) == 1
+    assert results[0].status == "queued"
+
+    persisted = asyncio.run(_fetch_thread(thread_id))
+    assert persisted is not None

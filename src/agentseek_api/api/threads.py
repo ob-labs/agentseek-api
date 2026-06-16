@@ -48,7 +48,11 @@ from agentseek_api.services.thread_checkpoint_store import (
     snapshot_to_payload,
 )
 from agentseek_api.services.thread_protocol import thread_protocol_broker
-from agentseek_api.services.thread_service import create_thread_for_user, to_read_model
+from agentseek_api.services.thread_service import (
+    create_thread_for_user,
+    delete_threads_cascade,
+    to_read_model,
+)
 from agentseek_api.settings import settings
 
 router = APIRouter(prefix="/threads", tags=["Threads"])
@@ -57,18 +61,6 @@ TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
 REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
 THREAD_STREAM_CHANNELS = ["input", "lifecycle", "messages", "tools", "values"]
-
-
-async def _best_effort_checkpointer_call(method_name: str, *args: object, **kwargs: object) -> None:
-    method = getattr(db_manager.get_langgraph_checkpointer(), method_name, None)
-    if method is None:
-        return
-    try:
-        result = method(*args, **kwargs)
-        if hasattr(result, "__await__"):
-            await result
-    except NotImplementedError:
-        return
 
 
 logger = logging.getLogger(__name__)
@@ -461,23 +453,11 @@ async def delete_thread(thread_id: str, user: User = Depends(get_current_user)) 
 
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
-        stmt = select(Thread).where(Thread.thread_id == thread_id)
+        stmt = select(Thread.thread_id).where(Thread.thread_id == thread_id)
         stmt = apply_metadata_filters(stmt, Thread, filters)
-        row = await session.scalar(stmt)
-        if row is None:
+        if await session.scalar(stmt) is None:
             raise HTTPException(status_code=404, detail="Thread not found")
-        run_ids = (
-            await session.scalars(select(Run.run_id).where(Run.thread_id == thread_id))
-        ).all()
-        await session.execute(delete(Run).where(Run.thread_id == thread_id))
-        await session.delete(row)
-        await session.commit()
-    await _best_effort_checkpointer_call("adelete_thread", thread_id)
-    if run_ids:
-        await _best_effort_checkpointer_call("adelete_for_runs", list(run_ids))
-        await delete_run_stream_events(list(run_ids))
-    thread_protocol_broker.delete_thread(thread_id)
-    await delete_thread_stream_events(thread_id)
+    await delete_threads_cascade([thread_id])
     return Response(status_code=204)
 
 

@@ -89,6 +89,12 @@ def test_thread_routes_cover_search_prune_delete_and_missing_paths(client: TestC
         headers={"x-user-id": "u1"},
     )
     assert created_run.status_code == 200
+    delete_run_id = created_run.json()["run_id"]
+    # Run exists before the thread is deleted.
+    assert client.get(
+        f"/threads/{delete_thread['thread_id']}/runs/{delete_run_id}",
+        headers={"x-user-id": "u1"},
+    ).status_code == 200
 
     listed = client.post("/threads/search", json={}, headers={"x-user-id": "u1"})
     assert listed.status_code == 200
@@ -122,6 +128,11 @@ def test_thread_routes_cover_search_prune_delete_and_missing_paths(client: TestC
     deleted = client.delete(f"/threads/{delete_thread['thread_id']}", headers={"x-user-id": "u1"})
     assert deleted.status_code == 204
     assert client.get(f"/threads/{delete_thread['thread_id']}", headers={"x-user-id": "u1"}).status_code == 404
+    # The cascade must also remove the thread's runs, not just the thread row.
+    assert client.get(
+        f"/threads/{delete_thread['thread_id']}/runs/{delete_run_id}",
+        headers={"x-user-id": "u1"},
+    ).status_code == 404
 
     missing_id = "00000000-0000-0000-0000-000000000001"
     missing_headers = {"x-user-id": "u1"}

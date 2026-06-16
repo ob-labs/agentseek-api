@@ -31,6 +31,10 @@ from agentseek_api.services.stream_persistence import (
     parse_last_event_id,
 )
 from agentseek_api.services.sse import iter_with_sse_keepalives, safe_json_dumps, sse_keepalive_comment
+from agentseek_api.services.stream_modes import (
+    SUPPORTED_RUN_STREAM_MODES,
+    normalize_stream_modes as _normalize_stream_modes_shared,
+)
 from agentseek_api.services.thread_protocol import thread_protocol_broker
 from agentseek_api.settings import settings
 
@@ -39,8 +43,6 @@ router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Thread Runs"])
 TERMINAL_RUN_STATUSES = ("success", "error", "interrupted")
 REDIS_STREAM_POLL_INTERVAL_SECONDS = 0.05
 REDIS_STREAM_TERMINAL_IDLE_POLLS = 2
-SUPPORTED_RUN_STREAM_MODES = {"values", "updates", "messages", "messages-tuple", "debug", "events", "tasks", "checkpoints", "custom"}
-RUN_STREAM_MODE_ALIASES: dict[str, str] = {}
 RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
 
 
@@ -107,35 +109,10 @@ def _uses_redis_executor() -> bool:
 
 
 def _normalize_stream_modes(stream_mode: str | list[str] | None) -> list[str]:
-    if stream_mode is None:
-        return ["values"]
-
-    raw_modes = [stream_mode] if isinstance(stream_mode, str) else list(stream_mode)
-    modes: list[str] = []
-    invalid_modes: list[str] = []
-
-    if not raw_modes:
-        invalid_modes.append("<empty>")
-
-    for mode in raw_modes:
-        raw_mode = str(mode).strip()
-        if not raw_mode:
-            invalid_modes.append("<empty>")
-            continue
-        normalized = RUN_STREAM_MODE_ALIASES.get(raw_mode, raw_mode)
-        if normalized not in modes:
-            modes.append(normalized)
-
-    unsupported = invalid_modes + [mode for mode in modes if mode not in SUPPORTED_RUN_STREAM_MODES]
-    if unsupported:
-        raise HTTPException(
-            status_code=422,
-            detail=(
-                "Unsupported stream_mode value(s): "
-                f"{', '.join(unsupported)}. Supported values: {', '.join(sorted(SUPPORTED_RUN_STREAM_MODES))}."
-            ),
-        )
-    return modes
+    try:
+        return _normalize_stream_modes_shared(stream_mode)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 def _parse_stream_mode_query_param(stream_mode: list[str] | None) -> list[str] | None:
