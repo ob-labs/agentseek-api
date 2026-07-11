@@ -160,6 +160,103 @@ async def test_thread_protocol_stream_does_not_lose_events_published_during_clea
     assert [event["seq"] for event in events] == [1, 2]
 
 
+@pytest.mark.asyncio
+async def test_thread_protocol_stream_delivers_tail_events_when_pruning_would_shift_seen(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = ThreadProtocolEventBroker(max_events_per_thread=2)
+    broker.run_started("thread-1")
+    broker.publish(
+        "thread-1",
+        {"method": "values", "params": {"namespace": [], "timestamp": 1, "data": {"step": 1}}},
+    )
+    broker.publish(
+        "thread-1",
+        {"method": "values", "params": {"namespace": [], "timestamp": 2, "data": {"step": 2}}},
+    )
+
+    signal = broker._signals["thread-1"]
+    original_clear = signal.clear
+    injected = {"done": False}
+
+    def clear_with_pruned_tail_event() -> None:
+        if not injected["done"]:
+            injected["done"] = True
+            broker.publish(
+                "thread-1",
+                {"method": "values", "params": {"namespace": [], "timestamp": 3, "data": {"step": 3}}},
+            )
+            broker.run_finished("thread-1")
+        original_clear()
+
+    monkeypatch.setattr(signal, "clear", clear_with_pruned_tail_event)
+
+    events = [
+        event
+        async for event in broker.stream(
+            "thread-1",
+            channels=["values"],
+            namespaces=None,
+            depth=None,
+            since=0,
+        )
+    ]
+
+    assert [event["seq"] for event in events] == [1, 2, 3]
+
+
+@pytest.mark.asyncio
+async def test_thread_protocol_stream_delivers_terminal_events_after_2048_messages_partial_events(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    broker = ThreadProtocolEventBroker(max_events_per_thread=2048)
+    monkeypatch.setattr(protocol, "thread_protocol_broker", broker)
+    broker.run_started("thread-1")
+
+    for index in range(2048):
+        broker.publish(
+            "thread-1",
+            {
+                "method": "messages/partial",
+                "params": {
+                    "namespace": [],
+                    "timestamp": index,
+                    "data": [{"id": "msg-1", "content": [{"type": "text", "text": str(index)}]}],
+                },
+            },
+        )
+
+    signal = broker._signals["thread-1"]
+    original_clear = signal.clear
+    injected = {"done": False}
+
+    def clear_with_terminal_events() -> None:
+        if not injected["done"]:
+            injected["done"] = True
+            protocol.publish_values_event("thread-1", values={"status": "complete"})
+            protocol.publish_message_finish("thread-1")
+            broker.run_finished("thread-1")
+        original_clear()
+
+    monkeypatch.setattr(signal, "clear", clear_with_terminal_events)
+
+    events = [
+        event
+        async for event in broker.stream(
+            "thread-1",
+            channels=["messages", "values"],
+            namespaces=None,
+            depth=None,
+            since=0,
+        )
+    ]
+
+    assert len(events) == 2051
+    assert events[2047]["method"] == "messages/partial"
+    assert events[2048]["method"] == "values"
+    assert events[2049]["params"]["data"]["event"] == "content-block-finish"
+    assert events[2050]["params"]["data"]["event"] == "message-finish"
+
 def test_publish_helpers_emit_expected_payloads(monkeypatch: pytest.MonkeyPatch) -> None:
     broker = ThreadProtocolEventBroker()
     monkeypatch.setattr(protocol, "thread_protocol_broker", broker)

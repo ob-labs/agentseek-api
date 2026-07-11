@@ -62,6 +62,11 @@ class ThreadProtocolEventBroker:
             return
 
     def _prune_thread_events(self, thread_id: str) -> None:
+        # Active streams advance through the in-memory backlog by list index.
+        # Pruning during an active run can shift that index and strand trailing
+        # events (for example, final values/message-finish emissions).
+        if self._active_runs.get(thread_id, 0) > 0:
+            return
         events = self._events.get(thread_id)
         if events is None or len(events) <= self._max_events_per_thread:
             return
