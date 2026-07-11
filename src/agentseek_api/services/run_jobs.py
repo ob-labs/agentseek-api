@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import logging
 from typing import Any
 
 from sqlalchemy import select
@@ -8,22 +9,25 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
+from agentseek_api.settings import settings
 from agentseek_api.services.run_executor import RunExecutionResult, UNSET, execute_run
 from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import (
     add_thread_stream_event_to_session,
     add_run_stream_event_to_session,
+    append_redis_run_stream_event,
     next_run_stream_seq,
     next_thread_stream_seq,
     persist_run_stream_event,
     persist_thread_stream_event,
 )
 from agentseek_api.services.thread_checkpoint_store import checkpoint_to_payload, get_latest_checkpoint
-from agentseek_api.services.thread_protocol import publish_lifecycle_event, thread_protocol_broker
+from agentseek_api.services.thread_protocol import apublish_lifecycle_event, publish_lifecycle_event, thread_protocol_broker
 
 RUN_EXECUTION_JOB_KIND = "run.execute"
 TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
 RUN_CHECKPOINT_ID_METADATA_KEY = "__agentseek_checkpoint_id"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -81,6 +85,14 @@ async def _publish_lifecycle(
     error: str | None = None,
     session: AsyncSession | None = None,
 ) -> None:
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
+        await apublish_lifecycle_event(
+            thread_id,
+            event=event,
+            graph_name=graph_name,
+            error=error,
+        )
+        return
     kwargs: dict[str, Any] = {"event": event}
     if graph_name is not None:
         kwargs["graph_name"] = graph_name
@@ -106,6 +118,18 @@ async def _publish_run_event(
     persist: bool = True,
     **payload: Any,
 ) -> tuple[int, dict[str, Any]] | None:
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis" and persist:
+        event_payload = {"event": event, **payload}
+        try:
+            seq, _ = await append_redis_run_stream_event(run_id, event_payload)
+        except Exception:
+            logger.warning(
+                "Failed to atomically append Redis run stream event",
+                extra={"run_id": run_id, "event": event},
+                exc_info=True,
+            )
+            seq = None
+        return run_broker.publish(run_id, event, seq=seq, **payload)
     seq = await next_run_stream_seq(run_id)
     published = run_broker.publish(run_id, event, seq=seq, **payload)
     if published is None:
@@ -117,8 +141,21 @@ async def _publish_run_event(
 
 
 async def _persist_thread_snapshot(thread_id: str) -> None:
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
+        return
     for event in thread_protocol_broker.snapshot_records(thread_id):
         await persist_thread_stream_event(thread_id, event)
+
+
+async def _publish_terminal_run_event(session: AsyncSession, run_id: str, *, status: str) -> None:
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
+        await _publish_run_event(run_id, "end", status=status)
+        return
+    terminal_run_event = await _publish_run_event(run_id, "end", status=status, persist=False)
+    if terminal_run_event is None:
+        return
+    seq, event_payload = terminal_run_event
+    await add_run_stream_event_to_session(session, run_id, seq=seq, payload=event_payload)
 
 
 def _apply_execution_result(db_run: Run, result: RunExecutionResult) -> None:
@@ -197,10 +234,7 @@ async def execute_run_job(job: RunExecutionJob) -> None:
             if thread is not None:
                 thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
                 thread.state_updated_at = db_run.updated_at
-            terminal_run_event = await _publish_run_event(job.run_id, "end", status=db_run.status, persist=False)
-            if terminal_run_event is not None:
-                seq, event_payload = terminal_run_event
-                await add_run_stream_event_to_session(execution_session, job.run_id, seq=seq, payload=event_payload)
+            await _publish_terminal_run_event(execution_session, job.run_id, status=db_run.status)
             lifecycle_state = "completed"
             if db_run.status == "interrupted":
                 lifecycle_state = "interrupted"

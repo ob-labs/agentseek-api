@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from typing import Any
+
+from agentseek_api.settings import settings
+
+logger = logging.getLogger(__name__)
 
 
 def protocol_timestamp_ms() -> int:
@@ -209,13 +214,20 @@ thread_protocol_broker = ThreadProtocolEventBroker()
 
 
 async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    try:
-        from agentseek_api.services.stream_persistence import next_thread_stream_seq
-    except Exception:
+    if settings.EXECUTOR_BACKEND.strip().lower() != "redis":
         return await thread_protocol_broker.apublish(thread_id, payload)
+    try:
+        from agentseek_api.services.stream_persistence import append_redis_thread_stream_event
 
-    seq = await next_thread_stream_seq(thread_id)
-    return await thread_protocol_broker.apublish(thread_id, payload, seq=seq)
+        seq, _ = await append_redis_thread_stream_event(thread_id, payload)
+    except Exception:
+        logger.warning(
+            "Failed to atomically append Redis thread stream event",
+            extra={"thread_id": thread_id},
+            exc_info=True,
+        )
+        seq = None
+    return thread_protocol_broker.publish(thread_id, payload, persist=False, seq=seq)
 
 
 def publish_lifecycle_event(
@@ -245,6 +257,32 @@ def publish_lifecycle_event(
         },
         persist=persist,
         seq=seq,
+    )
+
+
+async def apublish_lifecycle_event(
+    thread_id: str,
+    *,
+    event: str,
+    graph_name: str | None = None,
+    error: str | None = None,
+    namespace: list[str] | None = None,
+) -> dict[str, Any]:
+    data: dict[str, Any] = {"event": event}
+    if graph_name is not None:
+        data["graph_name"] = graph_name
+    if error is not None:
+        data["error"] = error
+    return await _apublish_thread_event(
+        thread_id,
+        {
+            "method": "lifecycle",
+            "params": {
+                "namespace": namespace or [],
+                "timestamp": protocol_timestamp_ms(),
+                "data": data,
+            },
+        },
     )
 
 

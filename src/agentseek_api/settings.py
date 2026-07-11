@@ -18,6 +18,8 @@ class Settings(BaseSettings):
     REDIS_WORKER_POLL_TIMEOUT_SECONDS: int = 1
     REDIS_WORKER_LOCK_KEY: str = "agentseek:worker:active"
     REDIS_WORKER_LOCK_TTL_SECONDS: int = 30
+    REDIS_STREAM_MAXLEN: int = 10000
+    REDIS_STREAM_TTL_SECONDS: int = 3600
     REDIS_SCHEDULER_LOCK_KEY: str = "agentseek:scheduler:active"
     REDIS_SCHEDULER_LOCK_TTL_SECONDS: int = 30
     SCHEDULER_STARTED_TICK_STALE_AFTER_SECONDS: int | None = None

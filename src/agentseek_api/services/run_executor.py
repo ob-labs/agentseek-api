@@ -1,5 +1,6 @@
 from dataclasses import dataclass, field
 import inspect
+import logging
 from typing import Any
 
 from langchain_core.messages import BaseMessage, BaseMessageChunk
@@ -10,9 +11,14 @@ from langgraph.types import Command
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.runtime_store import UserScopedStore
 from agentseek_api.models.auth import User
+from agentseek_api.settings import settings
 from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
 from agentseek_api.services.run_state import run_broker
-from agentseek_api.services.stream_persistence import next_run_stream_seq, persist_run_stream_event
+from agentseek_api.services.stream_persistence import (
+    append_redis_run_stream_event,
+    next_run_stream_seq,
+    persist_run_stream_event,
+)
 from agentseek_api.services.thread_protocol import (
     apublish_content_block_delta,
     apublish_content_block_finish,
@@ -38,6 +44,7 @@ from agentseek_api.services.thread_protocol import (
 )
 
 UNSET = object()
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -45,6 +52,29 @@ class RunExecutionResult:
     output: dict[str, Any]
     interrupted: bool
     interrupts: list[dict[str, Any]]
+
+
+async def _publish_translated_run_event(
+    run_id: str,
+    event_name: str,
+    event_payload: dict[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
+        payload = {"event": event_name, **event_payload}
+        try:
+            seq, _ = await append_redis_run_stream_event(run_id, payload)
+        except Exception:
+            logger.warning(
+                "Failed to atomically append translated Redis run event",
+                extra={"run_id": run_id, "event": event_name},
+                exc_info=True,
+            )
+            seq = None
+        return run_broker.publish(run_id, event_name, seq=seq, **event_payload)
+    seq = await next_run_stream_seq(run_id)
+    seq, published_payload = run_broker.publish(run_id, event_name, seq=seq, **event_payload)
+    await persist_run_stream_event(run_id, seq=seq, payload=published_payload)
+    return seq, published_payload
 
 
 def _normalize_stream_value(value: Any) -> Any:
@@ -878,9 +908,7 @@ async def execute_run(
     async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
         protocol_namespace = _protocol_namespace_for_event(stream_event)
         for event_name, event_payload in _translate_stream_events(stream_event):
-            seq = await next_run_stream_seq(run_id)
-            seq, published_payload = run_broker.publish(run_id, event_name, seq=seq, **event_payload)
-            await persist_run_stream_event(run_id, seq=seq, payload=published_payload)
+            await _publish_translated_run_event(run_id, event_name, event_payload)
         raw_event_name = stream_event.get("event")
         if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:
             data = stream_event.get("data", {})
