@@ -1,3 +1,6 @@
+import threading
+from unittest.mock import AsyncMock, Mock
+
 import pytest
 
 from agentseek_api.core.database import DatabaseManager, resolve_metadata_db_url
@@ -36,6 +39,47 @@ async def test_checkpointer_setup_called_once(monkeypatch: pytest.MonkeyPatch) -
     assert isinstance(manager.get_store(), SqliteStore)
 
     await manager.close()
+
+
+@pytest.mark.asyncio
+async def test_close_cleans_up_langgraph_checkpointer() -> None:
+    manager = DatabaseManager()
+    checkpointer = Mock()
+    close_thread_ids: list[int] = []
+    checkpointer.close.side_effect = lambda: close_thread_ids.append(threading.get_ident())
+    engine = Mock(dispose=AsyncMock())
+    manager._langgraph_checkpointer = checkpointer
+    manager.engine = engine
+    event_loop_thread_id = threading.get_ident()
+
+    await manager.close()
+    await manager.close()
+
+    checkpointer.close.assert_called_once()
+    assert close_thread_ids[0] != event_loop_thread_id
+    engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_continues_after_checkpointer_cleanup_fails(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    manager = DatabaseManager()
+    checkpointer = Mock()
+    checkpointer.close.side_effect = RuntimeError("shutdown failed")
+    engine = Mock(dispose=AsyncMock())
+    store_engine = Mock()
+    manager._langgraph_checkpointer = checkpointer
+    manager.engine = engine
+    manager._store = Mock(obvector=Mock(engine=store_engine))
+
+    with caplog.at_level("WARNING"):
+        await manager.close()
+
+    checkpointer.close.assert_called_once()
+    engine.dispose.assert_awaited_once()
+    store_engine.dispose.assert_called_once()
+    assert "Failed to close LangGraph checkpointer" in caplog.text
 
 
 @pytest.mark.asyncio
