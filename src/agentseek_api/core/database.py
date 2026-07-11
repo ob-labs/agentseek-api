@@ -309,6 +309,14 @@ class DatabaseManager:
             self._store_setup_done = True
 
     async def close(self) -> None:
+        langgraph_checkpointer = self._langgraph_checkpointer
+        self._langgraph_checkpointer = None
+        close_checkpointer = getattr(langgraph_checkpointer, "close", None)
+        if callable(close_checkpointer):
+            try:
+                await asyncio.to_thread(close_checkpointer)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to close LangGraph checkpointer", exc_info=True)
         if self.engine is not None:
             await self.engine.dispose()
         store_engine = getattr(getattr(self._store, "obvector", None), "engine", None)
@@ -318,7 +326,6 @@ class DatabaseManager:
         self.engine = None
         self.session_factory = None
         self._checkpointer = None
-        self._langgraph_checkpointer = None
         self._store = None
         self._checkpointer_setup_done = False
         self._langgraph_checkpointer_setup_done = False

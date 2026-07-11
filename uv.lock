@@ -29,7 +29,7 @@ wheels = [
 
 [[package]]
 name = "agentseek-api"
-version = "0.0.3"
+version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aiomysql" },
@@ -83,8 +83,8 @@ requires-dist = [
     { name = "langchain", specifier = ">=0.3.9" },
     { name = "langchain-anthropic", specifier = ">=1.0.0" },
     { name = "langchain-core", specifier = ">=1.0.0" },
-    { name = "langchain-oceanbase", specifier = "==0.5.2" },
-    { name = "langchain-oceanbase", extras = ["pyseekdb"], marker = "extra == 'embedded'", specifier = "==0.5.2" },
+    { name = "langchain-oceanbase", specifier = "==0.6.0" },
+    { name = "langchain-oceanbase", extras = ["pyseekdb"], marker = "extra == 'embedded'", specifier = "==0.6.0" },
     { name = "langchain-openai", specifier = ">=1.0.0" },
     { name = "langgraph", specifier = ">=1.0.3" },
     { name = "langgraph-sdk", specifier = ">=0.3.5" },
@@ -1556,7 +1556,7 @@ wheels = [
 
 [[package]]
 name = "langchain-oceanbase"
-version = "0.5.2"
+version = "0.6.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
@@ -1565,9 +1565,9 @@ dependencies = [
     { name = "langgraph-checkpoint" },
     { name = "pyobvector" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/58/d0/44a7d132ec3f99109bd158b7854348d46bd93a0e3dd9548b0a3f28436672/langchain_oceanbase-0.5.2.tar.gz", hash = "sha256:3535d1288aca341d3b6ed5244b4c7f85578f3f36653e7fe19ce5871d88b5a520", size = 64996, upload-time = "2026-06-09T06:30:31.134Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/85/7b/1d68b6cd6ea56ad17509dbfba6540c00336a5ce0c817eec32546080ab948/langchain_oceanbase-0.6.0.tar.gz", hash = "sha256:4605a5da3df093655882f4f7f4fab8974466954c3733d62235d5ded0d26b9572", size = 69426, upload-time = "2026-07-10T06:57:00.539Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/8a/ee/7132d6936525b40ae6e30d8dcf22fc65148cdfe6e99120cfe899e4326346/langchain_oceanbase-0.5.2-py3-none-any.whl", hash = "sha256:c8373dfb6cb9744e6bda865c6e97ad85afbd8714623bea4454be7496ea0c7cc2", size = 63669, upload-time = "2026-06-09T06:30:29.637Z" },
+    { url = "https://files.pythonhosted.org/packages/76/8e/cfe51f7d95b31a16d76475bfa56beec8a046661228413c67b6fdaa261acb/langchain_oceanbase-0.6.0-py3-none-any.whl", hash = "sha256:7484e448ab1a9ad62b9c6a24d3b911c5c01ea8af023dfeea7e9d38c902906627", size = 67331, upload-time = "2026-07-10T06:56:59.116Z" },
 ]
 
 [package.optional-dependencies]
