@@ -5,6 +5,8 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 
 from agentseek_api.core.runtime_store import UserScopedStore
+from agentseek_api.settings import settings
+from agentseek_api.services import run_executor as run_executor_module
 from agentseek_api.services.run_executor import (
     RunExecutionResult,
     _ProtocolMessageStreamState,
@@ -12,6 +14,36 @@ from agentseek_api.services.run_executor import (
     execute_run,
 )
 from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
+
+
+@pytest.mark.asyncio
+async def test_publish_translated_run_event_uses_atomic_redis_append(monkeypatch: pytest.MonkeyPatch) -> None:
+    published: list[tuple[str, str, int | None, dict[str, Any]]] = []
+    monkeypatch.setattr(settings, "EXECUTOR_BACKEND", "redis")
+    publish_event = getattr(run_executor_module, "_publish_translated_run_event", None)
+
+    async def fake_append(run_id: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        assert run_id == "run-1"
+        return 11, payload
+
+    async def unexpected_next_seq(_run_id: str) -> int:
+        raise AssertionError("Redis sequence allocation must be part of the append")
+
+    monkeypatch.setattr(run_executor_module, "append_redis_run_stream_event", fake_append, raising=False)
+    monkeypatch.setattr(run_executor_module, "next_run_stream_seq", unexpected_next_seq)
+    monkeypatch.setattr(
+        run_executor_module.run_broker,
+        "publish",
+        lambda run_id, event, *, seq=None, **payload: (
+            published.append((run_id, event, seq, payload)) or (seq, {"event": event, **payload})
+        ),
+    )
+
+    assert callable(publish_event)
+    result = await publish_event("run-1", "message", {"data": "hello"})
+
+    assert result == (11, {"event": "message", "data": "hello"})
+    assert published == [("run-1", "message", 11, {"data": "hello"})]
 
 
 class FakeGraph:

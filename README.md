@@ -622,6 +622,8 @@ parent api build --config ./langgraph.json -t my-api:dev
   - `REDIS_RUN_PROCESSING_KEY=agentseek:runs:processing`
   - `REDIS_WORKER_LOCK_KEY=agentseek:worker:active`
   - `REDIS_WORKER_LOCK_TTL_SECONDS=30`
+  - `REDIS_STREAM_MAXLEN=10000`
+  - `REDIS_STREAM_TTL_SECONDS=3600`
 - `METADATA_DB_BACKEND=auto` normalizes drivers:
   - PostgreSQL: `postgresql+asyncpg://...`
   - OceanBase / MySQL: `mysql+aiomysql://...`
@@ -634,8 +636,12 @@ parent api build --config ./langgraph.json -t my-api:dev
 
 ### Durable execution
 
-- Redis mode persists run stream events and protocol stream events into the
-  metadata database so stream replay does not depend on API-process memory.
+- Redis mode stores run stream events and protocol stream events in bounded
+  Redis Streams, so replay does not depend on API-process memory and streaming
+  writes do not put the metadata database on the hot path.
+- When upgrading from a version that stored Redis-worker stream events in the
+  metadata database, drain active runs first. Existing SQL stream-event rows
+  are not imported into Redis.
 - Interrupted runs can be resumed after worker restart as long as Redis and the
   metadata database stay available.
 - The worker owns a renewable Redis lease and exits if that lease is lost,

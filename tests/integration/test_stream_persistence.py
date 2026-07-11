@@ -22,11 +22,57 @@ from agentseek_api.services.thread_protocol import publish_values_event, thread_
 class FakeRedisCounter:
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
+        self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
 
     async def incr(self, key: str) -> int:
         value = self.counts.get(key, 0) + 1
         self.counts[key] = value
         return value
+
+    async def xadd(
+        self,
+        key: str,
+        fields: dict[str, str],
+        *,
+        id: str,
+        maxlen: int,
+        approximate: bool,
+    ) -> str:
+        _ = (maxlen, approximate)
+        self.streams.setdefault(key, []).append((id, dict(fields)))
+        return id
+
+    async def xrange(self, key: str, *, min: str, max: str) -> list[tuple[str, dict[str, str]]]:
+        assert max == "+"
+        after_seq = int(min.removeprefix("(").split("-", 1)[0])
+        return [
+            (entry_id, fields)
+            for entry_id, fields in self.streams.get(key, [])
+            if int(entry_id.split("-", 1)[0]) > after_seq
+        ]
+
+    async def expire(self, key: str, seconds: int) -> bool:
+        _ = (key, seconds)
+        return True
+
+    async def eval(self, script: str, numkeys: int, *args: str) -> list[object]:
+        assert numkeys == 2
+        assert "XADD" in script
+        seq_key, stream_key, encoded_payload, maxlen, ttl_seconds, event_prefix = args
+        seq = await self.incr(seq_key)
+        payload = json.loads(encoded_payload)
+        if event_prefix:
+            payload = {"type": "event", "event_id": f"{event_prefix}:{seq}", "seq": seq, **payload}
+        encoded_event = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        await self.xadd(
+            stream_key,
+            {"payload": encoded_event},
+            id=f"{seq}-0",
+            maxlen=int(maxlen),
+            approximate=True,
+        )
+        await self.expire(stream_key, int(ttl_seconds))
+        return [seq, encoded_event]
 
 
 def _parse_sse(stream_text: str) -> list[dict[str, object]]:

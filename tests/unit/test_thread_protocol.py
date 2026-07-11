@@ -1,5 +1,6 @@
 import pytest
 
+from agentseek_api.settings import settings
 from agentseek_api.services import thread_protocol as protocol
 from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
@@ -51,6 +52,32 @@ async def test_thread_protocol_broker_apublish_waits_for_persistence(monkeypatch
 
     assert event["seq"] == 1
     assert persisted == [("thread-1", 1)]
+
+
+@pytest.mark.asyncio
+async def test_apublish_thread_event_uses_atomic_redis_append(monkeypatch: pytest.MonkeyPatch) -> None:
+    broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(protocol, "thread_protocol_broker", broker)
+
+    async def fake_append(thread_id: str, payload: dict) -> tuple[int, dict]:
+        assert thread_id == "thread-1"
+        return 9, {"type": "event", "event_id": "thread-1:9", "seq": 9, **payload}
+
+    async def unexpected_next_seq(_thread_id: str) -> int:
+        raise AssertionError("Redis sequence allocation must be part of the append")
+
+    monkeypatch.setattr("agentseek_api.services.stream_persistence.append_redis_thread_stream_event", fake_append)
+    monkeypatch.setattr("agentseek_api.services.stream_persistence.next_thread_stream_seq", unexpected_next_seq)
+
+    event = await protocol._apublish_thread_event(
+        "thread-1",
+        {"method": "values", "params": {"namespace": [], "timestamp": 1, "data": {"ok": True}}},
+    )
+
+    assert event["seq"] == 9
+    assert event["event_id"] == "thread-1:9"
+    assert broker._events["thread-1"] == [event]
 
 
 @pytest.mark.asyncio

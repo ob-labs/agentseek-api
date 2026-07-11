@@ -616,6 +616,8 @@ parent api build --config ./langgraph.json -t my-api:dev
   - `REDIS_RUN_PROCESSING_KEY=agentseek:runs:processing`
   - `REDIS_WORKER_LOCK_KEY=agentseek:worker:active`
   - `REDIS_WORKER_LOCK_TTL_SECONDS=30`
+  - `REDIS_STREAM_MAXLEN=10000`
+  - `REDIS_STREAM_TTL_SECONDS=3600`
 - `METADATA_DB_BACKEND=auto` 会对驱动进行归一化：
   - PostgreSQL：`postgresql+asyncpg://...`
   - OceanBase / MySQL：`mysql+aiomysql://...`
@@ -628,8 +630,11 @@ parent api build --config ./langgraph.json -t my-api:dev
 
 ### 持久化执行
 
-- Redis 模式会把 run 流事件与 protocol 流事件持久化到元数据数据库，
-  这样流回放就不再依赖 API 进程的内存。
+- Redis 模式会把 run 流事件与 protocol 流事件存入有界 Redis Stream，
+  这样流回放既不依赖 API 进程内存，也不会让流式写入占用元数据数据库
+  的关键路径。
+- 从使用元数据数据库保存 Redis worker 流事件的旧版本升级时，请先等待
+  活跃 run 执行完成；已有的 SQL 流事件不会导入 Redis。
 - 只要 Redis 与元数据数据库仍然可用，被中断的 run 可以在 worker 重启
   后恢复。
 - Worker 持有一个可续期的 Redis lease，在 lease 丢失时会主动退出，从而
