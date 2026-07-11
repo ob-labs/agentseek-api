@@ -1,0 +1,42 @@
+    1: from typing import Any, TypedDict
+       
+    1: from langgraph.graph import END, START, StateGraph
+    1: from langgraph.pregel import Pregel
+       
+    1: from agentseek_api.core.database import db_manager
+       
+       
+    2: class RunState(TypedDict):
+    1:     input: dict[str, Any]
+    1:     output: dict[str, Any]
+       
+       
+    1: def ensure_sync_checkpoint_mode(*, requested_async: bool) -> None:
+    1:     if requested_async:
+    2:         raise RuntimeError(
+    1:             "OceanBaseCheckpointSaver is sync-oriented in this milestone; async graph execution is not supported yet."
+               )
+       
+       
+    1: def _echo_node(state: RunState) -> RunState:
+           payload = state.get("input", {})
+           return {"input": payload, "output": {"echo": payload}}
+       
+       
+    2: class LangGraphService:
+    1:     def get_graph(self) -> Pregel:
+               builder: StateGraph[RunState] = StateGraph(RunState)
+               builder.add_node("echo", _echo_node)
+               builder.add_edge(START, "echo")
+               builder.add_edge("echo", END)
+               return builder.compile()
+       
+       
+    1: _langgraph_service: LangGraphService | None = None
+       
+       
+    1: def get_langgraph_service() -> LangGraphService:
+           global _langgraph_service
+           if _langgraph_service is None:
+               _langgraph_service = LangGraphService()
+           return _langgraph_service

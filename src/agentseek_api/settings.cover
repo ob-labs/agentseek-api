@@ -1,0 +1,20 @@
+    1: from pydantic_settings import BaseSettings, SettingsConfigDict
+       
+       
+    2: class Settings(BaseSettings):
+    1:     model_config = SettingsConfigDict(extra="ignore")
+       
+    1:     APP_NAME: str = "AgentSeek API"
+    1:     PORT: int = 2026
+    1:     SEEKDB_URL: str = "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
+    1:     AUTH_TYPE: str = "noop"
+    1:     AUTH_MODULE_PATH: str | None = None
+       
+    1:     OCEANBASE_HOST: str = "localhost"
+    1:     OCEANBASE_PORT: str = "2881"
+    1:     OCEANBASE_USER: str = "root@test"
+    1:     OCEANBASE_PASSWORD: str = ""
+    1:     OCEANBASE_DB_NAME: str = "seekdb"
+       
+       
+    1: settings = Settings()

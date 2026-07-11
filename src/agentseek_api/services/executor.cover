@@ -1,0 +1,17 @@
+    1: import asyncio
+    1: from collections.abc import Awaitable, Callable
+       
+       
+    2: class ExecutorFacade:
+    1:     async def submit(self, func: Callable[[], Awaitable[None]]) -> None:
+    2:         asyncio.create_task(func())
+       
+       
+    1: _executor: ExecutorFacade | None = None
+       
+       
+    1: def get_executor() -> ExecutorFacade:
+           global _executor
+    2:     if _executor is None:
+    1:         _executor = ExecutorFacade()
+    2:     return _executor

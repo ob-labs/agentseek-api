@@ -1,0 +1,12 @@
+    1: from fastapi import Depends, Request
+       
+    1: from agentseek_api.core.auth_middleware import get_auth_backend
+    1: from agentseek_api.models.auth import User
+       
+       
+    1: async def get_current_user(request: Request) -> User:
+    5:     backend = get_auth_backend()
+    5:     return await backend.authenticate(request)
+       
+       
+    1: AuthDependency = Depends(get_current_user)

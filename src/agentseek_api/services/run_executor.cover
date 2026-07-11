@@ -1,0 +1,20 @@
+    1: from typing import Any
+       
+    1: from agentseek_api.core.database import db_manager
+    1: from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
+       
+       
+    1: async def execute_run(*, thread_id: str, run_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+           ensure_sync_checkpoint_mode(requested_async=False)
+           graph = get_langgraph_service().get_graph()
+           config = {"configurable": {"thread_id": thread_id, "run_id": run_id}}
+           result = await db_manager.run_checkpointer_call(graph.invoke, {"input": payload}, config)
+           output: dict[str, Any] = result.get("output", {"echo": payload})
+           checkpointer = db_manager.get_checkpointer()
+           await db_manager.run_checkpointer_call(
+               checkpointer.save_checkpoint,
+               thread_id=thread_id,
+               run_id=run_id,
+               payload={"input": payload, "output": output},
+           )
+           return output

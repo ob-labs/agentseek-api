@@ -1,0 +1,40 @@
+    1: from datetime import datetime
+    1: from typing import Any
+       
+    1: from pydantic import BaseModel, Field
+       
+       
+    2: class AssistantCreate(BaseModel):
+    1:     name: str
+    1:     graph_id: str = "default"
+       
+       
+    2: class AssistantRead(BaseModel):
+    1:     assistant_id: str
+    1:     name: str
+    1:     graph_id: str
+    1:     created_at: datetime
+       
+       
+    2: class ThreadCreate(BaseModel):
+    1:     metadata: dict[str, Any] = Field(default_factory=dict)
+       
+       
+    2: class ThreadRead(BaseModel):
+    1:     thread_id: str
+    1:     user_id: str
+    1:     metadata: dict[str, Any]
+    1:     created_at: datetime
+       
+       
+    2: class RunCreate(BaseModel):
+    1:     assistant_id: str
+    1:     input: dict[str, Any]
+       
+       
+    2: class RunRead(BaseModel):
+    1:     run_id: str
+    1:     thread_id: str
+    1:     assistant_id: str
+    1:     status: str
+    1:     output: dict[str, Any] | None

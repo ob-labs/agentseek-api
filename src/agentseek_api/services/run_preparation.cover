@@ -1,0 +1,51 @@
+    1: from sqlalchemy import select
+       
+    1: from agentseek_api.core.database import db_manager
+    1: from agentseek_api.core.orm import Assistant, Run, Thread
+    1: from agentseek_api.models.auth import User
+    1: from agentseek_api.services.executor import get_executor
+    1: from agentseek_api.services.run_executor import execute_run
+    1: from agentseek_api.services.run_state import run_broker
+       
+       
+    1: async def prepare_and_submit_run(*, thread_id: str, assistant_id: str, payload: dict, user: User) -> Run:
+    2:     session_factory = db_manager.get_session_factory()
+    4:     async with session_factory() as session:
+    2:         thread = await session.scalar(select(Thread).where(Thread.thread_id == thread_id, Thread.user_id == user.identity))
+    2:         if thread is None:
+                   raise ValueError("Thread not found")
+    2:         assistant = await session.scalar(select(Assistant).where(Assistant.assistant_id == assistant_id))
+    2:         if assistant is None:
+                   raise ValueError("Assistant not found")
+    4:         run = Run(
+    2:             thread_id=thread_id,
+    2:             assistant_id=assistant_id,
+    2:             user_id=user.identity,
+    2:             status="pending",
+    2:             input_json=payload,
+               )
+    2:         session.add(run)
+    2:         await session.commit()
+    2:         await session.refresh(run)
+       
+    2:     async def _execute() -> None:
+    2:         session_factory_inner = db_manager.get_session_factory()
+    4:         async with session_factory_inner() as execution_session:
+    2:             db_run = await execution_session.scalar(select(Run).where(Run.run_id == run.run_id))
+    1:             if db_run is None:
+                       return
+    1:             db_run.status = "running"
+    1:             run_broker.publish(run.run_id, "start")
+    1:             await execution_session.commit()
+    1:             try:
+    1:                 output = await execute_run(thread_id=run.thread_id, run_id=run.run_id, payload=run.input_json)
+    1:                 db_run.status = "success"
+    1:                 db_run.output_json = output
+                   except Exception as exc:  # noqa: BLE001
+                       db_run.status = "error"
+                       db_run.last_error = str(exc)
+    1:             run_broker.publish(run.run_id, "end")
+    1:             await execution_session.commit()
+       
+    2:     await get_executor().submit(_execute)
+    2:     return run

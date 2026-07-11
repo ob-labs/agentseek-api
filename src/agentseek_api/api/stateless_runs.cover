@@ -1,0 +1,15 @@
+    1: from fastapi import APIRouter, Depends
+       
+    1: from agentseek_api.core.auth_deps import get_current_user
+    1: from agentseek_api.models.api import RunCreate, RunRead, ThreadCreate
+    1: from agentseek_api.models.auth import User
+    1: from agentseek_api.services.thread_service import create_thread_for_user
+    1: from agentseek_api.api.runs import create_run
+       
+    1: router = APIRouter(prefix="/runs", tags=["Stateless Runs"])
+       
+       
+    2: @router.post("", response_model=RunRead)
+    2: async def create_stateless_run(payload: RunCreate, user: User = Depends(get_current_user)) -> RunRead:
+    1:     thread = await create_thread_for_user(payload=ThreadCreate(metadata={"stateless": True}), user=user)
+    1:     return await create_run(thread.thread_id, payload, user)

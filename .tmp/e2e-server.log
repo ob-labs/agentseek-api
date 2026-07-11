@@ -1,0 +1,52 @@
+INFO:     Started server process [32253]
+INFO:     Waiting for application startup.
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_jobs_thread_id` (`thread_id`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_jobs_enabled_next_run_at` (`enabled`, `next_run_at`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_jobs_assistant_id` (`assistant_id`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_jobs_user_id` (`user_id`) BLOCK_SIZE 16384 LOCAL'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_ticks_scheduled_for` (`scheduled_for`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_ticks_cron_id` (`cron_id`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_ticks_run_id` (`run_id`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_ticks_status_webhook_delivery_status_updated_at` (`status`, `webhook_delivery_status`, `updated_at`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_ticks_scheduler_id` (`scheduler_id`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_ticks_status_updated_at_scheduled_for` (`status`, `updated_at`, `scheduled_for`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_ticks_thread_id` (`thread_id`) BLOCK_SIZE 16384 LOCAL'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  UNIQUE KEY `uq_cron_webhook_attempt_tick_attempt` (`tick_id`, `attempt_number`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_cron_webhook_attempts_tick_id` (`tick_id`) BLOCK_SIZE 16384 LOCAL'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  UNIQUE KEY `uq_run_stream_events_run_seq` (`run_id`, `seq`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_run_stream_events_run_id` (`run_id`) BLOCK_SIZE 16384 LOCAL'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_runs_thread_id` (`thread_id`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_runs_user_id` (`user_id`) BLOCK_SIZE 16384 LOCAL'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  UNIQUE KEY `uq_store_items_identity_hash` (`identity_hash`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_store_items_expires_at` (`expires_at`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_store_items_user_id` (`user_id`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_store_items_key` (`key`) BLOCK_SIZE 16384 LOCAL'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  UNIQUE KEY `uq_thread_stream_events_thread_seq` (`thread_id`, `seq`) BLOCK_SIZE 16384 LOCAL,'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+/Users/zhl/workspaces/agentseek-api/src/agentseek_api/core/database.py:253: SAWarning: Unknown schema content: '  KEY `ix_thread_stream_events_thread_id` (`thread_id`) BLOCK_SIZE 16384 LOCAL'
+  db_columns = {col["name"] for col in inspector.get_columns(table.name)}
+INFO:     Application startup complete.
+ERROR:    [Errno 48] error while attempting to bind on address ('127.0.0.1', 2030): address already in use
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.

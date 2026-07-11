@@ -1,0 +1,102 @@
+    1: import asyncio
+    1: import json
+    1: from collections.abc import AsyncIterator
+       
+    1: from sqlalchemy import select
+       
+    1: from fastapi import APIRouter, Depends, HTTPException
+    1: from fastapi.responses import StreamingResponse
+       
+    1: from agentseek_api.core.auth_deps import get_current_user
+    1: from agentseek_api.core.database import db_manager
+    1: from agentseek_api.core.orm import Run
+    1: from agentseek_api.models.api import RunCreate, RunRead
+    1: from agentseek_api.models.auth import User
+    1: from agentseek_api.services.run_preparation import prepare_and_submit_run
+    1: from agentseek_api.services.run_state import run_broker
+       
+    1: router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Runs"])
+       
+       
+    1: def _to_read_model(run: Run) -> RunRead:
+    8:     return RunRead(
+    4:         run_id=run.run_id,
+    4:         thread_id=run.thread_id,
+    4:         assistant_id=run.assistant_id,
+    4:         status=run.status,
+    4:         output=run.output_json,
+           )
+       
+       
+    2: @router.post("", response_model=RunRead)
+    2: async def create_run(thread_id: str, payload: RunCreate, user: User = Depends(get_current_user)) -> RunRead:
+    2:     try:
+    4:         row = await prepare_and_submit_run(
+    2:             thread_id=thread_id,
+    2:             assistant_id=payload.assistant_id,
+    2:             payload=payload.input,
+    2:             user=user,
+               )
+           except ValueError as exc:
+               raise HTTPException(status_code=404, detail=str(exc)) from exc
+    2:     return _to_read_model(row)
+       
+       
+    2: @router.get("", response_model=list[RunRead])
+    2: async def list_runs(thread_id: str, user: User = Depends(get_current_user)) -> list[RunRead]:
+    1:     session_factory = db_manager.get_session_factory()
+    2:     async with session_factory() as session:
+    1:         rows = (
+    2:             await session.scalars(
+    1:                 select(Run).where(Run.thread_id == thread_id, Run.user_id == user.identity).order_by(Run.created_at.desc())
+                   )
+    1:         ).all()
+    2:         return [_to_read_model(row) for row in rows]
+       
+       
+    2: @router.get("/{run_id}", response_model=RunRead)
+    2: async def get_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
+           session_factory = db_manager.get_session_factory()
+           async with session_factory() as session:
+               row = await session.scalar(
+                   select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
+               )
+               if row is None:
+                   raise HTTPException(status_code=404, detail="Run not found")
+               return _to_read_model(row)
+       
+       
+    2: @router.get("/{run_id}/wait", response_model=RunRead)
+    2: async def wait_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> RunRead:
+    1:     deadline = asyncio.get_event_loop().time() + 30
+    2:     while True:
+    2:         session_factory = db_manager.get_session_factory()
+    4:         async with session_factory() as session:
+    4:             row = await session.scalar(
+    2:                 select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
+                   )
+    2:             if row is None:
+                       raise HTTPException(status_code=404, detail="Run not found")
+    2:             if row.status in {"success", "error"}:
+    1:                 return _to_read_model(row)
+    1:         if asyncio.get_event_loop().time() > deadline:
+                   raise HTTPException(status_code=408, detail="Run wait timeout")
+    1:         await asyncio.sleep(0.2)
+       
+       
+    2: @router.get("/{run_id}/stream")
+    2: async def stream_run(thread_id: str, run_id: str, user: User = Depends(get_current_user)) -> StreamingResponse:
+           session_factory = db_manager.get_session_factory()
+           async with session_factory() as session:
+               row = await session.scalar(
+                   select(Run).where(Run.run_id == run_id, Run.thread_id == thread_id, Run.user_id == user.identity)
+               )
+               if row is None:
+                   raise HTTPException(status_code=404, detail="Run not found")
+       
+           async def _event_iter() -> AsyncIterator[str]:
+               async for event in run_broker.stream(run_id):
+                   payload = json.dumps({"event": event, "run_id": run_id})
+                   yield f"event: {event}\ndata: {payload}\n\n"
+       
+           return StreamingResponse(_event_iter(), media_type="text/event-stream")

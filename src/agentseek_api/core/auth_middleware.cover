@@ -1,0 +1,37 @@
+    1: from importlib import import_module
+    1: from typing import Protocol
+       
+    1: from fastapi import Request
+       
+    1: from agentseek_api.models.auth import User
+    1: from agentseek_api.settings import settings
+       
+       
+    2: class AuthBackend(Protocol):
+    1:     async def authenticate(self, request: Request) -> User: ...
+       
+       
+    2: class NoopAuthBackend:
+    1:     async def authenticate(self, _request: Request) -> User:
+    5:         return User(identity="default_user", is_authenticated=True)
+       
+       
+    1: def _load_custom_backend() -> AuthBackend | None:
+    1:     if not settings.AUTH_MODULE_PATH:
+    1:         return None
+           module_name, symbol = settings.AUTH_MODULE_PATH.split(":", maxsplit=1)
+           module = import_module(module_name)
+           obj = getattr(module, symbol)
+           return obj() if callable(obj) else obj
+       
+       
+    1: _backend: AuthBackend | None = None
+       
+       
+    1: def get_auth_backend() -> AuthBackend:
+           global _backend
+    5:     if _backend is not None:
+    4:         return _backend
+    1:     custom_backend = _load_custom_backend()
+    1:     _backend = custom_backend if custom_backend is not None else NoopAuthBackend()
+    1:     return _backend

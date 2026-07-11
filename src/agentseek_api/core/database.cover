@@ -1,0 +1,89 @@
+    1: import asyncio
+    1: from collections.abc import Callable
+    1: from typing import Any
+       
+    1: from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+       
+    1: from agentseek_api.core.oceanbase_checkpointer import OceanBaseCheckpointSaver
+    1: from agentseek_api.core.orm import Base
+    1: from agentseek_api.settings import settings
+       
+       
+    2: class NullStore:
+    1:     async def aget(self, _namespace: tuple[str, ...], _key: str) -> None:
+               return None
+       
+       
+    2: class DatabaseManager:
+    1:     def __init__(self) -> None:
+    2:         self.engine: AsyncEngine | None = None
+    2:         self.session_factory: async_sessionmaker[AsyncSession] | None = None
+    2:         self._checkpointer: OceanBaseCheckpointSaver | None = None
+    2:         self._store: NullStore | None = None
+    2:         self._setup_lock: asyncio.Lock = asyncio.Lock()
+    2:         self._checkpointer_setup_done: bool = False
+       
+    1:     async def initialize(self) -> None:
+    4:         if self.engine is not None:
+    1:             return
+    3:         self.engine = create_async_engine(settings.SEEKDB_URL, pool_pre_ping=True)
+    3:         self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
+    6:         async with self.engine.begin() as conn:
+    3:             await conn.run_sync(Base.metadata.create_all)
+    6:         self._checkpointer = OceanBaseCheckpointSaver(
+    3:             connection_args={
+    3:                 "host": settings.OCEANBASE_HOST,
+    3:                 "port": settings.OCEANBASE_PORT,
+    3:                 "user": settings.OCEANBASE_USER,
+    3:                 "password": settings.OCEANBASE_PASSWORD,
+    3:                 "db_name": settings.OCEANBASE_DB_NAME,
+                   }
+               )
+    3:         await self._setup_checkpointer_once()
+    3:         self._store = NullStore()
+       
+    1:     async def _setup_checkpointer_once(self) -> None:
+    3:         if self._checkpointer_setup_done:
+                   return
+    6:         async with self._setup_lock:
+    3:             if self._checkpointer_setup_done:
+                       return
+    3:             if self._checkpointer is None:
+                       raise RuntimeError("Checkpointer not initialized")
+    3:             await asyncio.to_thread(self._checkpointer.setup)
+    3:             self._checkpointer_setup_done = True
+       
+    1:     async def close(self) -> None:
+    3:         if self.engine is not None:
+    3:             await self.engine.dispose()
+    3:         self.engine = None
+    3:         self.session_factory = None
+    3:         self._checkpointer = None
+    3:         self._store = None
+    3:         self._checkpointer_setup_done = False
+       
+    1:     def get_engine(self) -> AsyncEngine:
+               if self.engine is None:
+                   raise RuntimeError("Database not initialized")
+               return self.engine
+       
+    1:     def get_session_factory(self) -> async_sessionmaker[AsyncSession]:
+   11:         if self.session_factory is None:
+                   raise RuntimeError("Database not initialized")
+   11:         return self.session_factory
+       
+    1:     def get_checkpointer(self) -> OceanBaseCheckpointSaver:
+               if self._checkpointer is None:
+                   raise RuntimeError("Database not initialized")
+               return self._checkpointer
+       
+    1:     def get_store(self) -> NullStore:
+               if self._store is None:
+                   raise RuntimeError("Database not initialized")
+               return self._store
+       
+    1:     async def run_checkpointer_call(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+               return await asyncio.to_thread(func, *args, **kwargs)
+       
+       
+    1: db_manager = DatabaseManager()

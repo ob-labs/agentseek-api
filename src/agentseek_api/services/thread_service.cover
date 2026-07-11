@@ -1,0 +1,14 @@
+    1: from agentseek_api.core.database import db_manager
+    1: from agentseek_api.core.orm import Thread
+    1: from agentseek_api.models.api import ThreadCreate, ThreadRead
+    1: from agentseek_api.models.auth import User
+       
+       
+    1: async def create_thread_for_user(*, payload: ThreadCreate, user: User) -> ThreadRead:
+    1:     session_factory = db_manager.get_session_factory()
+    2:     async with session_factory() as session:
+    1:         row = Thread(user_id=user.identity, metadata_json=payload.metadata)
+    1:         session.add(row)
+    1:         await session.commit()
+    1:         await session.refresh(row)
+    1:         return ThreadRead(thread_id=row.thread_id, user_id=row.user_id, metadata=row.metadata_json, created_at=row.created_at)

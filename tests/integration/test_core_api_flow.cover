@@ -1,0 +1,63 @@
+    1: from pathlib import Path
+       
+    1: import pytest
+    1: from fastapi.testclient import TestClient
+       
+    1: from agentseek_api.main import create_app
+    1: from agentseek_api.settings import settings
+       
+       
+    2: @pytest.fixture
+    2: def client(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> TestClient:
+    4:     class FakeCheckpointer:
+    2:         def __init__(self, connection_args: dict[str, str]) -> None:
+    2:             self.connection_args = connection_args
+       
+    2:         def setup(self) -> None:
+    2:             return None
+       
+    2:     async def fake_execute_run(*, thread_id: str, run_id: str, payload: dict) -> dict:
+    1:         return {"echo": payload, "thread_id": thread_id, "run_id": run_id}
+       
+    2:     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    2:     monkeypatch.setattr("agentseek_api.services.run_preparation.execute_run", fake_execute_run)
+    2:     monkeypatch.setattr(settings, "SEEKDB_URL", f"sqlite+aiosqlite:///{tmp_path}/test.db")
+       
+    2:     app = create_app()
+    4:     with TestClient(app) as test_client:
+    2:         yield test_client
+       
+       
+    1: def test_assistants_threads_runs_flow(client: TestClient) -> None:
+    1:     assistant_resp = client.post("/assistants", json={"name": "demo", "graph_id": "default"})
+    1:     assert assistant_resp.status_code == 200
+    1:     assistant_id = assistant_resp.json()["assistant_id"]
+       
+    1:     thread_resp = client.post("/threads", json={"metadata": {"topic": "test"}})
+    1:     assert thread_resp.status_code == 200
+    1:     thread_id = thread_resp.json()["thread_id"]
+       
+    2:     run_resp = client.post(
+    1:         f"/threads/{thread_id}/runs",
+    1:         json={"assistant_id": assistant_id, "input": {"message": "hello"}},
+           )
+    1:     assert run_resp.status_code == 200
+    1:     run_id = run_resp.json()["run_id"]
+       
+    1:     wait_resp = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
+    1:     assert wait_resp.status_code == 200
+    1:     assert wait_resp.json()["status"] in {"success", "error"}
+       
+    1:     list_resp = client.get(f"/threads/{thread_id}/runs")
+    1:     assert list_resp.status_code == 200
+    1:     assert len(list_resp.json()) == 1
+       
+       
+    1: def test_stateless_run_creates_thread_and_run(client: TestClient) -> None:
+    1:     assistant_resp = client.post("/assistants", json={"name": "stateless", "graph_id": "default"})
+    1:     assert assistant_resp.status_code == 200
+    1:     assistant_id = assistant_resp.json()["assistant_id"]
+       
+    1:     run_resp = client.post("/runs", json={"assistant_id": assistant_id, "input": {"foo": "bar"}})
+    1:     assert run_resp.status_code == 200
+    1:     assert run_resp.json()["assistant_id"] == assistant_id

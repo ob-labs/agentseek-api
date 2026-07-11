@@ -1,0 +1,48 @@
+    1: from contextlib import asynccontextmanager
+    1: from collections.abc import AsyncIterator
+       
+    1: from fastapi import FastAPI
+       
+    1: from agentseek_api import __version__
+    1: from agentseek_api.api.assistants import router as assistants_router
+    1: from agentseek_api.api.runs import router as runs_router
+    1: from agentseek_api.api.stateless_runs import router as stateless_runs_router
+    1: from agentseek_api.api.threads import router as threads_router
+    1: from agentseek_api.core.database import db_manager
+    1: from agentseek_api.settings import settings
+       
+       
+    2: @asynccontextmanager
+    2: async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+    2:     await db_manager.initialize()
+    2:     try:
+    2:         yield
+           finally:
+    2:         await db_manager.close()
+       
+       
+    1: def create_app() -> FastAPI:
+    3:     app = FastAPI(title=settings.APP_NAME, version=__version__, lifespan=lifespan)
+       
+    6:     @app.get("/health")
+    6:     async def health() -> dict[str, str]:
+               db_manager.get_engine()
+               db_manager.get_checkpointer()
+               return {"status": "healthy"}
+       
+    6:     @app.get("/info")
+    6:     async def info() -> dict[str, object]:
+               return {
+                   "name": settings.APP_NAME,
+                   "version": __version__,
+                   "flags": {"assistants": True, "threads": True, "runs": True, "crons": False},
+               }
+       
+    3:     app.include_router(assistants_router)
+    3:     app.include_router(threads_router)
+    3:     app.include_router(runs_router)
+    3:     app.include_router(stateless_runs_router)
+    3:     return app
+       
+       
+    1: app = create_app()

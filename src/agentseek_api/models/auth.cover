@@ -1,0 +1,6 @@
+    1: from pydantic import BaseModel
+       
+       
+    2: class User(BaseModel):
+    1:     identity: str
+    1:     is_authenticated: bool = True

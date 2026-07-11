@@ -1,0 +1,36 @@
+    1: import pytest
+       
+    1: from agentseek_api.core.database import DatabaseManager
+    1: from agentseek_api.settings import settings
+       
+       
+    2: @pytest.mark.asyncio
+    2: async def test_checkpointer_setup_called_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    2:     class FakeCheckpointer:
+    1:         setup_calls = 0
+    1:         latest_connection_args: dict[str, str] | None = None
+       
+    1:         def __init__(self, connection_args: dict[str, str]) -> None:
+    1:             FakeCheckpointer.latest_connection_args = connection_args
+       
+    1:         def setup(self) -> None:
+    1:             FakeCheckpointer.setup_calls += 1
+       
+    1:     monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
+    1:     monkeypatch.setattr(settings, "SEEKDB_URL", "sqlite+aiosqlite:///:memory:")
+    1:     monkeypatch.setattr(settings, "OCEANBASE_HOST", "127.0.0.1")
+    1:     monkeypatch.setattr(settings, "OCEANBASE_PORT", "2881")
+    1:     monkeypatch.setattr(settings, "OCEANBASE_USER", "root@test")
+    1:     monkeypatch.setattr(settings, "OCEANBASE_PASSWORD", "")
+    1:     monkeypatch.setattr(settings, "OCEANBASE_DB_NAME", "test")
+       
+    1:     manager = DatabaseManager()
+    1:     await manager.initialize()
+    1:     await manager.initialize()
+       
+    1:     assert FakeCheckpointer.setup_calls == 1
+    1:     assert FakeCheckpointer.latest_connection_args is not None
+    1:     assert FakeCheckpointer.latest_connection_args["host"] == "127.0.0.1"
+    1:     assert FakeCheckpointer.latest_connection_args["db_name"] == "test"
+       
+    1:     await manager.close()
