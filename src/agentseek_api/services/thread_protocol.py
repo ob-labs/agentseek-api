@@ -62,11 +62,6 @@ class ThreadProtocolEventBroker:
             return
 
     def _prune_thread_events(self, thread_id: str) -> None:
-        # Active streams advance through the in-memory backlog by list index.
-        # Pruning during an active run can shift that index and strand trailing
-        # events (for example, final values/message-finish emissions).
-        if self._active_runs.get(thread_id, 0) > 0:
-            return
         events = self._events.get(thread_id)
         if events is None or len(events) <= self._max_events_per_thread:
             return
@@ -182,20 +177,16 @@ class ThreadProtocolEventBroker:
         since: int | None,
         wait_for_future_runs: bool = False,
     ) -> AsyncIterator[dict[str, Any]]:
-        seen = 0
-        if since is not None:
-            for index, event in enumerate(self._events.get(thread_id, [])):
-                if int(event.get("seq", 0)) > since:
-                    seen = index
-                    break
-            else:
-                seen = len(self._events.get(thread_id, []))
+        last_seen_seq = since or 0
 
         while True:
             events = self._events.get(thread_id, [])
-            while seen < len(events):
-                event = dict(events[seen])
-                seen += 1
+            for stored_event in events:
+                event = dict(stored_event)
+                seq = int(event.get("seq", 0))
+                if seq <= last_seen_seq:
+                    continue
+                last_seen_seq = seq
                 channel = protocol_channel_for_method(str(event.get("method", "")))
                 namespace = event.get("params", {}).get("namespace", [])
                 if not isinstance(namespace, list):
@@ -208,7 +199,7 @@ class ThreadProtocolEventBroker:
 
             signal = self._signals[thread_id]
             signal.clear()
-            if seen < len(self._events.get(thread_id, [])):
+            if self.latest_seq(thread_id) > last_seen_seq:
                 continue
             if self._active_runs.get(thread_id, 0) == 0 and not wait_for_future_runs:
                 return

@@ -15,6 +15,27 @@ def test_thread_protocol_broker_prunes_old_events_per_thread() -> None:
     assert [event["seq"] for event in broker._events["thread-1"]] == [2, 3]
 
 
+def test_thread_protocol_broker_prunes_old_events_during_active_run() -> None:
+    broker = ThreadProtocolEventBroker(max_events_per_thread=2)
+    broker.run_started("thread-1")
+
+    for index in range(3):
+        broker.publish(
+            "thread-1",
+            {
+                "method": "values",
+                "params": {"namespace": [], "timestamp": index, "data": {"n": index}},
+            },
+            persist=False,
+        )
+
+    assert [event["seq"] for event in broker._events["thread-1"]] == [2, 3]
+
+    broker.run_finished("thread-1")
+
+    assert [event["seq"] for event in broker._events["thread-1"]] == [2, 3]
+
+
 def test_thread_protocol_broker_discards_stale_idle_threads() -> None:
     broker = ThreadProtocolEventBroker(max_events_per_thread=4, max_idle_threads=1)
 
