@@ -55,6 +55,12 @@ def test_safe_json_dumps_handles_set_and_frozenset() -> None:
     assert result["f"] == [3]
 
 
+def test_safe_json_dumps_preserves_non_ascii_characters() -> None:
+    result = safe_json_dumps({"text": "\u9644\u4ef64"})
+    assert "\u9644\u4ef64" in result
+    assert "\\u9644\\u4ef64" not in result
+
+
 def test_safe_json_dumps_raises_for_unknown_type() -> None:
     with pytest.raises(TypeError, match="not JSON serializable"):
         safe_json_dumps({"x": object()})

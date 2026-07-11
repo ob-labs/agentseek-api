@@ -282,7 +282,7 @@ def _message_content(message: BaseMessage) -> str:
     content = getattr(message, "content", "")
     if isinstance(content, str):
         return content
-    return json.dumps(content, default=str)
+    return json.dumps(content, ensure_ascii=False, default=str)
 
 
 def _extract_chunk_messages(chunk: Any) -> list[BaseMessage]:
@@ -366,7 +366,7 @@ def _extract_output_text(extracted: Any) -> str:
             message_texts = [_message_content(message) for message in messages if isinstance(message, BaseMessage)]
             if message_texts:
                 return message_texts[-1]
-    return json.dumps(extracted, default=str)
+    return json.dumps(extracted, ensure_ascii=False, default=str)
 
 
 async def _invoke_a2a_graph(
@@ -558,7 +558,7 @@ def _canonical_a2a_method(method: str) -> tuple[str, bool]:
 
 
 def _sse_jsonrpc_event(*, request_id: Any, result: dict[str, Any]) -> str:
-    return f"event: message\ndata: {json.dumps(_jsonrpc_result(request_id, result))}\n\n"
+    return f"event: message\ndata: {json.dumps(_jsonrpc_result(request_id, result), ensure_ascii=False)}\n\n"
 
 
 async def handle_a2a_request(

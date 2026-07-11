@@ -252,7 +252,7 @@ def _wait_json_stream_response(
                         raise
                     yield b"\n"
             payload = await _wait_response_payload(current_run, user=user)
-            yield json.dumps(jsonable_encoder(payload), separators=(",", ":")).encode()
+            yield safe_json_dumps(jsonable_encoder(payload), separators=(",", ":")).encode("utf-8")
         finally:
             if cancel_on_disconnect:
                 try:

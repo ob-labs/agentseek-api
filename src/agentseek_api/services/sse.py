@@ -27,7 +27,9 @@ def _langchain_json_default(obj: Any) -> Any:
 
 
 def safe_json_dumps(obj: Any, **kwargs: Any) -> str:
-    return json.dumps(obj, default=_langchain_json_default, **kwargs)
+    kwargs.setdefault("default", _langchain_json_default)
+    kwargs.setdefault("ensure_ascii", False)
+    return json.dumps(obj, **kwargs)
 
 
 def sse_keepalive_comment() -> str:
