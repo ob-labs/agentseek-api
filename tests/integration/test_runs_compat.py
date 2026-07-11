@@ -249,6 +249,23 @@ def test_cancel_routes(client: TestClient, monkeypatch) -> None:
     assert cancel_many.status_code == 204
 
 
+def test_stateless_wait_and_stream_preserve_non_ascii_characters(client: TestClient) -> None:
+    assistant_id = _create_assistant(client)
+
+    waited = client.post("/runs/wait", json={"assistant_id": assistant_id, "input": {"message": "\u9644\u4ef64"}})
+    assert waited.status_code == 200
+    assert "\u9644\u4ef64" in waited.text
+    assert "\\u9644\\u4ef64" not in waited.text
+
+    streamed = client.post(
+        "/runs/stream",
+        json={"assistant_id": assistant_id, "input": {"message": "\u9644\u4ef64"}, "stream_mode": "updates"},
+    )
+    assert streamed.status_code == 200
+    assert "\u9644\u4ef64" in streamed.text
+    assert "\\u9644\\u4ef64" not in streamed.text
+
+
 def test_create_run_stream_rejects_unsupported_stream_modes(client: TestClient) -> None:
     assistant_id = _create_assistant(client)
     thread_id = _create_thread(client)

@@ -11,6 +11,9 @@ from agentseek_api.services.langgraph_service import GraphEntry
 from agentseek_api.a2a_server import (
     A2ATaskRecord,
     A2ATaskRegistry,
+    _extract_output_text,
+    _message_content,
+    _sse_jsonrpc_event,
     build_agent_card,
     handle_a2a_request,
     is_a2a_compatible_entry,
@@ -85,6 +88,23 @@ def test_is_a2a_compatible_entry_rejects_non_object_root_schema() -> None:
 
     assert is_a2a_compatible_entry(entry) is False
 
+
+def test_message_content_preserves_non_ascii_json() -> None:
+    text = _message_content(HumanMessage(content=[{"name": "\u9644\u4ef64"}]))
+    assert "\u9644\u4ef64" in text
+    assert "\\u9644\\u4ef64" not in text
+
+
+def test_extract_output_text_preserves_non_ascii_json() -> None:
+    text = _extract_output_text({"name": "\u9644\u4ef64"})
+    assert "\u9644\u4ef64" in text
+    assert "\\u9644\\u4ef64" not in text
+
+
+def test_sse_jsonrpc_event_preserves_non_ascii_json() -> None:
+    event = _sse_jsonrpc_event(request_id="1", result={"artifact": {"text": "\u9644\u4ef64"}})
+    assert "\u9644\u4ef64" in event
+    assert "\\u9644\\u4ef64" not in event
 
 def test_is_a2a_compatible_entry_rejects_message_prepare_input_without_explicit_schema() -> None:
     entry = _entry(
