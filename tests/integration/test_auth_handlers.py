@@ -13,7 +13,6 @@ from langgraph_sdk import Auth
 
 from agentseek_api.core import auth_middleware
 from agentseek_api.core.auth_middleware import LangGraphAuthBackend
-from agentseek_api.core.auth_deps import get_current_user
 from agentseek_api.main import create_app
 from agentseek_api.models.auth import User
 from agentseek_api.settings import settings

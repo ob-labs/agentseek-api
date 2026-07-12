@@ -3,7 +3,6 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pymysql
-from pymysql.connections import Connection
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 

@@ -2,6 +2,8 @@
 
 **English** | [中文](README.zh-CN.md)
 
+[![PyPI version](https://img.shields.io/pypi/v/agentseek-api.svg)](https://pypi.org/project/agentseek-api/) [![Python >=3.12](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](https://pypi.org/project/agentseek-api/) [![CI](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml?query=branch%3Amain)
+
 > [!WARNING]
 > This project is under active development and is **not production-ready**.
 > Pull requests for bug fixes and enhancements are warmly welcomed!
@@ -183,7 +185,7 @@ When the server starts it prints the banner and local URLs:
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-     AgentSeek v0.1.0
+     AgentSeek v0.2.0
 
 - 🚀 API: http://localhost:2024
 - 📚 Docs: http://localhost:2024/docs

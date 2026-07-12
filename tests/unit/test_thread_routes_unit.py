@@ -5,7 +5,7 @@ from fastapi import HTTPException
 
 from agentseek_api.api import threads as threads_module
 from agentseek_api.core.orm import Run, Thread
-from agentseek_api.models.api import ThreadCountRequest, ThreadPatch, ThreadPruneRequest, ThreadSearchRequest
+from agentseek_api.models.api import ThreadCountRequest, ThreadPatch, ThreadPruneRequest
 from agentseek_api.models.auth import User
 from agentseek_api.services import thread_service as thread_service_module
 from agentseek_api.services.thread_service import _public_thread_config
