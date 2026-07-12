@@ -476,8 +476,11 @@ def test_version_reports_cli_and_package_versions() -> None:
 
 
 def test_package_exposes_library_and_cli_entrypoints() -> None:
+    from agentseek_api import __version__
+
     project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
 
+    assert project_config["version"] == __version__
     assert project_config["name"] == "agentseek-api"
     assert project_config["scripts"]["agentseek-api"] == "agentseek_api.cli:main"
     assert project_config["optional-dependencies"]["embedded"]
