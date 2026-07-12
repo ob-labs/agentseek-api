@@ -50,7 +50,6 @@ async def test_ensure_default_assistants_creates_missing_rows(monkeypatch: pytes
     )
 
     created_ids: list[str] = []
-    existing_ids: set[str] = set()
 
     class FakeScalarResult:
         def __init__(self, val):

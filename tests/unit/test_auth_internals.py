@@ -138,7 +138,7 @@ async def test_backend_resolve_handler_returns_none_when_no_match():
 
 
 def test_apply_metadata_filters_contains_single():
-    from sqlalchemy import select, Column, JSON, String
+    from sqlalchemy import JSON, String, select
     from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
     class Base(DeclarativeBase):
@@ -157,7 +157,7 @@ def test_apply_metadata_filters_contains_single():
 
 
 def test_apply_metadata_filters_contains_list():
-    from sqlalchemy import select, Column, JSON, String
+    from sqlalchemy import JSON, String, select
     from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
     class Base(DeclarativeBase):
@@ -176,7 +176,7 @@ def test_apply_metadata_filters_contains_list():
 
 
 def test_apply_metadata_filters_plain_value():
-    from sqlalchemy import select, Column, JSON, String
+    from sqlalchemy import JSON, String, select
     from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
     class Base(DeclarativeBase):

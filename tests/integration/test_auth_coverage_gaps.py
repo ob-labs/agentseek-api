@@ -478,8 +478,6 @@ class TestAuthorizeReturnTrue:
 
     @pytest.mark.asyncio
     async def test_handler_returns_true_allows_access(self) -> None:
-        from unittest.mock import patch
-
         auth = Auth()
 
         @auth.authenticate
