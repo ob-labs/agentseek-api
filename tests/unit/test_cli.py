@@ -475,12 +475,24 @@ def test_version_reports_cli_and_package_versions() -> None:
     assert stdout.getvalue().strip().splitlines() == [f"agentseek-api {__version__}"]
 
 
-def test_package_exposes_library_and_cli_entrypoints() -> None:
+def test_release_versions_are_consistent() -> None:
     from agentseek_api import __version__
 
     project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    lock_packages = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))["package"]
+    root_package = next(
+        package
+        for package in lock_packages
+        if package["name"] == "agentseek-api" and package.get("source") == {"editable": "."}
+    )
 
     assert project_config["version"] == __version__
+    assert root_package["version"] == __version__
+
+
+def test_package_exposes_library_and_cli_entrypoints() -> None:
+    project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+
     assert project_config["name"] == "agentseek-api"
     assert project_config["scripts"]["agentseek-api"] == "agentseek_api.cli:main"
     assert project_config["optional-dependencies"]["embedded"]
