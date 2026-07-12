@@ -2,6 +2,8 @@
 
 [English](README.md) | **中文**
 
+[![PyPI version](https://img.shields.io/pypi/v/agentseek-api.svg)](https://pypi.org/project/agentseek-api/) [![Python >=3.12](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](https://pypi.org/project/agentseek-api/) [![CI](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml?query=branch%3Amain)
+
 > [!WARNING]
 > 本项目正在积极开发中，**尚未达到生产可用状态**。
 > 欢迎提交 Pull Request 来修复 Bug 或贡献增强功能！
@@ -179,7 +181,7 @@ uv run agentseek-api dev --config ./langgraph.json
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-     AgentSeek v0.1.0
+     AgentSeek v0.2.0
 
 - 🚀 API: http://localhost:2024
 - 📚 Docs: http://localhost:2024/docs
