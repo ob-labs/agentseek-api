@@ -1,7 +1,7 @@
 from typing import Any
 
 import pytest
-from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage
+from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, ToolMessage
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 
 from agentseek_api.core.runtime_store import UserScopedStore
@@ -750,6 +750,141 @@ class FakeProtocolMultiMessageEntry(FakeEntry):
 class FakeProtocolMultiMessageLangGraphService(FakeLangGraphService):
     def get_entry(self, _graph_id: str | None) -> FakeProtocolMultiMessageEntry:
         return FakeProtocolMultiMessageEntry()
+
+
+class FakeProtocolToolMessageGraph(FakeGraph):
+    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
+        self.configs.append(config)
+        tool_message = ToolMessage(
+            content="42 characters",
+            tool_call_id="call-character-count",
+            id="tool-message-1",
+        )
+        tool_event = {
+            "event": "on_chain_stream",
+            "name": "tools",
+            "run_id": "tool-run",
+            "parent_ids": ["root-run"],
+            "metadata": {
+                "langgraph_node": "tools",
+                "langgraph_checkpoint_ns": "tools:task-1",
+                "provider": "deterministic",
+            },
+            "tags": ["graph:step:2"],
+            "data": {"chunk": {"messages": [tool_message]}},
+        }
+        yield tool_event
+        yield tool_event
+        yield {
+            "event": "on_chat_model_stream",
+            "name": "chat-model",
+            "run_id": "chat-run",
+            "parent_ids": ["root-run"],
+            "metadata": {"langgraph_node": "call_model"},
+            "tags": ["graph:step:3"],
+            "data": {"chunk": AIMessageChunk(content="Final answer", id="ai-message-1")},
+        }
+        yield {
+            "event": "on_chain_end",
+            "name": "fake-graph",
+            "run_id": "root-run",
+            "parent_ids": [],
+            "metadata": {},
+            "tags": [],
+            "data": {
+                "output": {
+                    "output": {
+                        "messages": [tool_message, AIMessage(content="Final answer", id="ai-message-1")]
+                    }
+                }
+            },
+        }
+
+
+class FakeProtocolToolMessageEntry(FakeEntry):
+    graph = FakeProtocolToolMessageGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None) -> FakeProtocolToolMessageGraph:
+        return FakeProtocolToolMessageEntry.graph
+
+
+class FakeProtocolToolMessageLangGraphService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> FakeProtocolToolMessageEntry:
+        return FakeProtocolToolMessageEntry()
+
+
+async def _execute_protocol_tool_message_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stream_modes: list[str],
+) -> list[dict[str, Any]]:
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    FakeProtocolToolMessageEntry.graph = FakeProtocolToolMessageGraph()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeProtocolToolMessageLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"hello": "world"},
+        user_id="user-1",
+        kwargs={"stream_modes": stream_modes},
+    )
+    return protocol_broker._events["t1"]
+
+
+@pytest.mark.asyncio
+async def test_execute_run_mirrors_tool_message_to_requested_tuple_stream_once_and_before_final_answer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _execute_protocol_tool_message_graph(
+        monkeypatch,
+        stream_modes=["messages-tuple", "values"],
+    )
+    complete_events = [event for event in thread_events if event["method"] == "messages/complete"]
+    tuple_events = [event for event in thread_events if event["method"] == "messages-tuple"]
+    tool_tuples = [event for event in tuple_events if event["params"]["data"][0]["type"] == "tool"]
+
+    assert len(complete_events) == 1
+    assert len(tool_tuples) == 1
+
+    tool_tuple = tool_tuples[0]
+    tool_payload, metadata = tool_tuple["params"]["data"]
+    assert tool_payload["content"] == "42 characters"
+    assert tool_payload["id"] == "tool-message-1"
+    assert tool_payload["tool_call_id"] == "call-character-count"
+    assert metadata == {
+        "langgraph_node": "tools",
+        "langgraph_checkpoint_ns": "tools:task-1",
+        "provider": "deterministic",
+    }
+    assert tool_tuple["params"]["namespace"] == ["tools:task-1"]
+    assert tool_tuple["params"]["run_id"] == "r1"
+    assert complete_events[0]["params"]["data"] == [tool_payload]
+
+    final_answer_tuple = next(
+        event for event in tuple_events if event["params"]["data"][0].get("id") == "ai-message-1"
+    )
+    assert thread_events.index(tool_tuple) < thread_events.index(final_answer_tuple)
+
+
+@pytest.mark.asyncio
+async def test_execute_run_keeps_tool_message_complete_without_unrequested_tuple_mirror(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _execute_protocol_tool_message_graph(monkeypatch, stream_modes=["values"])
+    complete_events = [event for event in thread_events if event["method"] == "messages/complete"]
+    tuple_events = [event for event in thread_events if event["method"] == "messages-tuple"]
+
+    assert len(complete_events) == 1
+    assert complete_events[0]["params"]["data"][0]["id"] == "tool-message-1"
+    assert tuple_events == []
 
 
 @pytest.mark.asyncio
