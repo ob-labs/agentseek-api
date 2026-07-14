@@ -16,7 +16,12 @@ from agentseek_api.services import run_jobs as run_jobs_module
 from agentseek_api.services import sse as sse_module
 from agentseek_api.services import stream_persistence as stream_module
 from agentseek_api.services.run_state import run_broker
-from agentseek_api.services.thread_protocol import publish_values_event, thread_protocol_broker
+from agentseek_api.services.thread_protocol import (
+    apublish_messages_complete,
+    apublish_messages_tuple,
+    publish_values_event,
+    thread_protocol_broker,
+)
 
 
 class FakeRedisCounter:
@@ -564,6 +569,85 @@ def test_create_run_stream_sends_keepalive_while_protocol_broker_is_idle(client:
     assert ": keepalive\n\n" in body
     assert [event["event"] for event in events] == ["metadata", "updates"]
     assert events[1]["data"] == {"phase": "done"}
+
+
+def test_redis_create_run_stream_replays_tool_message_tuple_for_sdk_subscribers(
+    client: TestClient,
+    monkeypatch,
+) -> None:
+    fake_redis = FakeRedisCounter()
+    monkeypatch.setattr(stream_module.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(stream_module, "_redis_client", fake_redis)
+    monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
+
+    thread_id, run_id = client.portal.call(lambda: _seed_run(status="success"))
+    created = RunRead(
+        run_id=run_id,
+        thread_id=thread_id,
+        assistant_id="assistant",
+        status="success",
+        output={},
+        interrupts=None,
+        last_error=None,
+        created_at=None,
+        updated_at=None,
+        metadata={},
+        kwargs={},
+        multitask_strategy="enqueue",
+    )
+    tool_message = {
+        "content": "42 characters",
+        "additional_kwargs": {},
+        "response_metadata": {},
+        "type": "tool",
+        "name": None,
+        "id": "tool-message-1",
+        "tool_call_id": "call-character-count",
+        "artifact": None,
+        "status": "success",
+    }
+    metadata = {
+        "langgraph_node": "tools",
+        "langgraph_checkpoint_ns": "tools:task-1",
+        "provider": "deterministic",
+    }
+
+    client.portal.call(
+        lambda: apublish_messages_complete(
+            thread_id,
+            messages=[tool_message],
+            namespace=["tools:task-1"],
+            run_id=run_id,
+        )
+    )
+    client.portal.call(
+        lambda: apublish_messages_tuple(
+            thread_id,
+            chunk=tool_message,
+            metadata=metadata,
+            namespace=["tools:task-1"],
+            run_id=run_id,
+        )
+    )
+    thread_protocol_broker.delete_thread(thread_id)
+
+    response = runs_api._build_create_run_stream_response(
+        thread_id=thread_id,
+        created=created,
+        user=User(identity="default_user", is_authenticated=True),
+        stream_modes=["messages-tuple", "values"],
+        after_seq=0,
+        location=(
+            f"/threads/{thread_id}/runs/{run_id}/stream"
+            "?stream_mode=messages-tuple&stream_mode=values"
+        ),
+        content_location=f"/threads/{thread_id}/runs/{run_id}",
+    )
+
+    body = client.portal.call(_collect_stream_body, response)
+    events = _parse_sse(body)
+    assert [event["event"] for event in events] == ["metadata", "messages"]
+    assert events[1]["data"] == [tool_message, metadata]
 
 
 def test_run_stream_persistence_uses_shared_seq_after_broker_reset(client: TestClient, monkeypatch) -> None:
