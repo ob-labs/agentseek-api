@@ -34,7 +34,8 @@ if ARGV[4] ~= '' then
   -- accumulating. Splice the header in as a string to keep the original
   -- payload (and its empty arrays) byte-for-byte intact.
   local rest = string.sub(payload, 2)
-  local head = '{"type":"event","event_id":"' .. ARGV[4] .. ':' .. tostring(seq) .. '","seq":' .. tostring(seq)
+  local event_id = cjson.encode(ARGV[4] .. ':' .. tostring(seq))
+  local head = '{"type":"event","event_id":' .. event_id .. ',"seq":' .. tostring(seq)
   if rest == '}' then
     payload = head .. '}'
   else
