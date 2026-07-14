@@ -952,6 +952,22 @@ async def execute_run(
                                 namespace=protocol_namespace,
                                 run_id=run_id,
                             )
+                            # LangGraph SDK 1.x useStream subscribes to
+                            # messages-tuple, not messages/complete. Mirror the
+                            # completed non-AI message onto that requested
+                            # channel so ToolMessage resolves the pending tool
+                            # call while the run is still streaming.
+                            if _want_messages_tuple:
+                                event_metadata = (
+                                    _normalize_stream_value(stream_event.get("metadata", {})) or {}
+                                )
+                                await apublish_messages_tuple(
+                                    thread_id,
+                                    chunk=msg_dump,
+                                    metadata=event_metadata,
+                                    namespace=protocol_namespace,
+                                    run_id=run_id,
+                                )
                     continue
                 if _want_messages_tuple:
                     chunk_dump = _normalize_stream_value(message)
