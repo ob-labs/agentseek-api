@@ -17,6 +17,7 @@ _RUN_STREAM_SEQ_KEY_PREFIX = "agentseek:runs:stream-seq"
 _THREAD_STREAM_SEQ_KEY_PREFIX = "agentseek:threads:stream-seq"
 _RUN_STREAM_KEY_PREFIX = "agentseek:runs:stream"
 _THREAD_STREAM_KEY_PREFIX = "agentseek:threads:stream"
+_THREAD_STREAM_ENVELOPE_FIELDS = frozenset({"type", "event_id", "seq"})
 _redis_client: Redis | None = None
 logger = logging.getLogger(__name__)
 
@@ -24,11 +25,23 @@ _APPEND_REDIS_STREAM_EVENT_SCRIPT = """
 local seq = redis.call('INCR', KEYS[1])
 local payload = ARGV[1]
 if ARGV[4] ~= '' then
-  local event = cjson.decode(payload)
-  event['type'] = 'event'
-  event['event_id'] = ARGV[4] .. ':' .. tostring(seq)
-  event['seq'] = seq
-  payload = cjson.encode(event)
+  -- Inject type/event_id/seq WITHOUT a cjson decode/encode round-trip.
+  -- Redis' bundled lua-cjson cannot distinguish an empty array from an empty
+  -- object, so cjson.encode(cjson.decode('{"tool_calls":[]}')) returns
+  -- '{"tool_calls":{}}'. That silently corrupts every streamed message
+  -- (tool_calls / invalid_tool_calls become {}), and langgraph-sdk's
+  -- convertToChunk() then throws on `{}.map`, so the client cannot concat
+  -- message chunks by id and each token replaces the previous one instead of
+  -- accumulating. Splice the header in as a string to keep the original
+  -- payload (and its empty arrays) byte-for-byte intact.
+  local rest = string.sub(payload, 2)
+  local event_id = cjson.encode(ARGV[4] .. ':' .. tostring(seq))
+  local head = '{"type":"event","event_id":' .. event_id .. ',"seq":' .. tostring(seq)
+  if rest == '}' then
+    payload = head .. '}'
+  else
+    payload = head .. ',' .. rest
+  end
 end
 redis.call('XADD', KEYS[2], 'MAXLEN', '~', ARGV[2], tostring(seq) .. '-0', 'payload', payload)
 redis.call('EXPIRE', KEYS[2], ARGV[3])
@@ -70,6 +83,8 @@ async def _append_redis_stream_event_atomic(
     payload: dict[str, Any],
     event_prefix: str = "",
 ) -> tuple[int, dict[str, Any]]:
+    if event_prefix:
+        payload = {key: value for key, value in payload.items() if key not in _THREAD_STREAM_ENVELOPE_FIELDS}
     result = await _get_redis_client().eval(
         _APPEND_REDIS_STREAM_EVENT_SCRIPT,
         2,

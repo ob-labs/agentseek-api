@@ -9,6 +9,7 @@ CONFIG_PATH="${CONFIG_PATH:-examples/docker_ci_auth/manifest.json}"
 NETWORK_NAME="${NETWORK_NAME:-agentseek-redis-runtime}"
 BACKEND_CONTAINER="${BACKEND_CONTAINER:-agentseek-redis-backend}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-agentseek-redis}"
+REDIS_HOST_PORT="${REDIS_HOST_PORT:-6391}"
 API_CONTAINER="${API_CONTAINER:-agentseek-redis-api}"
 WORKER_CONTAINER="${WORKER_CONTAINER:-agentseek-redis-worker}"
 API_PORT="${API_PORT:-8126}"
@@ -111,6 +112,21 @@ PY
     print_logs
     exit 1
   fi
+}
+
+wait_for_redis() {
+  local attempt
+
+  for ((attempt = 1; attempt <= 30; attempt++)); do
+    if docker exec "$REDIS_CONTAINER" redis-cli ping >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "Redis did not become ready" >&2
+  print_logs
+  return 1
 }
 
 ensure_database_exists() {
@@ -252,7 +268,16 @@ docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
 docker run -d \
   --name "$REDIS_CONTAINER" \
   --network "$NETWORK_NAME" \
+  -p "127.0.0.1:${REDIS_HOST_PORT}:6379" \
   redis:7-alpine >/dev/null
+
+wait_for_redis
+
+if ! AGENTSEEK_TEST_REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0" \
+  uv run pytest tests/integration/test_live_redis_stream_persistence.py -q; then
+  print_logs
+  exit 1
+fi
 
 wait_for_backend
 ensure_database_exists
