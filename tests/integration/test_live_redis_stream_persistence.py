@@ -31,6 +31,15 @@ pytestmark = pytest.mark.skipif(
             id="message-with-empty-arrays",
         ),
         pytest.param({}, id="empty-object"),
+        pytest.param(
+            {
+                "type": "payload-event",
+                "event_id": "payload-event-id",
+                "seq": 0,
+                "method": "values",
+            },
+            id="reserved-envelope-fields",
+        ),
     ],
 )
 @pytest.mark.asyncio
@@ -56,9 +65,11 @@ async def test_thread_stream_lua_splices_header_without_reencoding_payload(
     assert event["type"] == "event"
     assert event["event_id"] == f"{thread_id}:1"
     assert event["seq"] == 1
-    assert event == {"type": "event", "event_id": f"{thread_id}:1", "seq": 1, **payload}
+    payload_body = {key: value for key, value in payload.items() if key not in {"type", "event_id", "seq"}}
+    expected_event = {"type": "event", "event_id": f"{thread_id}:1", "seq": 1, **payload_body}
+    assert event == expected_event
     assert len(rows) == 1
     stored_payload = rows[0][1]["payload"]
     stored_event = json.loads(stored_payload)
     assert stored_event == event
-    assert stored_payload == json.dumps(event, ensure_ascii=False, separators=(",", ":"))
+    assert stored_payload == json.dumps(expected_event, ensure_ascii=False, separators=(",", ":"))

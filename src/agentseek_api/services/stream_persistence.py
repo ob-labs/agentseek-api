@@ -17,6 +17,7 @@ _RUN_STREAM_SEQ_KEY_PREFIX = "agentseek:runs:stream-seq"
 _THREAD_STREAM_SEQ_KEY_PREFIX = "agentseek:threads:stream-seq"
 _RUN_STREAM_KEY_PREFIX = "agentseek:runs:stream"
 _THREAD_STREAM_KEY_PREFIX = "agentseek:threads:stream"
+_THREAD_STREAM_ENVELOPE_FIELDS = frozenset({"type", "event_id", "seq"})
 _redis_client: Redis | None = None
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,8 @@ async def _append_redis_stream_event_atomic(
     payload: dict[str, Any],
     event_prefix: str = "",
 ) -> tuple[int, dict[str, Any]]:
+    if event_prefix:
+        payload = {key: value for key, value in payload.items() if key not in _THREAD_STREAM_ENVELOPE_FIELDS}
     result = await _get_redis_client().eval(
         _APPEND_REDIS_STREAM_EVENT_SCRIPT,
         2,
