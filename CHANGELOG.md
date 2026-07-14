@@ -2,6 +2,21 @@
 
 Notable changes to AgentSeek API are documented in this file.
 
+## 0.2.1 - 2026-07-14
+
+### Fixed
+
+- Preserved empty JSON arrays in Redis thread-stream events by avoiding a Lua
+  cjson decode/encode round trip, while keeping generated envelope fields
+  authoritative.
+- Mirrored completed tool, human, and system messages to `messages-tuple` when
+  requested so LangGraph SDK clients receive tool results before final-answer
+  streaming completes.
+
+### Upgrade notes
+
+- No schema or configuration migration is required from 0.2.0.
+
 ## 0.2.0 - 2026-07-12
 
 ### Highlights
