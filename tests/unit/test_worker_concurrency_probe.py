@@ -324,8 +324,8 @@ def test_bounded_probe_proves_refill_before_long_run_finishes(probe_module: Modu
 
     assert list(runs) == ["long", "refill", "queued"]
     assert client.created == [
-        ("long", 3.5, False),
-        ("refill", 1.5, False),
+        ("long", 3.0, False),
+        ("refill", 1.0, False),
         ("queued", 0.1, False),
     ]
 
@@ -369,7 +369,7 @@ def test_fanout_probe_submits_twelve_runs_against_ten_slots(probe_module: Module
 
     assert len(runs) == 12
     assert client.created == [
-        *[(f"fanout-{index}", 8.0, False) for index in range(10)],
+        *[(f"fanout-{index}", 6.0, False) for index in range(10)],
         ("fanout-10", 0.1, False),
         ("fanout-11", 0.1, False),
     ]
@@ -396,7 +396,7 @@ def test_failure_probe_requires_error_and_sibling_successes(probe_module: Module
     assert list(runs) == ["failed", "long", "queued"]
     assert client.created == [
         ("failed", 1.5, True),
-        ("long", 3.5, False),
+        ("long", 3.0, False),
         ("queued", 0.1, False),
     ]
 
@@ -416,8 +416,8 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
     )
     assert list(runs) == ["long-a", "long-b", "queued"]
     assert seed_client.created == [
-        ("long-a", 10.0, False),
-        ("long-b", 10.0, False),
+        ("long-a", 6.0, False),
+        ("long-b", 6.0, False),
         ("queued", 0.1, False),
     ]
 

@@ -406,9 +406,8 @@ if ! uv run python scripts/verify_docker_api.py --base-url "$BASE_URL" --mode re
   exit 1
 fi
 
-WORKER_CONCURRENT_JOBS=2
-start_worker
-run_probe --mode bounded
+WORKER_CONCURRENCY_SUITE_STARTED_SECONDS=$SECONDS
+echo "worker concurrency probe suite started" >&2
 
 WORKER_CONCURRENT_JOBS=10
 start_worker
@@ -416,11 +415,11 @@ run_probe --mode fanout
 
 WORKER_CONCURRENT_JOBS=2
 start_worker
+run_probe --mode bounded
 run_probe --mode failure
-
-WORKER_CONCURRENT_JOBS=2
-start_worker
 run_probe --mode shutdown-seed >"$SHUTDOWN_STATE_FILE"
 stop_worker 1
 start_worker
 run_probe --mode shutdown-check --state-file "$SHUTDOWN_STATE_FILE"
+
+echo "worker concurrency probe suite completed in $((SECONDS - WORKER_CONCURRENCY_SUITE_STARTED_SECONDS))s" >&2

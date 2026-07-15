@@ -280,8 +280,8 @@ def run_bounded_probe(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, RunRef]:
     runs = {
-        "long": client.create_stress_run("long", delay_seconds=3.5),
-        "refill": client.create_stress_run("refill", delay_seconds=1.5),
+        "long": client.create_stress_run("long", delay_seconds=3.0),
+        "refill": client.create_stress_run("refill", delay_seconds=1.0),
         "queued": client.create_stress_run("queued", delay_seconds=0.1),
     }
     wait_for_queue_shape(
@@ -339,7 +339,7 @@ def run_fanout_probe(
 ) -> dict[str, RunRef]:
     runs: dict[str, RunRef] = {}
     for index in range(12):
-        delay_seconds = 8.0 if index < 10 else 0.1
+        delay_seconds = 6.0 if index < 10 else 0.1
         name = f"fanout-{index}"
         runs[name] = client.create_stress_run(name, delay_seconds=delay_seconds)
     wait_for_queue_shape(
@@ -379,7 +379,7 @@ def run_failure_probe(
 ) -> dict[str, RunRef]:
     runs = {
         "failed": client.create_stress_run("failed", delay_seconds=1.5, fail=True),
-        "long": client.create_stress_run("long", delay_seconds=3.5),
+        "long": client.create_stress_run("long", delay_seconds=3.0),
         "queued": client.create_stress_run("queued", delay_seconds=0.1),
     }
     wait_for_queue_shape(
@@ -418,8 +418,8 @@ def seed_shutdown_probe(
     monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, RunRef]:
     runs = {
-        "long-a": client.create_stress_run("long-a", delay_seconds=10.0),
-        "long-b": client.create_stress_run("long-b", delay_seconds=10.0),
+        "long-a": client.create_stress_run("long-a", delay_seconds=6.0),
+        "long-b": client.create_stress_run("long-b", delay_seconds=6.0),
         "queued": client.create_stress_run("queued", delay_seconds=0.1),
     }
     wait_for_queue_shape(
