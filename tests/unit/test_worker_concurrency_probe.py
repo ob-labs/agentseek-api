@@ -74,6 +74,7 @@ class FakeClock:
 
 
 def test_wait_for_queue_shape_rejects_processing_above_limit(probe_module: ModuleType) -> None:
+    clock = FakeClock()
     client = _client(
         probe_module,
         queue_snapshots=[probe_module.QueueSnapshot(pending=0, processing=3)],
@@ -85,7 +86,8 @@ def test_wait_for_queue_shape_rejects_processing_above_limit(probe_module: Modul
             concurrency=2,
             minimum_pending=1,
             timeout_seconds=0.01,
-            sleep=lambda _: None,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
         )
 
 
