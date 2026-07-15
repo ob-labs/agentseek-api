@@ -274,7 +274,10 @@ docker run -d \
 wait_for_redis
 
 if ! AGENTSEEK_TEST_REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0" \
-  uv run pytest tests/integration/test_live_redis_stream_persistence.py -q; then
+  uv run pytest \
+    tests/integration/test_live_redis_stream_persistence.py \
+    tests/integration/test_live_redis_queue.py \
+    -q; then
   print_logs
   exit 1
 fi
