@@ -257,6 +257,7 @@ def _wait_for_expected_statuses(
     concurrency: int,
     timeout_seconds: float,
     sleep: Callable[[float], None],
+    monotonic: Callable[[], float],
 ) -> None:
     for name, run in runs.items():
         wait_for_status(
@@ -266,6 +267,7 @@ def _wait_for_expected_statuses(
             concurrency=concurrency,
             timeout_seconds=timeout_seconds,
             sleep=sleep,
+            monotonic=monotonic,
         )
     validate_statuses(client, runs, expected_statuses, concurrency=concurrency)
 
@@ -275,6 +277,7 @@ def run_bounded_probe(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, RunRef]:
     runs = {
         "long": client.create_stress_run("long", delay_seconds=3.5),
@@ -287,6 +290,7 @@ def run_bounded_probe(
         minimum_pending=1,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
     wait_for_status(
         client,
@@ -295,6 +299,7 @@ def run_bounded_probe(
         concurrency=2,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
     _queue_snapshot_within_cap(client, concurrency=2)
     long_status = client.run_status(runs["long"])
@@ -312,9 +317,16 @@ def run_bounded_probe(
             concurrency=2,
             timeout_seconds=timeout_seconds,
             sleep=sleep,
+            monotonic=monotonic,
         )
     validate_statuses(client, runs, expected, concurrency=2)
-    wait_for_queues_empty(client, concurrency=2, timeout_seconds=timeout_seconds, sleep=sleep)
+    wait_for_queues_empty(
+        client,
+        concurrency=2,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
     return runs
 
 
@@ -323,6 +335,7 @@ def run_fanout_probe(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, RunRef]:
     runs: dict[str, RunRef] = {}
     for index in range(12):
@@ -335,6 +348,7 @@ def run_fanout_probe(
         minimum_pending=2,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
     expected = {name: "success" for name in runs}
     _wait_for_expected_statuses(
@@ -344,8 +358,15 @@ def run_fanout_probe(
         concurrency=10,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
-    wait_for_queues_empty(client, concurrency=10, timeout_seconds=timeout_seconds, sleep=sleep)
+    wait_for_queues_empty(
+        client,
+        concurrency=10,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
     return runs
 
 
@@ -354,6 +375,7 @@ def run_failure_probe(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, RunRef]:
     runs = {
         "failed": client.create_stress_run("failed", delay_seconds=1.5, fail=True),
@@ -366,6 +388,7 @@ def run_failure_probe(
         minimum_pending=1,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
     expected = {"failed": "error", "long": "success", "queued": "success"}
     _wait_for_expected_statuses(
@@ -375,8 +398,15 @@ def run_failure_probe(
         concurrency=2,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
-    wait_for_queues_empty(client, concurrency=2, timeout_seconds=timeout_seconds, sleep=sleep)
+    wait_for_queues_empty(
+        client,
+        concurrency=2,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
     return runs
 
 
@@ -385,6 +415,7 @@ def seed_shutdown_probe(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, RunRef]:
     runs = {
         "long-a": client.create_stress_run("long-a", delay_seconds=10.0),
@@ -397,6 +428,7 @@ def seed_shutdown_probe(
         minimum_pending=1,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
     validate_statuses(
         client,
@@ -413,6 +445,7 @@ def check_shutdown_probe(
     *,
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> None:
     expected = {"long-a": "success", "long-b": "success", "queued": "success"}
     _wait_for_expected_statuses(
@@ -422,8 +455,15 @@ def check_shutdown_probe(
         concurrency=2,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+        monotonic=monotonic,
     )
-    wait_for_queues_empty(client, concurrency=2, timeout_seconds=timeout_seconds, sleep=sleep)
+    wait_for_queues_empty(
+        client,
+        concurrency=2,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
+    )
 
 
 def _serialize_runs(runs: Mapping[str, RunRef]) -> dict[str, dict[str, str]]:

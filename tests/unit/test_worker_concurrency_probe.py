@@ -90,6 +90,7 @@ def test_wait_for_queue_shape_rejects_processing_above_limit(probe_module: Modul
 
 
 def test_wait_for_queue_shape_polls_until_expected_shape(probe_module: ModuleType) -> None:
+    clock = FakeClock()
     client = _client(
         probe_module,
         queue_snapshots=[
@@ -102,8 +103,9 @@ def test_wait_for_queue_shape_polls_until_expected_shape(probe_module: ModuleTyp
         client,
         concurrency=2,
         minimum_pending=1,
-        timeout_seconds=0.01,
-        sleep=lambda _: None,
+        timeout_seconds=0.2,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
     )
 
     assert snapshot == probe_module.QueueSnapshot(pending=1, processing=2)
@@ -297,6 +299,7 @@ def test_probe_client_reads_both_queue_lengths_in_one_atomic_redis_command(
 
 
 def test_bounded_probe_proves_refill_before_long_run_finishes(probe_module: ModuleType) -> None:
+    clock = FakeClock()
     client = _client(
         probe_module,
         queue_snapshots=[
@@ -310,7 +313,12 @@ def test_bounded_probe_proves_refill_before_long_run_finishes(probe_module: Modu
         },
     )
 
-    runs = probe_module.run_bounded_probe(client, timeout_seconds=0.01, sleep=lambda _: None)
+    runs = probe_module.run_bounded_probe(
+        client,
+        timeout_seconds=0.01,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
 
     assert list(runs) == ["long", "refill", "queued"]
     assert client.created == [
@@ -340,6 +348,7 @@ def test_bounded_probe_rejects_post_shape_processing_over_cap(probe_module: Modu
 
 
 def test_fanout_probe_submits_twelve_runs_against_ten_slots(probe_module: ModuleType) -> None:
+    clock = FakeClock()
     client = _client(
         probe_module,
         queue_snapshots=[
@@ -349,7 +358,12 @@ def test_fanout_probe_submits_twelve_runs_against_ten_slots(probe_module: Module
         statuses={f"fanout-{index}": "success" for index in range(12)},
     )
 
-    runs = probe_module.run_fanout_probe(client, timeout_seconds=0.01, sleep=lambda _: None)
+    runs = probe_module.run_fanout_probe(
+        client,
+        timeout_seconds=0.01,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
 
     assert len(runs) == 12
     assert client.created == [
@@ -360,6 +374,7 @@ def test_fanout_probe_submits_twelve_runs_against_ten_slots(probe_module: Module
 
 
 def test_failure_probe_requires_error_and_sibling_successes(probe_module: ModuleType) -> None:
+    clock = FakeClock()
     client = _client(
         probe_module,
         queue_snapshots=[
@@ -369,7 +384,12 @@ def test_failure_probe_requires_error_and_sibling_successes(probe_module: Module
         statuses={"failed": "error", "long": "success", "queued": "success"},
     )
 
-    runs = probe_module.run_failure_probe(client, timeout_seconds=0.01, sleep=lambda _: None)
+    runs = probe_module.run_failure_probe(
+        client,
+        timeout_seconds=0.01,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
+    )
 
     assert list(runs) == ["failed", "long", "queued"]
     assert client.created == [
@@ -380,6 +400,7 @@ def test_failure_probe_requires_error_and_sibling_successes(probe_module: Module
 
 
 def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module: ModuleType) -> None:
+    clock = FakeClock()
     seed_client = _client(
         probe_module,
         queue_snapshots=[probe_module.QueueSnapshot(pending=1, processing=2)],
@@ -388,7 +409,8 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
     runs = probe_module.seed_shutdown_probe(
         seed_client,
         timeout_seconds=0.01,
-        sleep=lambda _: None,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
     )
     assert list(runs) == ["long-a", "long-b", "queued"]
     assert seed_client.created == [
@@ -406,7 +428,8 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
         check_client,
         runs,
         timeout_seconds=0.01,
-        sleep=lambda _: None,
+        sleep=clock.sleep,
+        monotonic=clock.monotonic,
     )
 
 
