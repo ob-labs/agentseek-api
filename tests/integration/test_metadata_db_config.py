@@ -4,6 +4,7 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
+from agentseek_api.core import database as database_module
 from agentseek_api.core.database import DatabaseManager
 from agentseek_api.main import create_app
 from agentseek_api.settings import settings
@@ -51,10 +52,10 @@ async def _noop_ensure_default_assistants() -> None:
 
 
 def test_health_uses_postgresql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_calls: list[tuple[str, bool]] = []
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
 
-    def fake_create_async_engine(url: str, *, pool_pre_ping: bool) -> FakeEngine:
-        captured_calls.append((url, pool_pre_ping))
+    def fake_create_async_engine(url: str, **kwargs: Any) -> FakeEngine:
+        captured_calls.append((url, kwargs))
         return FakeEngine()
 
     monkeypatch.setattr("agentseek_api.core.database.create_async_engine", fake_create_async_engine)
@@ -77,14 +78,19 @@ def test_health_uses_postgresql_async_driver(monkeypatch: pytest.MonkeyPatch) ->
         response = client.get("/health")
         assert response.status_code == 200
 
-    assert captured_calls == [("postgresql+asyncpg://postgres:postgres@localhost:5432/agentseek", True)]
+    assert captured_calls == [
+        (
+            "postgresql+asyncpg://postgres:postgres@localhost:5432/agentseek",
+            {"pool_pre_ping": True, "pool_size": 10, "max_overflow": 5},
+        )
+    ]
 
 
 def test_health_uses_mysql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None:
-    captured_calls: list[tuple[str, bool]] = []
+    captured_calls: list[tuple[str, dict[str, Any]]] = []
 
-    def fake_create_async_engine(url: str, *, pool_pre_ping: bool) -> FakeEngine:
-        captured_calls.append((url, pool_pre_ping))
+    def fake_create_async_engine(url: str, **kwargs: Any) -> FakeEngine:
+        captured_calls.append((url, kwargs))
         return FakeEngine()
 
     monkeypatch.setattr("agentseek_api.core.database.create_async_engine", fake_create_async_engine)
@@ -107,4 +113,13 @@ def test_health_uses_mysql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None
         response = client.get("/health")
         assert response.status_code == 200
 
-    assert captured_calls == [("mysql+aiomysql://root%40test:@localhost:2881/seekdb", False)]
+    assert captured_calls == [
+        (
+            "mysql+aiomysql://root%40test:@localhost:2881/seekdb",
+            {"pool_pre_ping": False, "pool_size": 10, "max_overflow": 5},
+        )
+    ]
+
+
+def test_sqlite_metadata_engine_options_keep_dialect_defaults() -> None:
+    assert database_module._metadata_engine_options("sqlite") == {"pool_pre_ping": True}

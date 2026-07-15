@@ -20,6 +20,8 @@ from agentseek_api.settings import settings
 logger = logging.getLogger(__name__)
 
 DEFAULT_SEEKDB_URL = "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
+METADATA_DB_POOL_SIZE = 10
+METADATA_DB_MAX_OVERFLOW = 5
 
 
 def _resolve_embed_dir() -> str:
@@ -141,6 +143,15 @@ def resolve_metadata_db_url() -> str:
     return _ensure_async_driver(url=parsed_url, backend=backend).render_as_string(hide_password=False)
 
 
+def _metadata_engine_options(metadata_backend: str) -> dict[str, Any]:
+    options: dict[str, Any] = {"pool_pre_ping": metadata_backend != "mysql"}
+    if metadata_backend != "sqlite":
+        options.update(
+            pool_size=METADATA_DB_POOL_SIZE, max_overflow=METADATA_DB_MAX_OVERFLOW
+        )
+    return options
+
+
 class DatabaseManager:
     def __init__(self) -> None:
         self.engine: AsyncEngine | None = None
@@ -192,7 +203,7 @@ class DatabaseManager:
                 configured_backend=settings.METADATA_DB_BACKEND,
                 url_drivername=parsed_url.drivername,
             )
-            self.engine = create_async_engine(metadata_db_url, pool_pre_ping=metadata_backend != "mysql")
+            self.engine = create_async_engine(metadata_db_url, **_metadata_engine_options(metadata_backend))
             self.session_factory = async_sessionmaker(self.engine, expire_on_commit=False)
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
