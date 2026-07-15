@@ -8,6 +8,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+from redis import Redis
 
 
 PROBE_PATH = Path(__file__).resolve().parents[2] / "scripts" / "verify_worker_concurrency.py"
@@ -61,6 +62,17 @@ def _client(probe_module: ModuleType, **kwargs: Any) -> FakeProbeClient:
     return client
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
 def test_wait_for_queue_shape_rejects_processing_above_limit(probe_module: ModuleType) -> None:
     client = _client(
         probe_module,
@@ -97,7 +109,29 @@ def test_wait_for_queue_shape_polls_until_expected_shape(probe_module: ModuleTyp
     assert snapshot == probe_module.QueueSnapshot(pending=1, processing=2)
 
 
+def test_wait_for_queue_shape_timeout_reports_last_snapshot(probe_module: ModuleType) -> None:
+    clock = FakeClock()
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=0, processing=1)],
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"processing=2, pending>=1.*QueueSnapshot\(pending=0, processing=1\)",
+    ):
+        probe_module.wait_for_queue_shape(
+            client,
+            concurrency=2,
+            minimum_pending=1,
+            timeout_seconds=0.1,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+
 def test_wait_for_status_reports_last_observed_status_on_timeout(probe_module: ModuleType) -> None:
+    clock = FakeClock()
     run = probe_module.RunRef("thread-1", "run-1")
     client = _client(
         probe_module,
@@ -110,7 +144,30 @@ def test_wait_for_status_reports_last_observed_status_on_timeout(probe_module: M
             client,
             run,
             expected_status="success",
-            timeout_seconds=0.001,
+            concurrency=2,
+            timeout_seconds=0.1,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+
+def test_wait_for_status_rejects_processing_above_limit_before_success(
+    probe_module: ModuleType,
+) -> None:
+    run = probe_module.RunRef("thread-1", "run-1")
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=0, processing=3)],
+        statuses={"run-1": "success"},
+    )
+
+    with pytest.raises(AssertionError, match="exceeded concurrency limit 2"):
+        probe_module.wait_for_status(
+            client,
+            run,
+            expected_status="success",
+            concurrency=2,
+            timeout_seconds=1.0,
             sleep=lambda _: None,
         )
 
@@ -131,6 +188,7 @@ def test_validate_recovery_statuses_requires_expected_terminal_states(probe_modu
                 "queued": probe_module.RunRef("t3", "r3"),
             },
             {"failed": "error", "long": "success", "queued": "success"},
+            concurrency=2,
         )
 
 
@@ -167,20 +225,11 @@ class FakeHttpClient:
 
 
 class FakeRedisClient:
-    def __init__(self) -> None:
-        self.lengths = {
-            "agentseek:runs:pending": 4,
-            "agentseek:runs:processing": 2,
-        }
-
-    def llen(self, key: str) -> int:
-        return self.lengths[key]
-
     def close(self) -> None:
         return None
 
 
-def test_probe_client_uses_stress_graph_http_contract_and_real_queue_keys(probe_module: ModuleType) -> None:
+def test_probe_client_uses_stress_graph_http_contract(probe_module: ModuleType) -> None:
     http_client = FakeHttpClient()
     redis_client = FakeRedisClient()
     client = probe_module.ProbeClient(
@@ -208,7 +257,43 @@ def test_probe_client_uses_stress_graph_http_contract_and_real_queue_keys(probe_
     )
     assert client.run_status(run) == "running"
     assert http_client.gets == ["/threads/thread-1/runs/run-1"]
+
+
+def test_probe_client_reads_both_queue_lengths_in_one_atomic_redis_command(
+    probe_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[tuple[object, ...]] = []
+    redis_client = Redis()
+
+    def execute_command(*args: object, **_options: object) -> object:
+        commands.append(args)
+        if args[0] == "EVAL":
+            return [4, 2]
+        if args[0] == "LLEN":
+            return 4 if args[1] == "agentseek:runs:pending" else 2
+        raise AssertionError(f"unexpected Redis command: {args!r}")
+
+    monkeypatch.setattr(redis_client, "execute_command", execute_command)
+    client = probe_module.ProbeClient(
+        base_url="http://127.0.0.1:2024",
+        redis_url="redis://127.0.0.1:6379/0",
+        http_client=FakeHttpClient(),
+        redis_client=redis_client,
+    )
+
     assert client.queue_snapshot() == probe_module.QueueSnapshot(pending=4, processing=2)
+    assert len(commands) == 1
+    command = commands[0]
+    assert command[0] == "EVAL"
+    assert command[2:] == (
+        2,
+        "agentseek:runs:pending",
+        "agentseek:runs:processing",
+    )
+    script = command[1]
+    assert isinstance(script, str)
+    assert script.count("redis.call('LLEN'") == 2
 
 
 def test_bounded_probe_proves_refill_before_long_run_finishes(probe_module: ModuleType) -> None:
@@ -235,6 +320,25 @@ def test_bounded_probe_proves_refill_before_long_run_finishes(probe_module: Modu
     ]
 
 
+def test_bounded_probe_rejects_post_shape_processing_over_cap(probe_module: ModuleType) -> None:
+    client = _client(
+        probe_module,
+        queue_snapshots=[
+            probe_module.QueueSnapshot(pending=1, processing=2),
+            probe_module.QueueSnapshot(pending=0, processing=3),
+            probe_module.QueueSnapshot(pending=0, processing=0),
+        ],
+        statuses={
+            "long": ["running", "success", "success"],
+            "refill": ["success", "success"],
+            "queued": ["success", "success"],
+        },
+    )
+
+    with pytest.raises(AssertionError, match="exceeded concurrency limit 2"):
+        probe_module.run_bounded_probe(client, timeout_seconds=1.0, sleep=lambda _: None)
+
+
 def test_fanout_probe_submits_twelve_runs_against_ten_slots(probe_module: ModuleType) -> None:
     client = _client(
         probe_module,
@@ -248,7 +352,11 @@ def test_fanout_probe_submits_twelve_runs_against_ten_slots(probe_module: Module
     runs = probe_module.run_fanout_probe(client, timeout_seconds=0.01, sleep=lambda _: None)
 
     assert len(runs) == 12
-    assert all(delay == 3.5 and not fail for _, delay, fail in client.created)
+    assert client.created == [
+        *[(f"fanout-{index}", 8.0, False) for index in range(10)],
+        ("fanout-10", 0.1, False),
+        ("fanout-11", 0.1, False),
+    ]
 
 
 def test_failure_probe_requires_error_and_sibling_successes(probe_module: ModuleType) -> None:
@@ -275,6 +383,7 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
     seed_client = _client(
         probe_module,
         queue_snapshots=[probe_module.QueueSnapshot(pending=1, processing=2)],
+        statuses={"long-a": "running", "long-b": "running"},
     )
     runs = probe_module.seed_shutdown_probe(
         seed_client,
@@ -283,8 +392,8 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
     )
     assert list(runs) == ["long-a", "long-b", "queued"]
     assert seed_client.created == [
-        ("long-a", 6.0, False),
-        ("long-b", 6.0, False),
+        ("long-a", 10.0, False),
+        ("long-b", 10.0, False),
         ("queued", 0.1, False),
     ]
 
@@ -298,6 +407,120 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
         runs,
         timeout_seconds=0.01,
         sleep=lambda _: None,
+    )
+
+
+def test_shutdown_seed_requires_both_long_runs_to_still_be_running(
+    probe_module: ModuleType,
+) -> None:
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=1, processing=2)],
+        statuses={"long-a": "running", "long-b": "success"},
+    )
+
+    with pytest.raises(AssertionError, match=r"long-b='success'.*'running'"):
+        probe_module.seed_shutdown_probe(client, timeout_seconds=1.0, sleep=lambda _: None)
+
+
+def test_wait_for_queues_empty_timeout_reports_last_snapshot(probe_module: ModuleType) -> None:
+    clock = FakeClock()
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=2, processing=1)],
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=r"did not drain.*QueueSnapshot\(pending=2, processing=1\)",
+    ):
+        probe_module.wait_for_queues_empty(
+            client,
+            concurrency=2,
+            timeout_seconds=0.1,
+            sleep=clock.sleep,
+            monotonic=clock.monotonic,
+        )
+
+
+def test_wait_for_queues_empty_rejects_processing_above_limit(probe_module: ModuleType) -> None:
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=0, processing=3)],
+    )
+
+    with pytest.raises(AssertionError, match="exceeded concurrency limit 2"):
+        probe_module.wait_for_queues_empty(
+            client,
+            concurrency=2,
+            timeout_seconds=1.0,
+            sleep=lambda _: None,
+        )
+
+
+def test_load_runs_reads_serialized_restart_state(
+    probe_module: ModuleType,
+    tmp_path: Path,
+) -> None:
+    state_file = tmp_path / "restart.json"
+    state_file.write_text(
+        '{"mode":"shutdown-seed","runs":{"long-a":{"thread_id":"t-a","run_id":"r-a"}}}',
+        encoding="utf-8",
+    )
+
+    assert probe_module._load_runs(state_file) == {
+        "long-a": probe_module.RunRef(thread_id="t-a", run_id="r-a")
+    }
+
+
+def test_load_runs_rejects_non_object_run_state(
+    probe_module: ModuleType,
+    tmp_path: Path,
+) -> None:
+    state_file = tmp_path / "invalid.json"
+    state_file.write_text('{"runs":[]}', encoding="utf-8")
+
+    with pytest.raises(SystemExit, match="runs object"):
+        probe_module._load_runs(state_file)
+
+
+def test_main_emits_one_json_document_and_no_other_output(
+    probe_module: ModuleType,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    runs = {"long": probe_module.RunRef(thread_id="thread-1", run_id="run-1")}
+
+    class MainProbeClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def __enter__(self) -> MainProbeClient:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    monkeypatch.setattr(probe_module, "ProbeClient", MainProbeClient)
+    monkeypatch.setattr(probe_module, "run_bounded_probe", lambda *_args, **_kwargs: runs)
+
+    result = probe_module.main(
+        [
+            "--base-url",
+            "http://127.0.0.1:2024",
+            "--redis-url",
+            "redis://127.0.0.1:6379/0",
+            "--mode",
+            "bounded",
+        ]
+    )
+
+    captured = capsys.readouterr()
+    assert result == 0
+    assert captured.err == ""
+    assert captured.out == (
+        '{"mode": "bounded", "runs": {"long": {"run_id": "run-1", '
+        '"thread_id": "thread-1"}}}\n'
     )
 
 

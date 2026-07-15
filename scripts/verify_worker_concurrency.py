@@ -17,6 +17,12 @@ PROCESSING_QUEUE_KEY = "agentseek:runs:processing"
 TERMINAL_STATUSES = frozenset({"error", "interrupted", "success"})
 POLL_INTERVAL_SECONDS = 0.05
 DEFAULT_TIMEOUT_SECONDS = 20.0
+QUEUE_SNAPSHOT_SCRIPT = """
+return {
+    redis.call('LLEN', KEYS[1]),
+    redis.call('LLEN', KEYS[2])
+}
+""".strip()
 
 
 @dataclass(frozen=True, slots=True)
@@ -130,10 +136,28 @@ class ProbeClient:
         return status
 
     def queue_snapshot(self) -> QueueSnapshot:
-        return QueueSnapshot(
-            pending=int(self._redis.llen(PENDING_QUEUE_KEY)),
-            processing=int(self._redis.llen(PROCESSING_QUEUE_KEY)),
+        lengths = self._redis.eval(
+            QUEUE_SNAPSHOT_SCRIPT,
+            2,
+            PENDING_QUEUE_KEY,
+            PROCESSING_QUEUE_KEY,
         )
+        if not isinstance(lengths, (list, tuple)) or len(lengths) != 2:
+            raise AssertionError(f"atomic Redis queue snapshot returned invalid lengths: {lengths!r}")
+        return QueueSnapshot(pending=int(lengths[0]), processing=int(lengths[1]))
+
+
+def _queue_snapshot_within_cap(
+    client: ProbeOperations,
+    *,
+    concurrency: int,
+) -> QueueSnapshot:
+    snapshot = client.queue_snapshot()
+    if snapshot.processing > concurrency:
+        raise AssertionError(
+            f"processing count {snapshot.processing} exceeded concurrency limit {concurrency}"
+        )
+    return snapshot
 
 
 def wait_for_queue_shape(
@@ -143,15 +167,12 @@ def wait_for_queue_shape(
     minimum_pending: int,
     timeout_seconds: float,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> QueueSnapshot:
-    deadline = time.monotonic() + timeout_seconds
+    deadline = monotonic() + timeout_seconds
     last_snapshot: QueueSnapshot | None = None
-    while time.monotonic() < deadline:
-        last_snapshot = client.queue_snapshot()
-        if last_snapshot.processing > concurrency:
-            raise AssertionError(
-                f"processing count {last_snapshot.processing} exceeded concurrency limit {concurrency}"
-            )
+    while monotonic() < deadline:
+        last_snapshot = _queue_snapshot_within_cap(client, concurrency=concurrency)
         if last_snapshot.processing == concurrency and last_snapshot.pending >= minimum_pending:
             return last_snapshot
         sleep(POLL_INTERVAL_SECONDS)
@@ -166,12 +187,15 @@ def wait_for_status(
     run: RunRef,
     *,
     expected_status: str,
+    concurrency: int,
     timeout_seconds: float,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> str:
-    deadline = time.monotonic() + timeout_seconds
+    deadline = monotonic() + timeout_seconds
     last_status: str | None = None
-    while time.monotonic() < deadline:
+    while monotonic() < deadline:
+        _queue_snapshot_within_cap(client, concurrency=concurrency)
         last_status = client.run_status(run)
         if last_status == expected_status:
             return last_status
@@ -189,6 +213,8 @@ def validate_statuses(
     client: ProbeOperations,
     runs: Mapping[str, RunRef],
     expected_statuses: Mapping[str, str],
+    *,
+    concurrency: int,
 ) -> None:
     if runs.keys() != expected_statuses.keys():
         raise AssertionError(
@@ -196,6 +222,7 @@ def validate_statuses(
         )
     mismatches: list[str] = []
     for name, run in runs.items():
+        _queue_snapshot_within_cap(client, concurrency=concurrency)
         actual = client.run_status(run)
         expected = expected_statuses[name]
         if actual != expected:
@@ -207,13 +234,15 @@ def validate_statuses(
 def wait_for_queues_empty(
     client: ProbeOperations,
     *,
+    concurrency: int,
     timeout_seconds: float,
     sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> QueueSnapshot:
-    deadline = time.monotonic() + timeout_seconds
+    deadline = monotonic() + timeout_seconds
     last_snapshot: QueueSnapshot | None = None
-    while time.monotonic() < deadline:
-        last_snapshot = client.queue_snapshot()
+    while monotonic() < deadline:
+        last_snapshot = _queue_snapshot_within_cap(client, concurrency=concurrency)
         if last_snapshot == QueueSnapshot(pending=0, processing=0):
             return last_snapshot
         sleep(POLL_INTERVAL_SECONDS)
@@ -225,6 +254,7 @@ def _wait_for_expected_statuses(
     runs: Mapping[str, RunRef],
     expected_statuses: Mapping[str, str],
     *,
+    concurrency: int,
     timeout_seconds: float,
     sleep: Callable[[float], None],
 ) -> None:
@@ -233,10 +263,11 @@ def _wait_for_expected_statuses(
             client,
             run,
             expected_status=expected_statuses[name],
+            concurrency=concurrency,
             timeout_seconds=timeout_seconds,
             sleep=sleep,
         )
-    validate_statuses(client, runs, expected_statuses)
+    validate_statuses(client, runs, expected_statuses, concurrency=concurrency)
 
 
 def run_bounded_probe(
@@ -261,9 +292,11 @@ def run_bounded_probe(
         client,
         runs["queued"],
         expected_status="success",
+        concurrency=2,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
     )
+    _queue_snapshot_within_cap(client, concurrency=2)
     long_status = client.run_status(runs["long"])
     if long_status != "running":
         raise AssertionError(
@@ -276,11 +309,12 @@ def run_bounded_probe(
             client,
             runs[name],
             expected_status="success",
+            concurrency=2,
             timeout_seconds=timeout_seconds,
             sleep=sleep,
         )
-    validate_statuses(client, runs, expected)
-    wait_for_queues_empty(client, timeout_seconds=timeout_seconds, sleep=sleep)
+    validate_statuses(client, runs, expected, concurrency=2)
+    wait_for_queues_empty(client, concurrency=2, timeout_seconds=timeout_seconds, sleep=sleep)
     return runs
 
 
@@ -290,10 +324,11 @@ def run_fanout_probe(
     timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, RunRef]:
-    runs = {
-        f"fanout-{index}": client.create_stress_run(f"fanout-{index}", delay_seconds=3.5)
-        for index in range(12)
-    }
+    runs: dict[str, RunRef] = {}
+    for index in range(12):
+        delay_seconds = 8.0 if index < 10 else 0.1
+        name = f"fanout-{index}"
+        runs[name] = client.create_stress_run(name, delay_seconds=delay_seconds)
     wait_for_queue_shape(
         client,
         concurrency=10,
@@ -306,10 +341,11 @@ def run_fanout_probe(
         client,
         runs,
         expected,
+        concurrency=10,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
     )
-    wait_for_queues_empty(client, timeout_seconds=timeout_seconds, sleep=sleep)
+    wait_for_queues_empty(client, concurrency=10, timeout_seconds=timeout_seconds, sleep=sleep)
     return runs
 
 
@@ -336,10 +372,11 @@ def run_failure_probe(
         client,
         runs,
         expected,
+        concurrency=2,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
     )
-    wait_for_queues_empty(client, timeout_seconds=timeout_seconds, sleep=sleep)
+    wait_for_queues_empty(client, concurrency=2, timeout_seconds=timeout_seconds, sleep=sleep)
     return runs
 
 
@@ -350,8 +387,8 @@ def seed_shutdown_probe(
     sleep: Callable[[float], None] = time.sleep,
 ) -> dict[str, RunRef]:
     runs = {
-        "long-a": client.create_stress_run("long-a", delay_seconds=6.0),
-        "long-b": client.create_stress_run("long-b", delay_seconds=6.0),
+        "long-a": client.create_stress_run("long-a", delay_seconds=10.0),
+        "long-b": client.create_stress_run("long-b", delay_seconds=10.0),
         "queued": client.create_stress_run("queued", delay_seconds=0.1),
     }
     wait_for_queue_shape(
@@ -360,6 +397,12 @@ def seed_shutdown_probe(
         minimum_pending=1,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
+    )
+    validate_statuses(
+        client,
+        {name: runs[name] for name in ("long-a", "long-b")},
+        {"long-a": "running", "long-b": "running"},
+        concurrency=2,
     )
     return runs
 
@@ -376,10 +419,11 @@ def check_shutdown_probe(
         client,
         runs,
         expected,
+        concurrency=2,
         timeout_seconds=timeout_seconds,
         sleep=sleep,
     )
-    wait_for_queues_empty(client, timeout_seconds=timeout_seconds, sleep=sleep)
+    wait_for_queues_empty(client, concurrency=2, timeout_seconds=timeout_seconds, sleep=sleep)
 
 
 def _serialize_runs(runs: Mapping[str, RunRef]) -> dict[str, dict[str, str]]:
