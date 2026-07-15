@@ -63,6 +63,13 @@ class FakeRedis:
         return True
 
     async def eval(self, script: str, numkeys: int, *args: str) -> int:
+        if "LREM" in script:
+            assert numkeys == 2
+            worker_key, processing_key, owner, token = args
+            if self.values.get(worker_key) != owner:
+                return 0
+            return await self.lrem(processing_key, 1, token)
+
         assert numkeys == 1
         key = args[0]
         owner = args[1]
@@ -133,6 +140,25 @@ async def test_redis_queue_releases_worker_lock_only_for_current_owner() -> None
     await queue.release_worker_lock("worker-a")
 
     assert client.values["worker"] == "worker-b"
+
+
+@pytest.mark.asyncio
+async def test_redis_queue_acknowledges_only_for_current_worker_lock_owner() -> None:
+    client = FakeRedis()
+    queue = RedisRunQueue(
+        client=client,
+        processing_key="processing",
+        worker_lock_key="worker",
+    )
+    token = RedisRunQueue._serialize(_job("run-1"))
+    client.lists["processing"] = [token]
+    client.values["worker"] = "worker-b"
+
+    assert await queue.ack_if_worker_lock_owner("worker-a", token) is False
+    assert client.lists["processing"] == [token]
+
+    assert await queue.ack_if_worker_lock_owner("worker-b", token) is True
+    assert client.lists["processing"] == []
 
 
 @pytest.mark.asyncio
