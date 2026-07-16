@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://127.0.0.1:6379/0"
     REDIS_RUN_QUEUE_KEY: str = "agentseek:runs:pending"
     REDIS_RUN_PROCESSING_KEY: str = "agentseek:runs:processing"
+    WORKER_CONCURRENT_JOBS: int = 10
     REDIS_WORKER_POLL_TIMEOUT_SECONDS: int = 1
     REDIS_WORKER_LOCK_KEY: str = "agentseek:worker:active"
     REDIS_WORKER_LOCK_TTL_SECONDS: int = 30

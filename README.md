@@ -622,6 +622,8 @@ parent api build --config ./langgraph.json -t my-api:dev
   - `REDIS_URL=redis://127.0.0.1:6379/0`
   - `REDIS_RUN_QUEUE_KEY=agentseek:runs:pending`
   - `REDIS_RUN_PROCESSING_KEY=agentseek:runs:processing`
+  - `WORKER_CONCURRENT_JOBS=10` bounds concurrently executing jobs in one
+    worker process
   - `REDIS_WORKER_LOCK_KEY=agentseek:worker:active`
   - `REDIS_WORKER_LOCK_TTL_SECONDS=30`
   - `REDIS_STREAM_MAXLEN=10000`

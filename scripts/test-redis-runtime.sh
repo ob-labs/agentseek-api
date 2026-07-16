@@ -18,13 +18,23 @@ SEEKDB_DOCKER_IMAGE="${SEEKDB_DOCKER_IMAGE:-}"
 OCEANBASE_DOCKER_MODE="${OCEANBASE_DOCKER_MODE:-mini}"
 STATE_DIR="${STATE_DIR:-$ROOT_DIR/.tmp/redis-runtime}"
 RESUME_STATE_FILE="$STATE_DIR/resume-state.json"
+SHUTDOWN_STATE_FILE=""
+REDIS_WORKER_LOCK_KEY="${REDIS_WORKER_LOCK_KEY:-agentseek:worker:active}"
+WORKER_CONCURRENT_JOBS="${WORKER_CONCURRENT_JOBS:-10}"
 
 cleanup() {
-  stop_worker
+  local status=$?
+
+  trap - EXIT
+  stop_worker >/dev/null 2>&1 || true
   docker rm -f "$API_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$BACKEND_CONTAINER" >/dev/null 2>&1 || true
   docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
+  if [[ -n "$SHUTDOWN_STATE_FILE" ]]; then
+    rm -f "$SHUTDOWN_STATE_FILE" || true
+  fi
+  exit "$status"
 }
 
 print_logs() {
@@ -197,19 +207,70 @@ PY
 }
 
 stop_worker() {
-  if docker ps --format '{{.Names}}' | grep -Fxq "$WORKER_CONTAINER"; then
-    docker stop -t 10 "$WORKER_CONTAINER" >/dev/null 2>&1 || true
+  local timeout="${1:-10}"
+  local container_id
+  local running
+  local status
+
+  if container_id="$(docker ps -aq --filter "name=^/${WORKER_CONTAINER}$")"; then
+    :
+  else
+    status=$?
+    print_logs >&2
+    return "$status"
   fi
-  docker rm -f "$WORKER_CONTAINER" >/dev/null 2>&1 || true
+  if [[ -z "$container_id" ]]; then
+    return 0
+  fi
+
+  if running="$(docker inspect --format '{{.State.Running}}' "$container_id")"; then
+    :
+  else
+    status=$?
+    print_logs >&2
+    return "$status"
+  fi
+  if [[ "$running" == "true" ]]; then
+    if docker stop -t "$timeout" "$WORKER_CONTAINER" >/dev/null; then
+      :
+    else
+      status=$?
+      print_logs >&2
+      return "$status"
+    fi
+  fi
+  if docker rm -f "$WORKER_CONTAINER" >/dev/null; then
+    :
+  else
+    status=$?
+    print_logs >&2
+    return "$status"
+  fi
+  if docker exec "$REDIS_CONTAINER" redis-cli DEL "$REDIS_WORKER_LOCK_KEY" >/dev/null; then
+    return 0
+  else
+    status=$?
+    print_logs >&2
+    return "$status"
+  fi
 }
 
 start_worker() {
-  stop_worker
-  docker run -d \
+  local status
+
+  if stop_worker; then
+    :
+  else
+    status=$?
+    return "$status"
+  fi
+  if docker run -d \
     --name "$WORKER_CONTAINER" \
     --network "$NETWORK_NAME" \
     -e EXECUTOR_BACKEND=redis \
     -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
+    -e REDIS_WORKER_LOCK_KEY="${REDIS_WORKER_LOCK_KEY}" \
+    -e WORKER_CONCURRENT_JOBS="${WORKER_CONCURRENT_JOBS}" \
     -e SEEKDB_URL="${SEEKDB_URL}" \
     -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
     -e OCEANBASE_PORT="${OCEANBASE_PORT}" \
@@ -217,7 +278,28 @@ start_worker() {
     -e OCEANBASE_PASSWORD="${OCEANBASE_PASSWORD}" \
     -e OCEANBASE_DB_NAME="${OCEANBASE_DB_NAME}" \
     "$IMAGE_TAG" \
-    python -m agentseek_api.cli worker >/dev/null
+    python -m agentseek_api.cli worker >/dev/null; then
+    return 0
+  else
+    status=$?
+    print_logs >&2
+    return "$status"
+  fi
+}
+
+run_probe() {
+  local status
+
+  if uv run python scripts/verify_worker_concurrency.py \
+    --base-url "$BASE_URL" \
+    --redis-url "redis://127.0.0.1:${REDIS_HOST_PORT}/0" \
+    "$@"; then
+    return 0
+  else
+    status=$?
+    print_logs >&2
+    return "$status"
+  fi
 }
 
 start_backend() {
@@ -259,6 +341,7 @@ set_backend_defaults "$SEEKDB_DOCKER_BACKEND"
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 docker network create "$NETWORK_NAME" >/dev/null
 mkdir -p "$STATE_DIR"
+SHUTDOWN_STATE_FILE="$(mktemp "$STATE_DIR/shutdown-state.XXXXXX")"
 
 uv run agentseek-api build --config "$CONFIG_PATH" -t "$IMAGE_TAG"
 
@@ -274,7 +357,10 @@ docker run -d \
 wait_for_redis
 
 if ! AGENTSEEK_TEST_REDIS_URL="redis://127.0.0.1:${REDIS_HOST_PORT}/0" \
-  uv run pytest tests/integration/test_live_redis_stream_persistence.py -q; then
+  uv run pytest \
+    tests/integration/test_live_redis_stream_persistence.py \
+    tests/integration/test_live_redis_queue.py \
+    -q; then
   print_logs
   exit 1
 fi
@@ -319,3 +405,21 @@ if ! uv run python scripts/verify_docker_api.py --base-url "$BASE_URL" --mode re
   print_logs
   exit 1
 fi
+
+WORKER_CONCURRENCY_SUITE_STARTED_SECONDS=$SECONDS
+echo "worker concurrency probe suite started" >&2
+
+WORKER_CONCURRENT_JOBS=10
+start_worker
+run_probe --mode fanout
+
+WORKER_CONCURRENT_JOBS=2
+start_worker
+run_probe --mode bounded
+run_probe --mode failure
+run_probe --mode shutdown-seed >"$SHUTDOWN_STATE_FILE"
+stop_worker 1
+start_worker
+run_probe --mode shutdown-check --state-file "$SHUTDOWN_STATE_FILE"
+
+echo "worker concurrency probe suite completed in $((SECONDS - WORKER_CONCURRENCY_SUITE_STARTED_SECONDS))s" >&2

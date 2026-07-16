@@ -21,6 +21,13 @@ end
 return 0
 """
 
+_ACK_IF_WORKER_LOCK_OWNER_SCRIPT = """
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+  return redis.call("LREM", KEYS[2], 1, ARGV[2])
+end
+return 0
+"""
+
 
 class RedisRunQueue:
     def __init__(
@@ -50,6 +57,17 @@ class RedisRunQueue:
 
     async def ack(self, token: str) -> None:
         await self.client.lrem(self.processing_key, 1, token)
+
+    async def ack_if_worker_lock_owner(self, worker_id: str, token: str) -> bool:
+        acknowledged = await self.client.eval(
+            _ACK_IF_WORKER_LOCK_OWNER_SCRIPT,
+            2,
+            self.worker_lock_key,
+            self.processing_key,
+            worker_id,
+            token,
+        )
+        return bool(acknowledged)
 
     async def contains_run(self, *, run_id: str) -> bool:
         for key in (self.queue_key, self.processing_key):
