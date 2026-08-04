@@ -227,3 +227,75 @@ def test_run_context_params_persist_in_checkpoint_metadata(client: TestClient) -
     metadata = checkpoint.metadata or {}
     assert metadata.get("tenant") == "acme"
     assert metadata.get("client_param") == "x"
+
+def test_run_uses_assistant_config_defaults(client: TestClient) -> None:
+    """Assistant-level config.configurable is carried into the run (aegra parity)."""
+    assistant = client.post(
+        "/assistants",
+        json={
+            "name": "cfg-defaults",
+            "graph_id": "default",
+            "config": {"configurable": {"client_param": "assistant-default"}},
+        },
+    )
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "cfg-defaults"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    run = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "hello"}},
+    )
+    assert run.status_code == 200
+    run_id = run.json()["run_id"]
+
+    run_read = client.get(f"/threads/{thread_id}/runs/{run_id}")
+    assert run_read.status_code == 200
+    assert run_read.json()["status"] == "success"
+
+    # The persisted run kwargs carry the assistant config as defaults.
+    kwargs = run_read.json().get("kwargs") or {}
+    config = kwargs.get("config") or {}
+    assert config.get("configurable", {}).get("client_param") == "assistant-default"
+
+
+def test_run_client_config_overrides_assistant_config_defaults(client: TestClient) -> None:
+    """Client config.configurable wins over the assistant default without wiping it."""
+    assistant = client.post(
+        "/assistants",
+        json={
+            "name": "cfg-override",
+            "graph_id": "default",
+            "config": {"configurable": {"client_param": "assistant-default", "model": "assistant-model"}},
+        },
+    )
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "cfg-override"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    run = client.post(
+        f"/threads/{thread_id}/runs",
+        json={
+            "assistant_id": assistant_id,
+            "input": {"message": "hello"},
+            "config": {"configurable": {"model": "client-model"}},
+        },
+    )
+    assert run.status_code == 200
+    run_id = run.json()["run_id"]
+
+    run_read = client.get(f"/threads/{thread_id}/runs/{run_id}")
+    assert run_read.status_code == 200
+    assert run_read.json()["status"] == "success"
+
+    kwargs = run_read.json().get("kwargs") or {}
+    config = kwargs.get("config") or {}
+    configurable = config.get("configurable") or {}
+    assert configurable.get("client_param") == "assistant-default"
+    assert configurable.get("model") == "client-model"

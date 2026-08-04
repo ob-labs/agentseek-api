@@ -551,3 +551,142 @@ async def test_resume_run_reports_not_interrupted_when_claim_fails_without_activ
             resume="world",
             user=User(identity="u1", is_authenticated=True),
         )
+
+def _make_assistant(*, config_json=None, context_json=None) -> object:
+    """Build a fake assistant ORM row for _prepare_run tests."""
+    return type(
+        "FakeAssistant",
+        (),
+        {
+            "assistant_id": "a1",
+            "graph_id": "default",
+            "context_json": context_json,
+            "config_json": config_json,
+        },
+    )()
+
+
+def _make_db_run() -> object:
+    return type(
+        "DbRun",
+        (),
+        {
+            "run_id": "r1",
+            "thread_id": "t1",
+            "assistant_id": "a1",
+            "user_id": "u1",
+            "status": "pending",
+            "input_json": {"x": 1},
+            "output_json": None,
+            "last_error": None,
+        },
+    )()
+
+
+def _make_thread() -> object:
+    return type(
+        "FakeThread",
+        (),
+        {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}},
+    )()
+
+
+async def _prepare_with_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    assistant: object,
+    kwargs: dict[str, Any] | None = None,
+) -> DeferredExecutor:
+    create_session = FakeSession([_make_thread(), assistant], execute_rowcounts=[1])
+    reload_session = FakeSession([_make_db_run()])
+    session_factory = FakeSessionFactory([create_session, reload_session])
+    executor = DeferredExecutor()
+    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: executor)
+    await run_prep_module.prepare_and_submit_run(
+        thread_id="t1",
+        assistant_id="a1",
+        payload={"x": 1},
+        user=User(identity="u1", is_authenticated=True),
+        kwargs=kwargs,
+    )
+    return executor
+
+
+def test_merge_config_defaults() -> None:
+    """Unit coverage for the aegra-style assistant config merge helper."""
+    merge = run_prep_module._merge_config_defaults
+
+    # No assistant config -> client config passes through untouched (copy).
+    assert merge({}, {"configurable": {"a": 1}}) == {"configurable": {"a": 1}}
+
+    # Assistant-only config surfaces as defaults.
+    assert merge({"configurable": {"tender_text": "hello"}}, {}) == {"configurable": {"tender_text": "hello"}}
+
+    # Client wins on top-level keys.
+    assert merge({"recursion_limit": 10}, {"recursion_limit": 25}) == {"recursion_limit": 25}
+
+    # configurable merged one level deeper: assistant defaults preserved, client wins per-key.
+    merged = merge(
+        {"configurable": {"tender_text": "hello", "model": "assistant-model"}},
+        {"configurable": {"model": "client-model"}},
+    )
+    assert merged == {"configurable": {"tender_text": "hello", "model": "client-model"}}
+
+    # Non-dict configurable values fall back to plain top-level merge.
+    assert merge({"configurable": "bad"}, {"configurable": {"a": 1}}) == {"configurable": {"a": 1}}
+
+
+@pytest.mark.asyncio
+async def test_prepare_run_merges_assistant_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assistant-level config.configurable becomes the run config default (aegra parity)."""
+    assistant = _make_assistant(config_json={"configurable": {"tender_text": "hello"}})
+    executor = await _prepare_with_kwargs(monkeypatch, assistant=assistant)
+
+    assert len(executor.submitted) == 1
+    assert executor.submitted[0].kwargs["config"] == {"configurable": {"tender_text": "hello"}}
+
+
+@pytest.mark.asyncio
+async def test_prepare_run_client_config_overrides_assistant_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Client configurable keys win while assistant defaults are preserved."""
+    assistant = _make_assistant(config_json={"configurable": {"tender_text": "hello", "model": "assistant-model"}})
+    executor = await _prepare_with_kwargs(
+        monkeypatch,
+        assistant=assistant,
+        kwargs={"config": {"configurable": {"model": "client-model"}}},
+    )
+
+    assert len(executor.submitted) == 1
+    assert executor.submitted[0].kwargs["config"] == {
+        "configurable": {"tender_text": "hello", "model": "client-model"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_prepare_run_merges_assistant_config_and_context(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assistant config and context both flow into run kwargs."""
+    assistant = _make_assistant(
+        config_json={"configurable": {"tender_text": "hello"}},
+        context_json={"tenant": "acme"},
+    )
+    executor = await _prepare_with_kwargs(monkeypatch, assistant=assistant)
+
+    assert len(executor.submitted) == 1
+    submitted = executor.submitted[0].kwargs
+    assert submitted["config"] == {"configurable": {"tender_text": "hello"}}
+    assert submitted["context"] == {"tenant": "acme"}
+
+
+@pytest.mark.asyncio
+async def test_prepare_run_without_assistant_config_keeps_client_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No assistant config -> client config passes through unchanged."""
+    assistant = _make_assistant(config_json=None)
+    executor = await _prepare_with_kwargs(
+        monkeypatch,
+        assistant=assistant,
+        kwargs={"config": {"configurable": {"model": "client-model"}}},
+    )
+
+    assert len(executor.submitted) == 1
+    assert executor.submitted[0].kwargs["config"] == {"configurable": {"model": "client-model"}}
