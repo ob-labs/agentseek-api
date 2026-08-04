@@ -846,6 +846,23 @@ async def execute_run(
     if "recursion_limit" not in config and "recursion_limit" in graph_bound_config:
         config["recursion_limit"] = graph_bound_config["recursion_limit"]
     configurable = dict(config.get(CONF, {})) if isinstance(config.get(CONF), dict) else {}
+    explicit_context = run_kwargs.get("context") or {}
+    if not isinstance(explicit_context, dict):
+        explicit_context = {}
+    # Align with langgraph-api (langgraph_api/models/run.py): ``config.configurable``
+    # and ``context`` are mutually exclusive and kept in sync, so legacy nodes
+    # reading ``configurable`` and context-aware graphs see the same user params.
+    if configurable and explicit_context:
+        raise ValueError(
+            "Cannot specify both configurable and context. Prefer setting context alone. "
+            "Context was introduced in LangGraph 0.6.0 and is the long term planned "
+            "replacement for configurable."
+        )
+    if explicit_context:
+        configurable = dict(explicit_context)
+        config[CONF] = configurable
+    elif configurable:
+        explicit_context = dict(configurable)
     configurable.update(
         {
             "thread_id": thread_id,
@@ -890,7 +907,7 @@ async def execute_run(
     _context_schema = getattr(graph, "context_schema", None)
     if _context_schema is not None:
         _astream_kwargs["context"] = _resolve_run_context(
-            _context_schema, run_kwargs.get("context"), config.get(CONF, {})
+            _context_schema, explicit_context, config.get(CONF, {})
         )
     if _extra_stream_modes:
         _astream_kwargs["stream_mode"] = list(set(_extra_stream_modes) | {"updates"})

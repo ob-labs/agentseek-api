@@ -1098,3 +1098,123 @@ async def test_execute_run_keeps_multiple_messages_in_single_chunk_distinct(monk
     ]
     assert [event["role"] for event in message_starts] == ["human", "ai"]
     assert message_starts[0]["id"] != message_starts[1]["id"]
+
+
+class FakeContextSchema:
+    tenant: str
+    org: str
+
+
+@pytest.mark.asyncio
+async def test_execute_run_mirrors_context_into_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"a": 1},
+        user_id="user-1",
+        kwargs={"context": {"tenant": "acme"}},
+    )
+
+    config = FakeKwargsCapturingEntry.graph.configs[0]
+    assert config[CONF]["tenant"] == "acme"
+    assert config[CONF]["thread_id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_derives_context_from_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"a": 1},
+        user_id="user-1",
+        kwargs={"config": {"configurable": {"tenant": "acme"}}},
+    )
+
+    config = FakeKwargsCapturingEntry.graph.configs[0]
+    assert config[CONF]["tenant"] == "acme"
+    assert config[CONF]["thread_id"] == "t1"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_rejects_configurable_and_context_together(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    with pytest.raises(ValueError, match="Cannot specify both configurable and context"):
+        await execute_run(
+            thread_id="t1",
+            run_id="r1",
+            payload={"a": 1},
+            user_id="user-1",
+            kwargs={
+                "config": {"configurable": {"tenant": "acme"}},
+                "context": {"org": "ob"},
+            },
+        )
+
+
+@pytest.mark.asyncio
+async def test_execute_run_passes_context_kwarg_when_context_schema_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    FakeKwargsCapturingEntry.graph.context_schema = FakeContextSchema
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"a": 1},
+        user_id="user-1",
+        kwargs={"context": {"tenant": "acme", "org": "ob"}},
+    )
+
+    kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
+    assert kwargs["context"] == {"tenant": "acme", "org": "ob"}
+
+
+@pytest.mark.asyncio
+async def test_execute_run_filters_context_by_schema(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    FakeKwargsCapturingEntry.graph.context_schema = FakeContextSchema
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"a": 1},
+        user_id="user-1",
+        kwargs={"context": {"tenant": "acme", "extra": "ignored"}},
+    )
+
+    kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
+    assert kwargs["context"] == {"tenant": "acme"}
