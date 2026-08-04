@@ -26,14 +26,14 @@ def test_create_assistant_persists_langsmith_fields(client: TestClient) -> None:
             "graph_id": "default",
             "metadata": {"suite": "compat"},
             "config": {"configurable": {"temperature": 0}},
-            "context": {"tenant": "mysql-family"},
             "description": "assistant description",
         },
     )
     assert created.status_code == 200
     assert created.json()["metadata"] == {"suite": "compat"}
     assert created.json()["config"] == {"tags": [], "configurable": {"temperature": 0}}
-    assert created.json()["context"] == {"tenant": "mysql-family"}
+    # langgraph-api parity: config.configurable is mirrored into context.
+    assert created.json()["context"] == {"temperature": 0}
     assert created.json()["description"] == "assistant description"
 
 

@@ -136,7 +136,6 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
             graph_id="react_agent",
             metadata={"suite": "unit"},
             config={"configurable": {"temperature": 0}},
-            context={"tenant": "tests"},
             description="created assistant",
         ),
         user=_TEST_USER,
@@ -145,7 +144,8 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
     assert created.graph_id == "react_agent"
     assert created.metadata == {"suite": "unit"}
     assert created.config == AssistantConfigRead(configurable={"temperature": 0})
-    assert created.context == {"tenant": "tests"}
+    # langgraph-api parity: config.configurable is mirrored into context.
+    assert created.context == {"temperature": 0}
     assert created.description == "created assistant"
 
     listed = await assistants_module.search_assistants(AssistantSearchRequest(), user=_TEST_USER)
@@ -158,7 +158,6 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
             graph_id="stress_test",
             metadata={"team": "compat"},
             config={"configurable": {"temperature": 0}},
-            context={"tenant": "unit"},
             description="patched",
         ),
         user=_TEST_USER,
@@ -167,7 +166,8 @@ async def test_assistant_route_handlers_cover_crud_paths(monkeypatch: pytest.Mon
     assert patched.graph_id == "stress_test"
     assert patched.metadata == {"team": "compat"}
     assert patched.config == AssistantConfigRead(configurable={"temperature": 0})
-    assert patched.context == {"tenant": "unit"}
+    # langgraph-api parity: config.configurable is mirrored into context.
+    assert patched.context == {"temperature": 0}
     assert patched.description == "patched"
 
     deleted = await assistants_module.delete_assistant("assistant-delete", user=_TEST_USER)
