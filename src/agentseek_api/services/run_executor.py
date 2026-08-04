@@ -849,17 +849,13 @@ async def execute_run(
     explicit_context = run_kwargs.get("context") or {}
     if not isinstance(explicit_context, dict):
         explicit_context = {}
-    # Align with langgraph-api (langgraph_api/models/run.py): ``config.configurable``
-    # and ``context`` are mutually exclusive and kept in sync, so legacy nodes
-    # reading ``configurable`` and context-aware graphs see the same user params.
-    if configurable and explicit_context:
-        raise ValueError(
-            "Cannot specify both configurable and context. Prefer setting context alone. "
-            "Context was introduced in LangGraph 0.6.0 and is the long term planned "
-            "replacement for configurable."
-        )
+    # Keep ``context`` and ``config.configurable`` in sync so legacy nodes (reading
+    # ``configurable``) and context-aware graphs see the same user params. Note that
+    # ``run_preparation`` may already merge assistant-level context into ``context``,
+    # so both may be non-empty here; the raw-request mutual-exclusion check lives at
+    # the API layer where the client's original config/context are available.
     if explicit_context:
-        configurable = dict(explicit_context)
+        configurable = {**configurable, **explicit_context}
         config[CONF] = configurable
     elif configurable:
         explicit_context = dict(configurable)

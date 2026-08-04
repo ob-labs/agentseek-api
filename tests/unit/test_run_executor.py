@@ -1152,29 +1152,6 @@ async def test_execute_run_derives_context_from_configurable(monkeypatch: pytest
 
 
 @pytest.mark.asyncio
-async def test_execute_run_rejects_configurable_and_context_together(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeKwargsCapturingLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-
-    with pytest.raises(ValueError, match="Cannot specify both configurable and context"):
-        await execute_run(
-            thread_id="t1",
-            run_id="r1",
-            payload={"a": 1},
-            user_id="user-1",
-            kwargs={
-                "config": {"configurable": {"tenant": "acme"}},
-                "context": {"org": "ob"},
-            },
-        )
-
-
-@pytest.mark.asyncio
 async def test_execute_run_passes_context_kwarg_when_context_schema_present(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDBManager()
     FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
@@ -1217,4 +1194,38 @@ async def test_execute_run_filters_context_by_schema(monkeypatch: pytest.MonkeyP
     )
 
     kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
+    assert kwargs["context"] == {"tenant": "acme"}
+
+
+@pytest.mark.asyncio
+async def test_execute_run_merges_context_and_configurable_without_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Assistant-level context (merged into kwargs["context"]) must not conflict with
+    client-supplied config.configurable; both stay visible and no error is raised."""
+    fake_db = FakeDBManager()
+    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
+    FakeKwargsCapturingEntry.graph.context_schema = FakeContextSchema
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"a": 1},
+        user_id="user-1",
+        kwargs={
+            "config": {"configurable": {"client_param": "x"}},
+            "context": {"tenant": "acme"},
+        },
+    )
+
+    config = FakeKwargsCapturingEntry.graph.configs[0]
+    kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
+    # configurable carries both the client configurable key and the context key
+    assert config[CONF]["client_param"] == "x"
+    assert config[CONF]["tenant"] == "acme"
+    assert config[CONF]["thread_id"] == "t1"
+    # context kwarg still reflects the effective context
     assert kwargs["context"] == {"tenant": "acme"}
