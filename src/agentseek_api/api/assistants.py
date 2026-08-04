@@ -99,6 +99,32 @@ def _build_filter_query(payload: AssistantCountRequest | AssistantSearchRequest)
     return query
 
 
+_CONFIG_CONTEXT_CONFLICT_DETAIL = (
+    "Cannot specify both configurable and context. Prefer setting context alone. "
+    "Context was introduced in LangGraph 0.6.0 and is the long term planned "
+    "replacement for configurable."
+)
+
+
+def _consolidate_config_context(
+    config: dict[str, Any], context: dict[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Mirror langgraph-api's ops-layer ``consolidate_config_and_context``.
+
+    If both ``config.configurable`` and ``context`` are non-empty -> 400.
+    If only ``config.configurable`` is set -> ``context`` mirrors it.
+    If only ``context`` is set -> ``config.configurable`` mirrors it.
+    """
+    configurable = config.get("configurable")
+    if configurable and context:
+        raise HTTPException(status_code=400, detail=_CONFIG_CONTEXT_CONFLICT_DETAIL)
+    if configurable:
+        context = configurable
+    elif context:
+        config = {**config, "configurable": context}
+    return config, context
+
+
 @router.post("", response_model=AssistantRead, response_model_exclude_none=True)
 async def create_assistant(payload: AssistantCreate, user: User = Depends(get_current_user)) -> AssistantRead:
     _validate_graph_id(payload.graph_id)
@@ -122,12 +148,13 @@ async def create_assistant(payload: AssistantCreate, user: User = Depends(get_cu
                     return _to_read_model(existing)
                 raise HTTPException(status_code=409, detail="Assistant already exists")
 
+        config, context = _consolidate_config_context(dict(payload.config), dict(payload.context))
         row = Assistant(
             name=payload.name,
             graph_id=payload.graph_id,
             metadata_json=payload.metadata,
-            config_json=payload.config,
-            context_json=payload.context,
+            config_json=config,
+            context_json=context,
             description=payload.description,
         )
         if payload.assistant_id is not None:
@@ -196,10 +223,22 @@ async def patch_assistant(assistant_id: str, payload: AssistantPatch, user: User
         if payload.graph_id is not None:
             _validate_graph_id(payload.graph_id)
             row.graph_id = payload.graph_id
-        if payload.config is not None:
-            row.config_json = payload.config
-        if payload.context is not None:
-            row.context_json = payload.context
+        if payload.config is not None or payload.context is not None:
+            provided_config = payload.config is not None
+            provided_context = payload.context is not None
+            if provided_config and provided_context:
+                if (payload.config or {}).get("configurable") and payload.context:
+                    raise HTTPException(status_code=400, detail=_CONFIG_CONTEXT_CONFLICT_DETAIL)
+            new_config = dict(payload.config) if provided_config else dict(row.config_json or {})
+            if provided_context:
+                new_context = dict(payload.context)
+                new_config = {**new_config, "configurable": new_context}
+            else:
+                new_context = new_config.get("configurable")
+                if new_context is None:
+                    new_context = dict(row.context_json) if row.context_json else {}
+            row.config_json = new_config
+            row.context_json = new_context
         if payload.metadata is not None:
             row.metadata_json = {**row.metadata_json, **payload.metadata}
         if payload.name is not None:
