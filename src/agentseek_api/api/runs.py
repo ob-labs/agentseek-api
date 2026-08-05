@@ -324,6 +324,14 @@ def _protocol_channels_for_stream_modes(stream_modes: list[str]) -> list[str]:
     return channels
 
 
+# Channels replayed by the legacy GET /threads/{id}/runs/{run_id}/stream when no
+# ``stream_mode`` query is given. The astream migration no longer publishes
+# run-scoped stream events, so the run's protocol-v2 thread events (values /
+# updates / messages / tools / custom) are replayed instead, alongside the
+# run-scoped lifecycle records (start/end) still published by run_jobs.
+DEFAULT_RUN_STREAM_REPLAY_CHANNELS = ["values", "updates", "messages", "tools", "custom", "input"]
+
+
 async def _iter_persisted_protocol_run_events(
     *,
     thread_id: str,
@@ -894,8 +902,47 @@ async def stream_run(
             seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
         }
         records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=after_seq)})
+        # Run-scoped lifecycle records (start/end) from run_jobs. The terminal
+        # "end" record is deferred until after the protocol thread events so
+        # the stream ends with the run's terminal status.
+        end_records: dict[int, dict[str, object]] = {
+            seq: event
+            for seq, event in records_by_seq.items()
+            if str(event.get("event")) == "end"
+        }
         for seq in sorted(records_by_seq):
             event = records_by_seq[seq]
+            if str(event.get("event")) == "end":
+                continue
+            current_seq = max(current_seq, seq)
+            event_name = str(event.get("event", "message"))
+            event_payload: dict[str, object] = {"run_id": run_id, **event}
+            payload = safe_json_dumps(event_payload)
+            yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
+
+        # Replay the run's protocol-v2 thread events so the default endpoint
+        # still returns the full stream (run-scoped stream events are no longer
+        # published by the astream migration).
+        try:
+            thread_events = await load_thread_stream_events(
+                thread_id,
+                channels=DEFAULT_RUN_STREAM_REPLAY_CHANNELS,
+                namespaces=None,
+                depth=None,
+                after_seq=0,
+            )
+        except Exception:  # noqa: BLE001 - replay is best-effort
+            thread_events = []
+        for event in thread_events:
+            if event.get("params", {}).get("run_id") != run_id:
+                continue
+            yield _protocol_event_sse(
+                event_name=str(event.get("method", "message")),
+                data=event.get("params", {}).get("data", {}),
+            )
+
+        for seq in sorted(end_records):
+            event = end_records[seq]
             current_seq = max(current_seq, seq)
             event_name = str(event.get("event", "message"))
             event_payload: dict[str, object] = {"run_id": run_id, **event}
