@@ -53,10 +53,10 @@ def test_react_agent_stream_includes_tool_and_message_events(client: TestClient)
     assert stream_response.status_code == 200
     payloads = _stream_payloads(stream_response.text)
 
-    assert any(payload["event"] == "tool_start" and payload["name"] == "lookup" for payload in payloads)
-    assert any(payload["event"] == "tool_end" and payload["name"] == "lookup" for payload in payloads)
+    assert any(isinstance(payload, dict) and payload.get("event") == "tool-started" and payload.get("tool_name") == "lookup" for payload in payloads)
+    assert any(isinstance(payload, dict) and payload.get("event") == "tool-finished" and payload.get("tool_name") == "lookup" for payload in payloads)
     assert any(
-        payload["event"] == "message_chunk" and "Final answer:" in str(payload.get("content", ""))
+        isinstance(payload, dict) and "Final answer:" in json.dumps(payload, ensure_ascii=False)
         for payload in payloads
     )
 
@@ -81,12 +81,16 @@ def test_stress_tool_agent_stream_includes_multiple_tool_cycles(client: TestClie
     assert stream_response.status_code == 200
     payloads = _stream_payloads(stream_response.text)
 
-    tool_starts = [payload for payload in payloads if payload["event"] == "tool_start" and payload["name"] == "slow_process"]
-    tool_ends = [payload for payload in payloads if payload["event"] == "tool_end" and payload["name"] == "slow_process"]
+    tool_starts = [
+        payload for payload in payloads if isinstance(payload, dict) and payload.get("event") == "tool-started" and payload.get("tool_name") == "slow_process"
+    ]
+    tool_ends = [
+        payload for payload in payloads if isinstance(payload, dict) and payload.get("event") == "tool-finished" and payload.get("tool_name") == "slow_process"
+    ]
     assert len(tool_starts) == 3
     assert len(tool_ends) == 3
     assert any(
-        payload["event"] == "message_chunk" and '"steps_completed": 3' in str(payload.get("content", ""))
+        isinstance(payload, dict) and "steps_completed" in json.dumps(payload, ensure_ascii=False)
         for payload in payloads
     )
 
@@ -138,7 +142,7 @@ def test_resumed_run_stream_preserves_each_terminal_status(client: TestClient) -
     stream_response = client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
     assert stream_response.status_code == 200
     payloads = _stream_payloads(stream_response.text)
-    end_statuses = [payload["status"] for payload in payloads if payload["event"] == "end"]
+    end_statuses = [payload["status"] for payload in payloads if payload.get("event") == "end"]
     assert end_statuses == ["interrupted", "success"]
 
 

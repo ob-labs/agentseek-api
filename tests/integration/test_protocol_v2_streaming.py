@@ -288,6 +288,8 @@ def test_protocol_stream_filters_subgraph_namespace_events(client: TestClient) -
             "params": {
                 "assistant_id": assistant_id,
                 "input": {"foo": "hello "},
+                "stream_mode": ["updates"],
+                "stream_subgraphs": True,
             },
         },
     )
