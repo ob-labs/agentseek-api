@@ -839,7 +839,7 @@ async def execute_run(
             messages = value.get("messages")
             if not isinstance(messages, list):
                 continue
-            for message in messages:
+            for message_index, message in enumerate(messages):
                 if not isinstance(message, BaseMessage):
                     continue
                 role = _protocol_role_for_message(message)
@@ -854,7 +854,7 @@ async def execute_run(
                     message,
                     metadata={},
                     namespace=namespace,
-                    message_index=0,
+                    message_index=message_index,
                 )
 
     # Shared live-message handler used by both execution paths. Streams the
