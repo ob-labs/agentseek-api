@@ -408,6 +408,7 @@ def _build_create_run_stream_response(
     async def _event_iter() -> AsyncIterator[str]:
         try:
             current_seq = after_seq
+            saw_interrupt = False
             if include_metadata:
                 yield _protocol_event_sse(event_name="metadata", data={"run_id": created.run_id, "attempt": 1})
 
@@ -425,10 +426,13 @@ def _build_create_run_stream_response(
                     continue
                 if suppress_block_messages and _is_block_message_event(event):
                     continue
+                event_data = event.get("params", {}).get("data", {})
+                if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                    saw_interrupt = True
                 yield _protocol_event_sse(
                     seq=current_seq,
                     event_name=str(event.get("method", "message")),
-                    data=event.get("params", {}).get("data", {}),
+                    data=event_data,
                 )
 
             if _uses_redis_executor():
@@ -446,10 +450,13 @@ def _build_create_run_stream_response(
                     current_seq = max(current_seq, int(event.get("seq", 0)))
                     if suppress_block_messages and _is_block_message_event(event):
                         continue
+                    event_data = event.get("params", {}).get("data", {})
+                    if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                        saw_interrupt = True
                     yield _protocol_event_sse(
                         seq=current_seq,
                         event_name=str(event.get("method", "message")),
-                        data=event.get("params", {}).get("data", {}),
+                        data=event_data,
                     )
             else:
                 async for event in iter_with_sse_keepalives(
@@ -470,10 +477,13 @@ def _build_create_run_stream_response(
                     current_seq = max(current_seq, int(event.get("seq", 0)))
                     if suppress_block_messages and _is_block_message_event(event):
                         continue
+                    event_data = event.get("params", {}).get("data", {})
+                    if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                        saw_interrupt = True
                     yield _protocol_event_sse(
                         seq=current_seq,
                         event_name=str(event.get("method", "message")),
-                        data=event.get("params", {}).get("data", {}),
+                        data=event_data,
                     )
 
             final_run = (
@@ -490,7 +500,15 @@ def _build_create_run_stream_response(
                 )
                 return
             interrupt_event = _interrupt_stream_event_name(stream_modes)
-            if final_run.status == "interrupted" and final_run.interrupts and interrupt_event is not None:
+            if (
+                final_run.status == "interrupted"
+                and final_run.interrupts
+                and interrupt_event is not None
+                # The interrupt is delivered in-stream (values/updates carrying
+                # ``__interrupt__``); only emit a trailing event when this
+                # connection never saw it.
+                and not saw_interrupt
+            ):
                 current_seq += 1
                 yield _protocol_event_sse(
                     seq=current_seq,

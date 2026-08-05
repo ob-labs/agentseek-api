@@ -999,12 +999,23 @@ async def execute_run(
             # events so ToolMessage / HumanMessage still resolve for SDK clients
             # even when the client did not request the updates stream mode.
             await _publish_complete_messages_from_update(data, namespace)
-            if _only_interrupt_updates and "__interrupt__" not in data:
-                return
             normalized_chunk = _normalize_stream_value(data)
             if isinstance(normalized_chunk, dict):
-                normalized_chunk.pop("__interrupt__", None)
-                if normalized_chunk:
+                if _only_interrupt_updates:
+                    # When updates were not explicitly
+                    # requested, only interrupt-bearing updates are forwarded,
+                    # remapped to a ``values`` event with ``__interrupt__`` kept
+                    # intact so the official SDK stream() parser can surface it.
+                    if normalized_chunk.get("__interrupt__"):
+                        await apublish_values_event(
+                            thread_id,
+                            values=normalized_chunk,
+                            namespace=namespace,
+                            run_id=run_id,
+                        )
+                elif normalized_chunk:
+                    # updates explicitly requested: pass through untouched
+                    # (including ``__interrupt__``), matching official.
                     await apublish_updates_event(
                         thread_id,
                         values=normalized_chunk,

@@ -281,18 +281,60 @@ class FakeInterruptLangGraphService(FakeLangGraphService):
 @pytest.mark.asyncio
 async def test_execute_run_preserves_interrupts_from_updates_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
     FakeInterruptEntry.graph = FakeInterruptGraph()
     monkeypatch.setattr(
         "agentseek_api.services.run_executor.get_langgraph_service",
         lambda: FakeInterruptLangGraphService(),
     )
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
     result = await execute_run(thread_id="t1", run_id="r1", payload={"foo": "hello"}, user_id="user-1")
 
     assert result.interrupted is True
     assert result.interrupts == [{"value": "Provide value:", "id": "interrupt-1"}]
     assert result.output["state"]["foo"] == "hello"
+
+    # The interrupt rides on a ``values`` event with ``__interrupt__``
+    # intact (remapped from updates because updates were not explicitly requested),
+    # so the official SDK stream() parser can surface it.
+    value_events = [event for event in protocol_broker._events["t1"] if event["method"] == "values"]
+    interrupt_values = [event for event in value_events if "__interrupt__" in event["params"]["data"]]
+    assert len(interrupt_values) == 1
+    assert interrupt_values[0]["params"]["data"]["__interrupt__"] == [
+        {"value": "Provide value:", "id": "interrupt-1"}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_execute_run_keeps_interrupt_in_updates_when_updates_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the client explicitly requests updates, the interrupt stays on the
+    updates channel with ``__interrupt__`` intact (official behavior)."""
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    FakeInterruptEntry.graph = FakeInterruptGraph()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeInterruptLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"foo": "hello"},
+        user_id="user-1",
+        kwargs={"stream_modes": ["updates"]},
+    )
+
+    update_events = [event for event in protocol_broker._events["t1"] if event["method"] == "updates"]
+    interrupt_updates = [event for event in update_events if "__interrupt__" in event["params"]["data"]]
+    assert len(interrupt_updates) == 1
+    assert interrupt_updates[0]["params"]["data"]["__interrupt__"] == [
+        {"value": "Provide value:", "id": "interrupt-1"}
+    ]
 
 
 class FakeProtocolStreamingGraph(FakeGraph):
