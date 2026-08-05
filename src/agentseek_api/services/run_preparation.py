@@ -158,6 +158,24 @@ async def _load_run_with_graph(run_id: str) -> tuple[Run, str]:
         return run, assistant.graph_id
 
 
+def _merge_config_defaults(assistant_config: dict[str, Any], run_config: dict[str, Any]) -> dict[str, Any]:
+    """Merge assistant-level config as defaults into run config.
+
+    Mirrors aegra's assistant-config merge semantics (assistant values are
+    defaults; the client request wins on conflict), while merging the
+    ``configurable`` sub-dict one level deeper so a client overriding a single
+    configurable key does not wipe out assistant defaults (e.g. ``tender_text``).
+    """
+    if not assistant_config:
+        return dict(run_config)
+    merged = {**assistant_config, **run_config}
+    assistant_configurable = assistant_config.get("configurable")
+    run_configurable = run_config.get("configurable")
+    if isinstance(assistant_configurable, dict) and isinstance(run_configurable, dict):
+        merged["configurable"] = {**assistant_configurable, **run_configurable}
+    return merged
+
+
 async def _prepare_run(
     *,
     thread_id: str,
@@ -190,6 +208,15 @@ async def _prepare_run(
             effective_kwargs = dict(kwargs) if kwargs else {}
             run_context = effective_kwargs.get("context") or {}
             effective_kwargs["context"] = {**assistant_context, **run_context}
+            kwargs = effective_kwargs
+        # Merge assistant-level config as defaults into run kwargs (aegra parity):
+        # without this, params stored on the assistant's config.configurable are
+        # never visible to the graph at run time.
+        assistant_config = getattr(assistant, "config_json", None) or {}
+        if assistant_config:
+            effective_kwargs = dict(kwargs) if kwargs else {}
+            run_config = effective_kwargs.get("config") or {}
+            effective_kwargs["config"] = _merge_config_defaults(assistant_config, run_config)
             kwargs = effective_kwargs
         if thread.metadata_json.get("graph_id") != graph_id:
             thread.metadata_json = {**thread.metadata_json, "graph_id": graph_id}

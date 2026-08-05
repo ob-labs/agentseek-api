@@ -846,6 +846,19 @@ async def execute_run(
     if "recursion_limit" not in config and "recursion_limit" in graph_bound_config:
         config["recursion_limit"] = graph_bound_config["recursion_limit"]
     configurable = dict(config.get(CONF, {})) if isinstance(config.get(CONF), dict) else {}
+    explicit_context = run_kwargs.get("context") or {}
+    if not isinstance(explicit_context, dict):
+        explicit_context = {}
+    # Keep ``context`` and ``config.configurable`` in sync so legacy nodes (reading
+    # ``configurable``) and context-aware graphs see the same user params. Note that
+    # ``run_preparation`` may already merge assistant-level context into ``context``,
+    # so both may be non-empty here; the raw-request mutual-exclusion check lives at
+    # the API layer where the client's original config/context are available.
+    if explicit_context:
+        configurable = {**configurable, **explicit_context}
+        config[CONF] = configurable
+    elif configurable:
+        explicit_context = dict(configurable)
     configurable.update(
         {
             "thread_id": thread_id,
@@ -890,7 +903,7 @@ async def execute_run(
     _context_schema = getattr(graph, "context_schema", None)
     if _context_schema is not None:
         _astream_kwargs["context"] = _resolve_run_context(
-            _context_schema, run_kwargs.get("context"), config.get(CONF, {})
+            _context_schema, explicit_context, config.get(CONF, {})
         )
     if _extra_stream_modes:
         _astream_kwargs["stream_mode"] = list(set(_extra_stream_modes) | {"updates"})

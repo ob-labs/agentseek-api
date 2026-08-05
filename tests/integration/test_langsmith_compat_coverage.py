@@ -51,7 +51,6 @@ def test_assistant_routes_cover_list_patch_and_missing_paths(client: TestClient)
             "graph_id": "react_agent",
             "metadata": {"team": "api"},
             "config": {"configurable": {"temperature": 0}},
-            "context": {"tenant": "compat"},
             "description": "updated",
         },
     )
@@ -61,7 +60,8 @@ def test_assistant_routes_cover_list_patch_and_missing_paths(client: TestClient)
     assert patched_body["graph_id"] == "react_agent"
     assert patched_body["metadata"] == {"team": "api"}
     assert patched_body["config"] == {"tags": [], "configurable": {"temperature": 0}}
-    assert patched_body["context"] == {"tenant": "compat"}
+    # langgraph-api parity: config.configurable is mirrored into context.
+    assert patched_body["context"] == {"temperature": 0}
     assert patched_body["description"] == "updated"
 
     mismatched_name = client.post("/assistants/search", json={"name": "missing"})

@@ -134,6 +134,18 @@ def _parse_stream_mode_query_param(stream_mode: list[str] | None) -> list[str] |
 def _validate_supported_run_controls(payload: Any, *, stateless: bool) -> None:
     unsupported_controls: list[str] = []
 
+    config = getattr(payload, "config", None) or {}
+    context = getattr(payload, "context", None) or {}
+    if isinstance(config, dict) and config.get("configurable") and context:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Cannot specify both configurable and context. Prefer setting context alone. "
+                "Context was introduced in LangGraph 0.6.0 and is the long term planned "
+                "replacement for configurable."
+            ),
+        )
+
     if getattr(payload, "webhook", None) is not None:
         unsupported_controls.append("webhook")
     if getattr(payload, "feedback_keys", None):

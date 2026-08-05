@@ -153,13 +153,12 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
             name="live-default",
             graph_id="default",
             metadata={"suite": "live-create"},
-            config={"configurable": {"temperature": 0}},
             context={"tenant": "mysql-family"},
             description="live assistant create",
         )
         react_assistant = await _create_assistant(client, name="live-react", graph_id="react_agent")
         assert default_assistant["metadata"] == {"suite": "live-create"}
-        assert default_assistant["config"] == {"tags": [], "configurable": {"temperature": 0}}
+        assert default_assistant["config"] == {"tags": [], "configurable": {"tenant": "mysql-family"}}
         assert default_assistant["context"] == {"tenant": "mysql-family"}
         assert default_assistant["description"] == "live assistant create"
 
@@ -182,7 +181,6 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
                 "graph_id": "stress_test",
                 "metadata": {"suite": "live"},
                 "config": {"configurable": {"temperature": 0}},
-                "context": {"tenant": "mysql-family"},
                 "description": "live assistant",
             },
         )
@@ -190,6 +188,8 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         patched_body = patched.json()
         assert patched_body["graph_id"] == "stress_test"
         assert patched_body["metadata"]["suite"] == "live"
+        assert patched_body["config"] == {"tags": [], "configurable": {"temperature": 0}}
+        assert patched_body["context"] == {"temperature": 0}
         assert patched_body["description"] == "live assistant"
 
         graph = await client.get(f"/assistants/{default_assistant['assistant_id']}/graph")
