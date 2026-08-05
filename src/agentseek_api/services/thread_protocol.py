@@ -324,6 +324,7 @@ async def apublish_tool_event(
     output_payload: Any | None = None,
     error_message: str | None = None,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {"event": tool_event, "tool_call_id": tool_call_id}
     if tool_name is not None:
@@ -341,6 +342,8 @@ async def apublish_tool_event(
     }
     if node is not None:
         params["node"] = node
+    if run_id is not None:
+        params["run_id"] = run_id
     return await _apublish_thread_event(thread_id, {"method": "tools", "params": params})
 
 

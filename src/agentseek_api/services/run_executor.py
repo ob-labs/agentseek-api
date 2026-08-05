@@ -25,6 +25,7 @@ from agentseek_api.services.thread_protocol import (
     apublish_messages_metadata,
     apublish_messages_partial,
     apublish_messages_tuple,
+    apublish_tool_event,
     apublish_updates_event,
     apublish_values_event,
     publish_content_block_delta,
@@ -36,6 +37,13 @@ from agentseek_api.services.thread_protocol import (
 )
 
 UNSET = object()
+
+
+try:
+    from langgraph.pregel import _tools as _langgraph_tools  # noqa: E402
+    _HAS_TOOLS_STREAM_MODE = hasattr(_langgraph_tools, "StreamToolCallHandler")
+except Exception:  # noqa: BLE001 - older langgraph without the native tools stream mode
+    _HAS_TOOLS_STREAM_MODE = False
 
 @dataclass
 class RunExecutionResult:
@@ -795,6 +803,7 @@ async def execute_run(
     # ``messages/metadata`` once per message_id.
     messages_partial_acc: dict[str, BaseMessage] = {}
     messages_metadata_seen: set[str] = set()
+    tool_names: dict[Any, str | None] = {}
     _emitted_values_via_stream = False
     _requested_stream_modes = run_kwargs.get("stream_modes") or []
     # Aligned with langgraph-api: strip events, always request debug,
@@ -812,6 +821,8 @@ async def execute_run(
     if not _updates_explicitly_requested:
         stream_modes_set.add("updates")
     _only_interrupt_updates = not _updates_explicitly_requested
+    if _HAS_TOOLS_STREAM_MODE and "tools" not in stream_modes_set:
+        stream_modes_set.add("tools")
     _astream_kwargs: dict[str, Any] = {}
     _context_schema = getattr(graph, "context_schema", None)
     if _context_schema is not None:
@@ -1000,6 +1011,52 @@ async def execute_run(
                         namespace=namespace,
                         run_id=run_id,
                     )
+        elif mode == "tools" and isinstance(data, dict):
+            # Native langgraph ``tools`` stream mode (langgraph.pregel._tools.
+            # StreamToolCallHandler): structured tool lifecycle events keyed by
+            # tool_call_id. tool-finished / tool-error carry no name, so the
+            # name is tracked from the matching tool-started.
+            tool_event_name = data.get("event")
+            tool_call_id = data.get("tool_call_id")
+            if tool_event_name == "tool-started":
+                tool_name = data.get("tool_name")
+                if tool_call_id is not None:
+                    tool_names[tool_call_id] = tool_name
+                await apublish_tool_event(
+                    thread_id,
+                    tool_event="tool-started",
+                    tool_call_id=str(tool_call_id or ""),
+                    tool_name=tool_name,
+                    input_payload=(
+                        _normalize_stream_value(data.get("input")) if data.get("input") is not None else None
+                    ),
+                    namespace=namespace,
+                    run_id=run_id,
+                )
+            elif tool_event_name == "tool-finished":
+                await apublish_tool_event(
+                    thread_id,
+                    tool_event="tool-finished",
+                    tool_call_id=str(tool_call_id or ""),
+                    tool_name=tool_names.get(tool_call_id),
+                    output_payload=(
+                        _normalize_stream_value(data.get("output")) if data.get("output") is not None else None
+                    ),
+                    namespace=namespace,
+                    run_id=run_id,
+                )
+            elif tool_event_name == "tool-error":
+                await apublish_tool_event(
+                    thread_id,
+                    tool_event="tool-error",
+                    tool_call_id=str(tool_call_id or ""),
+                    tool_name=tool_names.get(tool_call_id),
+                    error_message=(
+                        _normalize_stream_value(data.get("message")) if data.get("message") is not None else None
+                    ),
+                    namespace=namespace,
+                    run_id=run_id,
+                )
 
     # Finalize the protocol message stream and, when no values event was emitted
     # via the stream, publish the final state as a values event.
@@ -1091,7 +1148,7 @@ async def execute_run(
                             namespace=ns,
                             message_index=message_index,
                         )
-                elif mode in ("updates", "values", "custom", "debug", "tasks", "checkpoints"):
+                elif mode in ("updates", "values", "custom", "debug", "tasks", "checkpoints", "tools"):
                     await _handle_stream_mode(mode, chunk, ns)
         # astream has no on_chain_end: capture the final state from the
         # checkpointer (includes subgraph results), falling back to the last
