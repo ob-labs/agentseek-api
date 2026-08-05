@@ -936,7 +936,11 @@ async def stream_run(
         for event in thread_events:
             if event.get("params", {}).get("run_id") != run_id:
                 continue
+            event_seq = int(event.get("seq", 0) or 0)
+            if event_seq <= after_seq:
+                continue
             yield _protocol_event_sse(
+                seq=event_seq,
                 event_name=str(event.get("method", "message")),
                 data=event.get("params", {}).get("data", {}),
             )
