@@ -11,6 +11,7 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolCommandRequest, ProtocolEventStreamRequest
+from agentseek_api.services.stream_modes import normalize_stream_modes
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
@@ -134,11 +135,18 @@ async def handle_protocol_command(
             )
 
         try:
+            run_kwargs: dict[str, Any] | None = None
+            if payload.params.get("stream_mode") is not None:
+                run_kwargs = {"stream_modes": normalize_stream_modes(payload.params.get("stream_mode"))}
+            if payload.params.get("stream_subgraphs"):
+                run_kwargs = run_kwargs or {}
+                run_kwargs["stream_subgraphs"] = True
             run = await prepare_and_submit_run(
                 thread_id=thread_id,
                 assistant_id=assistant_id,
                 payload=_coerce_protocol_input(payload.params.get("input")),
                 user=user,
+                kwargs=run_kwargs,
             )
         except ValueError as exc:
             return _protocol_error(request_id=payload.id, code="invalid_argument", message=str(exc), status_code=404)
