@@ -100,3 +100,46 @@ def test_patch_rejects_both_configurable_and_context(client: TestClient) -> None
     )
     assert patched.status_code == 400
     assert "Cannot specify both configurable and context" in patched.json()["detail"]
+
+
+def test_create_do_nothing_retry_still_validates_config_context_conflict(client: TestClient) -> None:
+    created = client.post(
+        "/assistants",
+        json={
+            "name": "idempotent",
+            "graph_id": "default",
+            "assistant_id": "idempotent-config-context-1",
+            "context": {"tenant": "acme"},
+        },
+    )
+    assert created.status_code == 200
+
+    # langgraph-api validates the config/context conflict before the
+    # if_exists="do_nothing" early return, so the retry must 400 as well.
+    retried = client.post(
+        "/assistants",
+        json={
+            "name": "idempotent",
+            "graph_id": "default",
+            "assistant_id": "idempotent-config-context-1",
+            "if_exists": "do_nothing",
+            "config": {"configurable": {"temperature": 0}},
+            "context": {"tenant": "acme"},
+        },
+    )
+    assert retried.status_code == 400
+    assert "Cannot specify both configurable and context" in retried.json()["detail"]
+
+    # A non-conflicting idempotent retry still returns the existing assistant.
+    clean = client.post(
+        "/assistants",
+        json={
+            "name": "idempotent",
+            "graph_id": "default",
+            "assistant_id": "idempotent-config-context-1",
+            "if_exists": "do_nothing",
+            "context": {"tenant": "other"},
+        },
+    )
+    assert clean.status_code == 200
+    assert clean.json()["assistant_id"] == "idempotent-config-context-1"

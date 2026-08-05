@@ -139,6 +139,10 @@ async def create_assistant(payload: AssistantCreate, user: User = Depends(get_cu
 
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
+        # Validate/consolidate config<->context before the idempotent early
+        # return so if_exists="do_nothing" retries still surface the 400
+        # conflict (langgraph-api parity).
+        config, context = _consolidate_config_context(dict(payload.config), dict(payload.context))
         if payload.assistant_id is not None:
             existing = await session.scalar(
                 select(Assistant).where(Assistant.assistant_id == payload.assistant_id)
@@ -148,7 +152,6 @@ async def create_assistant(payload: AssistantCreate, user: User = Depends(get_cu
                     return _to_read_model(existing)
                 raise HTTPException(status_code=409, detail="Assistant already exists")
 
-        config, context = _consolidate_config_context(dict(payload.config), dict(payload.context))
         row = Assistant(
             name=payload.name,
             graph_id=payload.graph_id,
