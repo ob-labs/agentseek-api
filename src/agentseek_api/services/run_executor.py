@@ -1,6 +1,6 @@
+from contextlib import aclosing
 from dataclasses import dataclass, field
 import inspect
-import logging
 from typing import Any
 
 from langchain_core.messages import BaseMessage, BaseMessageChunk
@@ -11,14 +11,7 @@ from langgraph.types import Command
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.runtime_store import UserScopedStore
 from agentseek_api.models.auth import User
-from agentseek_api.settings import settings
 from agentseek_api.services.langgraph_service import ensure_sync_checkpoint_mode, get_langgraph_service
-from agentseek_api.services.run_state import run_broker
-from agentseek_api.services.stream_persistence import (
-    append_redis_run_stream_event,
-    next_run_stream_seq,
-    persist_run_stream_event,
-)
 from agentseek_api.services.thread_protocol import (
     apublish_content_block_delta,
     apublish_content_block_finish,
@@ -32,7 +25,6 @@ from agentseek_api.services.thread_protocol import (
     apublish_messages_metadata,
     apublish_messages_partial,
     apublish_messages_tuple,
-    apublish_tool_event,
     apublish_updates_event,
     apublish_values_event,
     publish_content_block_delta,
@@ -44,37 +36,12 @@ from agentseek_api.services.thread_protocol import (
 )
 
 UNSET = object()
-logger = logging.getLogger(__name__)
-
 
 @dataclass
 class RunExecutionResult:
     output: dict[str, Any]
     interrupted: bool
     interrupts: list[dict[str, Any]]
-
-
-async def _publish_translated_run_event(
-    run_id: str,
-    event_name: str,
-    event_payload: dict[str, Any],
-) -> tuple[int, dict[str, Any]]:
-    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
-        payload = {"event": event_name, **event_payload}
-        try:
-            seq, _ = await append_redis_run_stream_event(run_id, payload)
-        except Exception:
-            logger.warning(
-                "Failed to atomically append translated Redis run event",
-                extra={"run_id": run_id, "event": event_name},
-                exc_info=True,
-            )
-            seq = None
-        return run_broker.publish(run_id, event_name, seq=seq, **event_payload)
-    seq = await next_run_stream_seq(run_id)
-    seq, published_payload = run_broker.publish(run_id, event_name, seq=seq, **event_payload)
-    await persist_run_stream_event(run_id, seq=seq, payload=published_payload)
-    return seq, published_payload
 
 
 def _normalize_stream_value(value: Any) -> Any:
@@ -748,73 +715,6 @@ def _protocol_namespace_for_event(event: dict[str, Any]) -> list[str]:
     return []
 
 
-def _base_stream_payload(event: dict[str, Any]) -> dict[str, Any]:
-    payload: dict[str, Any] = {
-        "name": str(event.get("name", "")),
-        "langgraph_event": str(event.get("event", "")),
-        "langgraph_run_id": str(event.get("run_id", "")),
-        "metadata": _normalize_stream_value(event.get("metadata", {})),
-        "tags": _normalize_stream_value(event.get("tags", [])),
-        "parent_ids": _normalize_stream_value(event.get("parent_ids", [])),
-    }
-    node_name = event.get("metadata", {}).get("langgraph_node") if isinstance(event.get("metadata"), dict) else None
-    if node_name:
-        payload["node"] = str(node_name)
-    return payload
-
-
-def _translate_stream_events(event: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
-    translated: list[tuple[str, dict[str, Any]]] = []
-    event_name = event.get("event")
-    metadata = event.get("metadata", {})
-    if not isinstance(metadata, dict):
-        metadata = {}
-
-    node_name = metadata.get("langgraph_node")
-    if event_name in {"on_chain_start", "on_chain_end"} and node_name and event.get("name") == node_name:
-        translated.append(
-            (
-                "node_start" if event_name == "on_chain_start" else "node_end",
-                _base_stream_payload(event),
-            )
-        )
-
-    if event_name in {"on_tool_start", "on_tool_end"}:
-        payload = _base_stream_payload(event)
-        data = event.get("data", {})
-        if isinstance(data, dict):
-            payload["data"] = _normalize_stream_value(data)
-            if "input" in data:
-                payload["input"] = _normalize_stream_value(data["input"])
-            if "output" in data:
-                payload["output"] = _normalize_stream_value(data["output"])
-        translated.append(("tool_start" if event_name == "on_tool_start" else "tool_end", payload))
-
-    if event_name in {"on_chain_stream", "on_chat_model_stream", "on_llm_stream"}:
-        data = event.get("data", {})
-        chunk = data.get("chunk") if isinstance(data, dict) else None
-        for message in _extract_chunk_messages(chunk):
-            content = _normalize_stream_value(getattr(message, "content", None))
-            tool_calls = _normalize_stream_value(getattr(message, "tool_calls", []) or [])
-            if content in ("", [], None) and not tool_calls:
-                continue
-            payload = _base_stream_payload(event)
-            payload["message_type"] = type(message).__name__
-            payload["content"] = content
-            if tool_calls:
-                payload["tool_calls"] = tool_calls
-            translated.append(("message_chunk", payload))
-        if not translated and event_name == "on_llm_stream":
-            content = _extract_text_chunk(chunk)
-            if content not in ("", None):
-                payload = _base_stream_payload(event)
-                payload["message_type"] = type(chunk).__name__
-                payload["content"] = content
-                translated.append(("message_chunk", payload))
-
-    return translated
-
-
 def _is_root_stream_event(event: dict[str, Any]) -> bool:
     parent_ids = event.get("parent_ids")
     return isinstance(parent_ids, list) and not parent_ids
@@ -897,16 +797,28 @@ async def execute_run(
     messages_metadata_seen: set[str] = set()
     _emitted_values_via_stream = False
     _requested_stream_modes = run_kwargs.get("stream_modes") or []
+    # Aligned with langgraph-api: strip events, always request debug,
+    # map messages-tuple -> messages, and always request updates so interrupts
+    # surface even when the client did not ask for updates.
+    _use_astream_events = "events" in _requested_stream_modes
     _want_messages_tuple = "messages-tuple" in _requested_stream_modes
-    _extra_stream_modes = [m for m in _requested_stream_modes if m not in ("messages", "messages-tuple", "updates")]
+    stream_modes_set = set(_requested_stream_modes) - {"events"}
+    if "debug" not in stream_modes_set:
+        stream_modes_set.add("debug")
+    if "messages-tuple" in stream_modes_set:
+        stream_modes_set.discard("messages-tuple")
+        stream_modes_set.add("messages")
+    _updates_explicitly_requested = "updates" in stream_modes_set
+    if not _updates_explicitly_requested:
+        stream_modes_set.add("updates")
+    _only_interrupt_updates = not _updates_explicitly_requested
     _astream_kwargs: dict[str, Any] = {}
     _context_schema = getattr(graph, "context_schema", None)
     if _context_schema is not None:
         _astream_kwargs["context"] = _resolve_run_context(
             _context_schema, explicit_context, config.get(CONF, {})
         )
-    if _extra_stream_modes:
-        _astream_kwargs["stream_mode"] = list(set(_extra_stream_modes) | {"updates"})
+    _astream_kwargs["stream_mode"] = list(stream_modes_set)
     _interrupt_before = run_kwargs.get("interrupt_before")
     if _interrupt_before:
         _astream_kwargs["interrupt_before"] = _interrupt_before
@@ -918,222 +830,293 @@ async def execute_run(
         _astream_kwargs["durability"] = _durability
     if run_kwargs.get("stream_subgraphs"):
         _astream_kwargs["subgraphs"] = True
-    async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
-        protocol_namespace = _protocol_namespace_for_event(stream_event)
-        for event_name, event_payload in _translate_stream_events(stream_event):
-            await _publish_translated_run_event(run_id, event_name, event_payload)
-        raw_event_name = stream_event.get("event")
-        if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:
-            data = stream_event.get("data", {})
-            chunk = data.get("chunk") if isinstance(data, dict) else None
-            extracted_messages = _extract_chunk_messages(chunk)
-            for message_index, message in enumerate(extracted_messages):
+    async def _publish_complete_messages_from_update(data: dict[str, Any], namespace: list[str] | None) -> None:
+        """Emit protocol-v2 events for complete (non-LLM) messages inside a state update."""
+        seen: set[str] = set()
+        for value in data.values():
+            if not isinstance(value, dict):
+                continue
+            messages = value.get("messages")
+            if not isinstance(messages, list):
+                continue
+            for message in messages:
+                if not isinstance(message, BaseMessage):
+                    continue
                 role = _protocol_role_for_message(message)
-                blocks = _protocol_blocks_for_message(message)
-                if role is None or not blocks:
+                if role not in ("tool", "human", "system"):
                     continue
-                explicit_message_id = getattr(message, "id", None)
-                if isinstance(explicit_message_id, str) and explicit_message_id:
-                    message_id = explicit_message_id
-                else:
-                    message_id = f"{str(stream_event.get('run_id', '')) or run_id}:message:{message_index}"
-                await protocol_messages.apublish_blocks(
-                    message_id=message_id,
-                    role=role,
-                    blocks=blocks,
-                    namespace=protocol_namespace,
+                message_id = getattr(message, "id", None)
+                if isinstance(message_id, str) and message_id:
+                    if message_id in seen:
+                        continue
+                    seen.add(message_id)
+                await _handle_live_message(
+                    message,
+                    metadata={},
+                    namespace=namespace,
+                    message_index=0,
                 )
-                # Emit ``messages/metadata`` once, then accumulate the message
-                # and emit ``messages/partial`` with the full accumulated payload.
-                first_seen = message_id not in messages_metadata_seen
-                if first_seen:
-                    messages_metadata_seen.add(message_id)
-                    await apublish_messages_metadata(
-                        thread_id,
-                        message_id=message_id,
-                        metadata=_normalize_stream_value(stream_event.get("metadata", {})) or {},
-                        namespace=protocol_namespace,
-                        run_id=run_id,
-                    )
-                if role in ("tool", "human", "system"):
-                    if first_seen:
-                        msg_dump = _normalize_stream_value(message)
-                        if isinstance(msg_dump, dict):
-                            await apublish_messages_complete(
-                                thread_id,
-                                messages=[msg_dump],
-                                namespace=protocol_namespace,
-                                run_id=run_id,
-                            )
-                            # LangGraph SDK 1.x useStream subscribes to
-                            # messages-tuple, not messages/complete. Mirror the
-                            # completed non-AI message onto that requested
-                            # channel so ToolMessage resolves the pending tool
-                            # call while the run is still streaming.
-                            if _want_messages_tuple:
-                                event_metadata = (
-                                    _normalize_stream_value(stream_event.get("metadata", {})) or {}
-                                )
-                                await apublish_messages_tuple(
-                                    thread_id,
-                                    chunk=msg_dump,
-                                    metadata=event_metadata,
-                                    namespace=protocol_namespace,
-                                    run_id=run_id,
-                                )
-                    continue
-                if _want_messages_tuple:
-                    chunk_dump = _normalize_stream_value(message)
-                    if isinstance(chunk_dump, dict):
-                        event_metadata = _normalize_stream_value(stream_event.get("metadata", {})) or {}
-                        await apublish_messages_tuple(
-                            thread_id,
-                            chunk=chunk_dump,
-                            metadata=event_metadata,
-                            namespace=protocol_namespace,
-                            run_id=run_id,
-                        )
-                existing = messages_partial_acc.get(message_id)
-                if existing is None:
-                    accumulated = message
-                elif not isinstance(message, BaseMessageChunk):
-                    # A full BaseMessage with an id we've been streaming is the
-                    # node's final assembled message — replace, don't re-add.
-                    accumulated = message
-                else:
-                    left = existing if isinstance(existing, BaseMessageChunk) else _to_chunk(existing)
-                    accumulated = left + message if left is not None else message
-                messages_partial_acc[message_id] = accumulated
-                # Wire format mirrors official LangGraph: lowercase ``type``
-                # ("ai", not "AIMessageChunk"). ``message_chunk_to_message``
-                # converts the accumulated chunk to its non-chunk equivalent
-                # before serialization.
-                output_message = (
-                    message_chunk_to_message(accumulated)
-                    if isinstance(accumulated, BaseMessageChunk)
-                    else accumulated
-                )
-                accumulated_dump = _normalize_stream_value(output_message)
-                if isinstance(accumulated_dump, dict):
-                    await apublish_messages_partial(
-                        thread_id,
-                        messages=[accumulated_dump],
-                        namespace=protocol_namespace,
-                        run_id=run_id,
-                    )
-            if raw_event_name == "on_llm_stream":
-                text = _extract_text_chunk(chunk)
-                if text not in ("", None):
-                    await protocol_messages.apublish_blocks(
-                        message_id=f"{str(stream_event.get('run_id', '')) or run_id}:message:0",
-                        role="ai",
-                        blocks=[{"type": "text", "text": text}],
-                        namespace=protocol_namespace,
-                    )
-        if raw_event_name == "on_tool_start":
-            metadata = stream_event.get("metadata", {})
-            data = stream_event.get("data", {})
-            await apublish_tool_event(
+
+    # Shared live-message handler used by both execution paths. Streams the
+    # protocol-v2 block events (message-start / content-block-*) plus the
+    # messages/metadata, messages/partial, messages/complete and messages-tuple
+    # wire events expected by langgraph-sdk.
+    async def _handle_live_message(
+        message: BaseMessage,
+        *,
+        metadata: dict[str, Any],
+        namespace: list[str] | None,
+        message_index: int,
+    ) -> None:
+        role = _protocol_role_for_message(message)
+        blocks = _protocol_blocks_for_message(message)
+        if role is None or not blocks:
+            return
+        explicit_message_id = getattr(message, "id", None)
+        if isinstance(explicit_message_id, str) and explicit_message_id:
+            message_id = explicit_message_id
+        else:
+            message_id = f"{run_id}:message:{message_index}"
+        await protocol_messages.apublish_blocks(
+            message_id=message_id,
+            role=role,
+            blocks=blocks,
+            namespace=namespace,
+        )
+        # Emit ``messages/metadata`` once, then accumulate the message and emit
+        # ``messages/partial`` with the full accumulated payload.
+        first_seen = message_id not in messages_metadata_seen
+        if first_seen:
+            messages_metadata_seen.add(message_id)
+            await apublish_messages_metadata(
                 thread_id,
-                tool_event="tool-started",
-                tool_call_id=str(stream_event.get("run_id", "")),
-                tool_name=str(stream_event.get("name", "tool")),
-                node=str(metadata.get("langgraph_node")) if isinstance(metadata, dict) and metadata.get("langgraph_node") else None,
-                input_payload=_normalize_stream_value(data.get("input")) if isinstance(data, dict) and "input" in data else None,
-                namespace=protocol_namespace,
-            )
-        if raw_event_name == "on_tool_end":
-            metadata = stream_event.get("metadata", {})
-            data = stream_event.get("data", {})
-            await apublish_tool_event(
-                thread_id,
-                tool_event="tool-finished",
-                tool_call_id=str(stream_event.get("run_id", "")),
-                tool_name=str(stream_event.get("name", "tool")),
-                node=str(metadata.get("langgraph_node")) if isinstance(metadata, dict) and metadata.get("langgraph_node") else None,
-                output_payload=_normalize_stream_value(data.get("output")) if isinstance(data, dict) and "output" in data else None,
-                namespace=protocol_namespace,
-            )
-        if raw_event_name == "on_custom_event":
-            data = stream_event.get("data")
-            await apublish_stream_mode_event(
-                thread_id,
-                method="custom",
-                data=_normalize_stream_value(data),
-                namespace=protocol_namespace,
+                message_id=message_id,
+                metadata=_normalize_stream_value(metadata) or {},
+                namespace=namespace,
                 run_id=run_id,
             )
-        if stream_event.get("event") == "on_chain_stream":
-            data = stream_event.get("data", {})
-            chunk = data.get("chunk") if isinstance(data, dict) else None
-            if isinstance(chunk, tuple) and len(chunk) == 2:
-                stream_mode_name, stream_mode_data = chunk
-                if stream_mode_name in ("custom", "debug", "tasks", "checkpoints", "events"):
-                    await apublish_stream_mode_event(
+        if role in ("tool", "human", "system"):
+            if first_seen:
+                msg_dump = _normalize_stream_value(message)
+                if isinstance(msg_dump, dict):
+                    await apublish_messages_complete(
                         thread_id,
-                        method=stream_mode_name,
-                        data=_normalize_stream_value(stream_mode_data),
-                        namespace=protocol_namespace,
+                        messages=[msg_dump],
+                        namespace=namespace,
                         run_id=run_id,
                     )
-                elif stream_mode_name == "values":
-                    normalized_values = _normalize_stream_value(stream_mode_data)
-                    if normalized_values:
-                        _emitted_values_via_stream = True
-                        await apublish_values_event(
+                    # LangGraph SDK 1.x useStream subscribes to
+                    # messages-tuple, not messages/complete. Mirror the
+                    # completed non-AI message onto that requested channel so
+                    # ToolMessage resolves the pending tool call while the run
+                    # is still streaming.
+                    if _want_messages_tuple:
+                        event_metadata = _normalize_stream_value(metadata) or {}
+                        await apublish_messages_tuple(
                             thread_id,
-                            values=normalized_values,
-                            namespace=protocol_namespace,
+                            chunk=msg_dump,
+                            metadata=event_metadata,
+                            namespace=namespace,
                             run_id=run_id,
                         )
-                elif stream_mode_name == "updates" and isinstance(stream_mode_data, dict):
-                    if "__interrupt__" in stream_mode_data:
-                        interrupt_chunk = stream_mode_data["__interrupt__"]
-                        interrupt_namespace = protocol_namespace
-                    normalized_chunk = _normalize_stream_value(stream_mode_data)
-                    if isinstance(normalized_chunk, dict):
-                        normalized_chunk.pop("__interrupt__", None)
-                        if normalized_chunk:
-                            await apublish_updates_event(
-                                thread_id,
-                                values=normalized_chunk,
-                                namespace=protocol_namespace,
-                                run_id=run_id,
-                            )
-            elif isinstance(chunk, dict):
-                if "__interrupt__" in chunk:
-                    interrupt_chunk = chunk["__interrupt__"]
-                    interrupt_namespace = protocol_namespace
-                normalized_chunk = _normalize_stream_value(chunk)
-                if isinstance(normalized_chunk, dict):
-                    normalized_chunk.pop("__interrupt__", None)
-                    if normalized_chunk:
-                        await apublish_updates_event(
-                            thread_id,
-                            values=normalized_chunk,
+            return
+        if _want_messages_tuple:
+            chunk_dump = _normalize_stream_value(message)
+            if isinstance(chunk_dump, dict):
+                event_metadata = _normalize_stream_value(metadata) or {}
+                await apublish_messages_tuple(
+                    thread_id,
+                    chunk=chunk_dump,
+                    metadata=event_metadata,
+                    namespace=namespace,
+                    run_id=run_id,
+                )
+        existing = messages_partial_acc.get(message_id)
+        if existing is None:
+            accumulated = message
+        elif not isinstance(message, BaseMessageChunk):
+            # A full BaseMessage with an id we've been streaming is the node's
+            # final assembled message 鈥?replace, don't re-add.
+            accumulated = message
+        else:
+            left = existing if isinstance(existing, BaseMessageChunk) else _to_chunk(existing)
+            accumulated = left + message if left is not None else message
+        messages_partial_acc[message_id] = accumulated
+        output_message = (
+            message_chunk_to_message(accumulated)
+            if isinstance(accumulated, BaseMessageChunk)
+            else accumulated
+        )
+        accumulated_dump = _normalize_stream_value(output_message)
+        if isinstance(accumulated_dump, dict):
+            await apublish_messages_partial(
+                thread_id,
+                messages=[accumulated_dump],
+                namespace=namespace,
+                run_id=run_id,
+            )
+
+    # Shared stream-mode handler: routes values / updates / custom / debug /
+    # tasks / checkpoints chunks to their protocol events and detects interrupts.
+    async def _handle_stream_mode(mode: str, data: Any, namespace: list[str] | None) -> None:
+        nonlocal interrupt_chunk, interrupt_namespace, result, _emitted_values_via_stream
+        if mode in ("custom", "debug", "tasks", "checkpoints", "events"):
+            await apublish_stream_mode_event(
+                thread_id,
+                method=mode,
+                data=_normalize_stream_value(data),
+                namespace=namespace,
+                run_id=run_id,
+            )
+        elif mode == "values":
+            normalized_values = _normalize_stream_value(data)
+            if normalized_values:
+                _emitted_values_via_stream = True
+                result = data if isinstance(data, dict) else normalized_values
+                await apublish_values_event(
+                    thread_id,
+                    values=normalized_values,
+                    namespace=namespace,
+                    run_id=run_id,
+                )
+        elif mode == "updates" and isinstance(data, dict):
+            if "__interrupt__" in data:
+                interrupt_chunk = data["__interrupt__"]
+                interrupt_namespace = namespace
+            # Complete (non-LLM) messages arrive inside the state update, not
+            # via the messages stream mode. Re-emit them as protocol-v2 message
+            # events so ToolMessage / HumanMessage still resolve for SDK clients
+            # even when the client did not request the updates stream mode.
+            await _publish_complete_messages_from_update(data, namespace)
+            if _only_interrupt_updates and "__interrupt__" not in data:
+                return
+            normalized_chunk = _normalize_stream_value(data)
+            if isinstance(normalized_chunk, dict):
+                normalized_chunk.pop("__interrupt__", None)
+                if normalized_chunk:
+                    await apublish_updates_event(
+                        thread_id,
+                        values=normalized_chunk,
+                        namespace=namespace,
+                        run_id=run_id,
+                    )
+
+    # Finalize the protocol message stream and, when no values event was emitted
+    # via the stream, publish the final state as a values event.
+    async def _finalize_stream(final_result: Any) -> None:
+        normalized_result = _normalize_stream_value(final_result)
+        if isinstance(normalized_result, dict):
+            messages = _extract_protocol_result_messages(normalized_result)
+            if isinstance(messages, list):
+                if protocol_messages.saw_live_messages:
+                    await protocol_messages.amerge_final_messages(messages=messages, run_id=run_id)
+                else:
+                    await apublish_message_transcript(thread_id, run_id=run_id, messages=messages)
+            await protocol_messages.afinish_all()
+            if not _emitted_values_via_stream:
+                await apublish_values_event(
+                    thread_id,
+                    values=normalized_result,
+                    namespace=[],
+                    run_id=run_id,
+                )
+
+    if _use_astream_events:
+        # events mode / remote graphs keep the astream_events path (raw events).
+        async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
+            protocol_namespace = _protocol_namespace_for_event(stream_event)
+            raw_event_name = stream_event.get("event")
+            if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:
+                data = stream_event.get("data", {})
+                chunk = data.get("chunk") if isinstance(data, dict) else None
+                extracted_messages = _extract_chunk_messages(chunk)
+                for message_index, message in enumerate(extracted_messages):
+                    await _handle_live_message(
+                        message,
+                        metadata=stream_event.get("metadata", {}),
+                        namespace=protocol_namespace,
+                        message_index=message_index,
+                    )
+                if raw_event_name == "on_llm_stream":
+                    text = _extract_text_chunk(chunk)
+                    if text not in ("", None):
+                        await protocol_messages.apublish_blocks(
+                            message_id=f"{str(stream_event.get('run_id', '')) or run_id}:message:0",
+                            role="ai",
+                            blocks=[{"type": "text", "text": text}],
                             namespace=protocol_namespace,
-                            run_id=run_id,
                         )
-        if stream_event.get("event") == "on_chain_end" and _is_root_stream_event(stream_event):
-            data = stream_event.get("data", {})
-            if isinstance(data, dict) and "output" in data:
-                result = data["output"]
-                normalized_result = _normalize_stream_value(result)
-                if isinstance(normalized_result, dict):
-                    messages = _extract_protocol_result_messages(normalized_result)
-                    if isinstance(messages, list):
-                        if protocol_messages.saw_live_messages:
-                            await protocol_messages.amerge_final_messages(messages=messages, run_id=run_id)
-                        else:
-                            await apublish_message_transcript(thread_id, run_id=run_id, messages=messages)
-                    await protocol_messages.afinish_all()
-                    if not _emitted_values_via_stream:
-                        await apublish_values_event(
-                            thread_id,
-                            values=normalized_result,
-                            namespace=protocol_namespace,
-                            run_id=run_id,
+            if raw_event_name == "on_custom_event":
+                await apublish_stream_mode_event(
+                    thread_id,
+                    method="custom",
+                    data=_normalize_stream_value(stream_event.get("data")),
+                    namespace=protocol_namespace,
+                    run_id=run_id,
+                )
+            if raw_event_name == "on_chain_stream":
+                data = stream_event.get("data", {})
+                chunk = data.get("chunk") if isinstance(data, dict) else None
+                if isinstance(chunk, tuple) and len(chunk) == 2:
+                    stream_mode_name, stream_mode_data = chunk
+                    await _handle_stream_mode(stream_mode_name, stream_mode_data, protocol_namespace)
+                elif isinstance(chunk, dict):
+                    await _handle_stream_mode("updates", chunk, protocol_namespace)
+            if raw_event_name == "on_chain_end" and _is_root_stream_event(stream_event):
+                data = stream_event.get("data", {})
+                if isinstance(data, dict) and "output" in data:
+                    result = data["output"]
+                    await _finalize_stream(result)
+    else:
+        # Default path: standard astream() stream. Each super-step and stream
+        # mode yields exactly one chunk, so updates can never be duplicated.
+        async with aclosing(
+            graph.astream(invocation, config, **_astream_kwargs)
+        ) as stream:
+            async for event in stream:
+                if _astream_kwargs.get("subgraphs"):
+                    ns, mode, chunk = event
+                else:
+                    mode, chunk = event
+                    ns = None
+                if mode == "messages":
+                    if not (isinstance(chunk, tuple) and len(chunk) == 2):
+                        continue
+                    msg, meta = chunk
+                    extracted_messages = _extract_chunk_messages(msg)
+                    for message_index, message in enumerate(extracted_messages):
+                        await _handle_live_message(
+                            message,
+                            metadata=meta,
+                            namespace=ns,
+                            message_index=message_index,
                         )
+                elif mode in ("updates", "values", "custom", "debug", "tasks", "checkpoints"):
+                    await _handle_stream_mode(mode, chunk, ns)
+        # astream has no on_chain_end: capture the final state from the
+        # checkpointer (includes subgraph results), falling back to the last
+        # values chunk already seen.
+        try:
+            # The langgraph root checkpoint lives under an empty checkpoint_ns
+            # (subgraphs use namespaced checkpoints); the run-scoped ns set in
+            # config would miss it, so probe the root ns when the run-scoped
+            # lookup comes back empty.
+            state = await graph.aget_state(config)
+            values = getattr(state, "values", None) if state is not None else None
+            if not isinstance(values, dict) or not values:
+                root_config = {
+                    **config,
+                    CONF: {**(config.get(CONF) or {}), "checkpoint_ns": ""},
+                }
+                state = await graph.aget_state(root_config)
+                values = getattr(state, "values", None) if state is not None else None
+            if isinstance(values, dict):
+                result = values
+        except Exception:
+            pass
+        if result is not None:
+            await _finalize_stream(result)
+
 
     if interrupt_chunk is not None:
         if isinstance(result, dict):
