@@ -124,19 +124,28 @@ async def test_live_provider_streaming_http_flow(live_provider_base_url: str) ->
             for line in stream.text.splitlines()
             if line.startswith("data: ")
         ]
-        message_chunks = [
+        # The default run-stream replay returns the run's persisted protocol
+        # events. A run created without an explicit stream_mode does not stream
+        # incremental LLM tokens (no ``messages`` channel events), so the final
+        # answer is read back from the last state snapshot (``values`` payload)
+        # instead of token deltas.
+        state_payloads = [
             payload
             for payload in payloads
-            if payload.get("event") == "message_chunk"
-            and payload.get("langgraph_event") in {"on_chat_model_stream", "on_llm_stream"}
-            and _text_from_content(payload.get("content")).strip()
+            if isinstance(payload, dict) and isinstance(payload.get("messages"), list)
         ]
+        assert state_payloads
+        final_messages = state_payloads[-1]["messages"]
+        final_ai = next(
+            (m for m in reversed(final_messages) if isinstance(m, dict) and m.get("type") == "ai"),
+            None,
+        )
+        assert final_ai is not None
 
         assert payloads[0]["event"] == "start"
         assert "event: start" in stream.text
         assert "event: end" in stream.text
-        assert len(message_chunks) >= 2
-        assert _normalize_text("".join(_text_from_content(payload.get("content")) for payload in message_chunks)) == _normalize_text(
+        assert _normalize_text(str(final_ai.get("content", ""))) == _normalize_text(
             waited_body["output"]["final_text"]
         )
 
