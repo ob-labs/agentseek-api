@@ -181,7 +181,6 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
                 "graph_id": "stress_test",
                 "metadata": {"suite": "live"},
                 "config": {"configurable": {"temperature": 0}},
-                "context": {"tenant": "mysql-family"},
                 "description": "live assistant",
             },
         )
@@ -189,6 +188,8 @@ async def test_live_system_and_assistant_endpoints(e2e_base_url: str) -> None:
         patched_body = patched.json()
         assert patched_body["graph_id"] == "stress_test"
         assert patched_body["metadata"]["suite"] == "live"
+        assert patched_body["config"] == {"tags": [], "configurable": {"temperature": 0}}
+        assert patched_body["context"] == {"temperature": 0}
         assert patched_body["description"] == "live assistant"
 
         graph = await client.get(f"/assistants/{default_assistant['assistant_id']}/graph")
