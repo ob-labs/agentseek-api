@@ -771,3 +771,207 @@ def test_protocol_message_stream_state_merges_open_messages_against_transcript_t
     assert message_starts == [{"event": "message-start", "role": "ai", "id": "m1"}]
     assert {"event": "content-block-delta", "index": 0, "delta": {"type": "text-delta", "text": "lo"}} in message_events
     assert [event for event in message_events if event["event"] == "message-finish"] == [{"event": "message-finish"}]
+
+
+class FakeAstreamEventsGraph(FakeGraph):
+    """Fake graph for the ``events`` stream mode: executes through the retained
+    ``astream_events`` path (raw event stream) instead of the default astream."""
+
+    async def astream_events(self, prepared_input: dict, config: dict, *, version: str, **kwargs):
+        self.configs.append(config)
+        yield {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": AIMessageChunk(content="hi")},
+            "metadata": {"langgraph_node": "call_model"},
+            "parent_ids": [],
+        }
+        yield {
+            "event": "on_custom_event",
+            "data": {"custom": "payload"},
+            "metadata": {},
+            "parent_ids": [],
+        }
+        yield {
+            "event": "on_chain_stream",
+            "data": {"chunk": ("values", {"output": {"ok": True}})},
+            "metadata": {"langgraph_node": "root"},
+            "parent_ids": [],
+        }
+        yield {
+            "event": "on_chain_end",
+            "data": {"output": {"ok": True}},
+            "metadata": {"langgraph_node": "root"},
+            "parent_ids": [],
+        }
+
+
+class _FakeAstreamEventsEntry(FakeEntry):
+    graph = FakeAstreamEventsGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None, store=None) -> FakeAstreamEventsGraph:
+        return _FakeAstreamEventsEntry.graph
+
+    @staticmethod
+    def extract_output(result: dict, _payload: dict) -> dict:
+        return result if isinstance(result, dict) else {}
+
+
+class _FakeAstreamEventsLangGraphService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> _FakeAstreamEventsEntry:
+        return _FakeAstreamEventsEntry()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_events_mode_uses_astream_events_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``stream_mode=["events"]`` keeps the raw ``astream_events`` path: message
+    chunks surface as protocol messages, custom events surface on the custom
+    channel, and the root on_chain_end finalizes the stream."""
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: _FakeAstreamEventsLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    result = await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"msg": "hello"},
+        user_id="user-1",
+        kwargs={"stream_modes": ["events"]},
+    )
+
+    assert result.output == {"ok": True}
+    message_events = [e for e in protocol_broker._events["t1"] if e["method"] == "messages"]
+    assert message_events, "expected protocol message events from on_chat_model_stream"
+    custom_events = [e for e in protocol_broker._events["t1"] if e["method"] == "custom"]
+    assert custom_events
+    assert custom_events[0]["params"]["data"] == {"custom": "payload"}
+
+
+class FakeSubgraphAggregateGraph(FakeGraph):
+    """Graph whose root-level on_chain_end result differs from the values chunk,
+    exercising the final-state capture fallback via aget_state root probe."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (["sub:1"], "values", {"output": {"partial": True}})
+
+    async def aget_state(self, config: dict):
+        if not (config.get(CONF) or {}).get("checkpoint_ns"):
+            return SimpleNamespace(values={"output": {"final": True}})
+        return SimpleNamespace(values=None)
+
+
+class _FakeSubgraphAggregateEntry(FakeEntry):
+    graph = FakeSubgraphAggregateGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None, store=None) -> FakeSubgraphAggregateGraph:
+        return _FakeSubgraphAggregateEntry.graph
+
+
+class _FakeSubgraphAggregateService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> _FakeSubgraphAggregateEntry:
+        return _FakeSubgraphAggregateEntry()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_subgraphs_namespace_uses_root_state_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``stream_subgraphs=True`` events are (ns, mode, chunk) triples and,
+    absent a root values chunk, the final state is captured from the checkpointer
+    root-namespace probe."""
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: _FakeSubgraphAggregateService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    result = await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"msg": "hello"},
+        user_id="user-1",
+        kwargs={"stream_modes": ["values"], "stream_subgraphs": True},
+    )
+
+    assert result.output == {"final": True}
+    value_events = [e for e in protocol_broker._events["t1"] if e["method"] == "values"]
+    assert value_events
+    assert value_events[0]["params"]["namespace"] == ["sub:1"]
+
+
+class FakeInterruptResultGraph(FakeInterruptGraph):
+    """HITL interrupt: the interrupt arrives in the updates stream with a
+    non-empty state, so the run result must merge __interrupt__ into the final
+    values and emit input.requested."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (
+            "updates",
+            {
+                "__interrupt__": [
+                    type("Interrupt", (), {"value": "Provide value:", "id": "interrupt-1"})(),
+                ],
+                "foo": prepared_input["input"]["foo"],
+            },
+        )
+
+
+class _FakeInterruptResultEntry(FakeEntry):
+    graph = FakeInterruptResultGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None, store=None) -> FakeInterruptResultGraph:
+        return _FakeInterruptResultEntry.graph
+
+    @staticmethod
+    def extract_output(result: dict, _payload: dict) -> dict:
+        interrupts = result.get("__interrupt__", [])
+        return {
+            "state": result.get("foo"),
+            "interrupted": bool(interrupts),
+            "interrupts": [{"value": item.value, "id": item.id} for item in interrupts],
+        }
+
+
+class _FakeInterruptResultService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> _FakeInterruptResultEntry:
+        return _FakeInterruptResultEntry()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_interrupt_merges_into_result_and_emits_input_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HITL interrupt with non-empty state: __interrupt__ is merged into the run
+    result (so extract_output sees it) and input.requested is emitted."""
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: _FakeInterruptResultService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    result = await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"foo": "hello"},
+        user_id="user-1",
+        kwargs={"stream_modes": ["values"]},
+    )
+
+    assert result.interrupted is True
+    assert result.interrupts == [{"value": "Provide value:", "id": "interrupt-1"}]
+    input_requested = [e for e in protocol_broker._events["t1"] if e["method"] == "input.requested"]
+    assert len(input_requested) == 1
+    assert input_requested[0]["params"]["data"]["payload"] == "Provide value:"
