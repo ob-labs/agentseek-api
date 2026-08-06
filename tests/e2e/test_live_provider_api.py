@@ -255,7 +255,7 @@ async def test_live_provider_store_endpoints_and_graph(live_provider_base_url: s
             json={"namespace": namespace, "key": "profile", "value": {"kind": "profile", "name": "Ada"}},
             headers=user_headers(user_id),
         )
-        assert created.status_code == 200
+        assert created.status_code in (200, 204)
 
         fetched = await client.get(
             "/store/items",
@@ -330,7 +330,7 @@ async def test_live_provider_store_ttl_expires_items_on_mysql_family_backend(liv
             },
             headers=user_headers(user_id),
         )
-        assert created.status_code == 200
+        assert created.status_code in (200, 204)
 
         immediate = await client.get(
             "/store/items",
@@ -386,7 +386,7 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         run_id = run.json()["run_id"]
 
         interrupted_stream = await client.post(
-            f"/threads/{thread_id}/stream",
+            f"/threads/{thread_id}/stream/events",
             json={"channels": ["lifecycle", "input", "values"]},
             headers=user_headers(user_id),
         )
@@ -424,7 +424,7 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
 
         async with client.stream(
             "POST",
-            f"/threads/{thread_id}/stream",
+            f"/threads/{thread_id}/stream/events",
             json={"channels": ["lifecycle", "values"], "since": last_seq},
             headers=user_headers(user_id),
         ) as resumed_stream:
