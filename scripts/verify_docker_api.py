@@ -234,8 +234,13 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(stream_body, str)
     assert "text/event-stream" in stream_content_type
     payloads = _stream_payloads(stream_body)
-    assert any(payload["event"] == "start" for payload in payloads)
-    assert any(payload["event"] == "end" and payload.get("status") == "success" for payload in payloads)
+    assert any(isinstance(payload, dict) and payload.get("event") == "start" for payload in payloads)
+    assert any(
+        isinstance(payload, dict)
+        and payload.get("event") == "end"
+        and payload.get("status") == "success"
+        for payload in payloads
+    )
 
     _, stateless_run, _ = _request(
         base_url=base_url,
@@ -326,7 +331,7 @@ def _assert_common_flow(base_url: str) -> None:
     end_statuses = {
         payload["status"]
         for payload in _stream_payloads(resumed_stream)
-        if payload["event"] == "end"
+        if isinstance(payload, dict) and payload.get("event") == "end"
     }
     assert "success" in end_statuses
     stress_waited, _ = _assert_sample_run(
@@ -358,7 +363,12 @@ def _assert_common_flow(base_url: str) -> None:
     react_output = react_waited["output"]
     assert isinstance(react_output, dict)
     assert "42" in str(react_output["final_text"])
-    assert any(payload["event"] == "tool_start" and payload["name"] == "lookup" for payload in react_payloads)
+    assert any(
+        isinstance(payload, dict)
+        and payload.get("event") == "tool-started"
+        and payload.get("tool_name") == "lookup"
+        for payload in react_payloads
+    )
 
     stress_tool_waited, stress_tool_payloads = _assert_sample_run(
         base_url=base_url,
@@ -372,7 +382,11 @@ def _assert_common_flow(base_url: str) -> None:
     tool_messages = [message for message in stress_tool_output["transcript"] if message["type"] == "ToolMessage"]
     assert len(tool_messages) == 3
     tool_starts = [
-        payload for payload in stress_tool_payloads if payload["event"] == "tool_start" and payload["name"] == "slow_process"
+        payload
+        for payload in stress_tool_payloads
+        if isinstance(payload, dict)
+        and payload.get("event") == "tool-started"
+        and payload.get("tool_name") == "slow_process"
     ]
     assert len(tool_starts) == 3
 
@@ -501,7 +515,7 @@ def _assert_resume_check(base_url: str, *, thread_id: str, run_id: str, resume: 
     end_statuses = [
         payload["status"]
         for payload in _stream_payloads(run_stream)
-        if payload["event"] == "end"
+        if isinstance(payload, dict) and payload.get("event") == "end"
     ]
     assert "interrupted" in end_statuses
     assert "success" in end_statuses
