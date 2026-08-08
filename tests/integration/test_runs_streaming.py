@@ -303,3 +303,75 @@ def test_run_client_config_overrides_assistant_config_defaults(client: TestClien
     configurable = config.get("configurable") or {}
     assert configurable.get("client_param") == "assistant-default"
     assert configurable.get("model") == "client-model"
+
+
+def _sse_ids(stream_text: str) -> list[int]:
+    ids: list[int] = []
+    for line in stream_text.splitlines():
+        if line.startswith("id: "):
+            ids.append(int(line[len("id: "):].strip()))
+    return ids
+
+
+def test_run_stream_sse_ids_are_monotonic(client: TestClient) -> None:
+    """Every SSE ``id`` in the default run stream shares one monotonic cursor.
+
+    The replay merges run-scoped lifecycle events (start/end) with
+    thread-protocol events that carry their own independent sequence domains.
+    A non-monotonic cursor (e.g. ``1, 3, ...25, 2``) breaks Last-Event-ID
+    resume, so all emitted ids must be strictly increasing.
+    """
+    assistant = client.post("/assistants", json={"name": "streaming-monotonic", "graph_id": "react_agent"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "monotonic"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    run = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "stream"}},
+    )
+    assert run.status_code == 200
+    run_id = run.json()["run_id"]
+
+    stream_response = client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
+    assert stream_response.status_code == 200
+    ids = _sse_ids(stream_response.text)
+    assert len(ids) >= 2, "expected at least start + end frames"
+    assert ids == sorted(ids), f"SSE ids are not monotonic: {ids}"
+    assert len(set(ids)) == len(ids), f"SSE ids are not unique: {ids}"
+
+
+def test_run_stream_resume_after_terminal_end_does_not_replay(client: TestClient) -> None:
+    """Reconnecting with the terminal frame's Last-Event-ID must not replay
+    already-delivered events."""
+    assistant = client.post("/assistants", json={"name": "streaming-resume", "graph_id": "react_agent"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "resume"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    run = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"message": "stream"}},
+    )
+    assert run.status_code == 200
+    run_id = run.json()["run_id"]
+
+    full = client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
+    assert full.status_code == 200
+    ids = _sse_ids(full.text)
+    assert ids, "stream produced no id frames"
+    last_id = ids[-1]
+
+    resumed = client.get(
+        f"/threads/{thread_id}/runs/{run_id}/stream",
+        headers={"Last-Event-ID": str(last_id)},
+    )
+    assert resumed.status_code == 200
+    resumed_ids = _sse_ids(resumed.text)
+    assert resumed_ids == [], f"resume after terminal end should replay nothing, got: {resumed_ids}"
