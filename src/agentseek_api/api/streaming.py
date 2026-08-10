@@ -137,7 +137,18 @@ async def handle_protocol_command(
         try:
             run_kwargs: dict[str, Any] | None = None
             if payload.params.get("stream_mode") is not None:
-                run_kwargs = {"stream_modes": normalize_stream_modes(payload.params.get("stream_mode"))}
+                # Validate stream mode before submission: an invalid value is a
+                # client error (400), not a missing resource (404).
+                try:
+                    stream_modes = normalize_stream_modes(payload.params.get("stream_mode"))
+                except ValueError as exc:
+                    return _protocol_error(
+                        request_id=payload.id,
+                        code="invalid_argument",
+                        message=str(exc),
+                        status_code=400,
+                    )
+                run_kwargs = {"stream_modes": stream_modes}
             if payload.params.get("stream_subgraphs"):
                 run_kwargs = run_kwargs or {}
                 run_kwargs["stream_subgraphs"] = True
