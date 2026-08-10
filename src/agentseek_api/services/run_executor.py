@@ -1093,6 +1093,16 @@ async def execute_run(
         # events mode / remote graphs keep the astream_events path (raw events).
         async for stream_event in graph.astream_events(invocation, config, version="v2", **_astream_kwargs):
             protocol_namespace = _protocol_namespace_for_event(stream_event)
+            # Publish each raw astream_events() item onto the ``events``
+            # channel so stream_mode="events" actually surfaces the raw event
+            # stream at the HTTP boundary, not just the translated side effects.
+            await apublish_stream_mode_event(
+                thread_id,
+                method="events",
+                data=_normalize_stream_value(stream_event),
+                namespace=protocol_namespace,
+                run_id=run_id,
+            )
             raw_event_name = stream_event.get("event")
             if raw_event_name in {"on_chat_model_stream", "on_llm_stream", "on_chain_stream"}:
                 data = stream_event.get("data", {})

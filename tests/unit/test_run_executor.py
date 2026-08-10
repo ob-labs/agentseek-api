@@ -850,6 +850,10 @@ async def test_execute_run_events_mode_uses_astream_events_path(monkeypatch: pyt
     custom_events = [e for e in protocol_broker._events["t1"] if e["method"] == "custom"]
     assert custom_events
     assert custom_events[0]["params"]["data"] == {"custom": "payload"}
+    # Each raw astream_events() item is published onto the events channel.
+    raw_events = [e for e in protocol_broker._events["t1"] if e["method"] == "events"]
+    assert raw_events, "expected raw astream_events() items on the events channel"
+    assert len(raw_events) >= 4, "expected one events frame per astream_events() item"
 
 
 class FakeSubgraphAggregateGraph(FakeGraph):
