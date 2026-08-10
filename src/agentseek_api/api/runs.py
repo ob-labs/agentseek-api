@@ -914,77 +914,47 @@ async def stream_run(
             )
 
     async def _event_iter() -> AsyncIterator[str]:
-        # Single monotonic SSE cursor. Run-scoped lifecycle records (start/end)
-        # and thread-protocol events each carry their own independent ``seq``
-        # domains; mixing them directly yields non-monotonic ``id:`` values
-        # (e.g. ``1, 3, ...25, 2``) which breaks Last-Event-ID resume.
-        #
-        # The replay set (run lifecycle + thread protocol events + terminal end)
-        # is a fixed, ordered list: we assign each frame a deterministic cursor
-        # equal to its 1-based position in that list, so a reconnect with
-        # ``Last-Event-ID`` can skip exactly the frames already delivered and
-        # never replays them. Live frames (after replay) continue from the end
-        # of the list with the same monotonic counter.
-        replay_frames: list[tuple[int, str, str]] = []  # (run_seq_or_0, event_name, body)
-
+        # The run stream is a single run-scoped, monotonically sequenced log of
+        # both lifecycle records (start/end) and protocol frames
+        # (values/updates/messages/tools). Protocol events are appended to it
+        # at publication time, so the SSE cursor is one domain: a reconnect
+        # with ``Last-Event-ID`` (run stream seq) reads only frames with a
+        # higher seq and never replays already-delivered events.
         records_by_seq: dict[int, dict[str, object]] = {
-            seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=0)
+            seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
         }
-        records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=0)})
+        records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=after_seq)})
         # Run-scoped lifecycle records (start/end) from run_jobs. The terminal
-        # "end" record is deferred until after the protocol thread events so
-        # the stream ends with the run's terminal status.
+        # "end" record is deferred until after the protocol frames so the
+        # stream ends with the run's terminal status.
         end_records: dict[int, dict[str, object]] = {
             seq: event
             for seq, event in records_by_seq.items()
             if str(event.get("event")) == "end"
         }
+        current_seq = after_seq
         for seq in sorted(records_by_seq):
             event = records_by_seq[seq]
             if str(event.get("event")) == "end":
                 continue
-            event_name = str(event.get("event", "message"))
-            event_payload: dict[str, object] = {"run_id": run_id, **event}
-            replay_frames.append((seq, event_name, safe_json_dumps(event_payload)))
-
-        # Replay the run's protocol-v2 thread events so the default endpoint
-        # still returns the full stream (run-scoped stream events are no longer
-        # published by the astream migration).
-        try:
-            thread_events = await load_thread_stream_events(
-                thread_id,
-                channels=DEFAULT_RUN_STREAM_REPLAY_CHANNELS,
-                namespaces=None,
-                depth=None,
-                after_seq=0,
-            )
-        except Exception:  # noqa: BLE001 - replay is best-effort
-            thread_events = []
-        for event in thread_events:
-            if event.get("params", {}).get("run_id") != run_id:
-                continue
-            replay_frames.append((0, str(event.get("method", "message")), safe_json_dumps(event.get("params", {}).get("data", {}))))
+            current_seq = max(current_seq, seq)
+            if "method" in event:
+                yield _protocol_event_sse(
+                    seq=seq,
+                    event_name=str(event["method"]),
+                    data=event.get("params", {}).get("data", {}),
+                )
+            else:
+                event_name = str(event.get("event", "message"))
+                event_payload: dict[str, object] = {"run_id": run_id, **event}
+                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
 
         for seq in sorted(end_records):
             event = end_records[seq]
+            current_seq = max(current_seq, seq)
             event_name = str(event.get("event", "message"))
             event_payload: dict[str, object] = {"run_id": run_id, **event}
-            replay_frames.append((seq, event_name, safe_json_dumps(event_payload)))
-
-        # Replay frames are emitted with a deterministic cursor equal to their
-        # 1-based position in the ordered replay set. A reconnect with
-        # ``Last-Event-ID`` skips the already-delivered frames (``idx <=
-        # after_seq``) and never replays them; live frames after the replay set
-        # continue numbering from the end of the set.
-        emit_seq = len(replay_frames)
-        current_run_seq = 0
-
-        for idx, (run_seq, event_name, body) in enumerate(replay_frames, start=1):
-            if run_seq:
-                current_run_seq = max(current_run_seq, run_seq)
-            if idx <= after_seq:
-                continue
-            yield f"id: {idx}\nevent: {event_name}\ndata: {body}\n\n"
+            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
 
         use_redis_executor = _uses_redis_executor()
         if use_redis_executor:
@@ -992,35 +962,45 @@ async def stream_run(
                 _iter_persisted_run_records(
                     run_id=run_id,
                     thread_id=thread_id,
-                    after_seq=current_run_seq,
+                    after_seq=current_seq,
                 )
             ):
                 if item is None:
                     yield sse_keepalive_comment()
                     continue
                 seq, event = item
-                event_name = str(event.get("event", "message"))
-                event_payload: dict[str, object] = {"run_id": run_id, **event}
-                emit_seq += 1
-                if emit_seq <= after_seq:
-                    continue
-                yield f"id: {emit_seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
+                current_seq = max(current_seq, seq)
+                if "method" in event:
+                    yield _protocol_event_sse(
+                        seq=seq,
+                        event_name=str(event["method"]),
+                        data=event.get("params", {}).get("data", {}),
+                    )
+                else:
+                    event_name = str(event.get("event", "message"))
+                    event_payload: dict[str, object] = {"run_id": run_id, **event}
+                    yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
             return
 
         if row.status in TERMINAL_RUN_STATUSES:
             return
 
-        async for item in iter_with_sse_keepalives(run_broker.stream_records(run_id, after_seq=current_run_seq)):
+        async for item in iter_with_sse_keepalives(run_broker.stream_records(run_id, after_seq=current_seq)):
             if item is None:
                 yield sse_keepalive_comment()
                 continue
             seq, event = item
-            event_name = str(event.get("event", "message"))
-            event_payload: dict[str, object] = {"run_id": run_id, **event}
-            emit_seq += 1
-            if emit_seq <= after_seq:
-                continue
-            yield f"id: {emit_seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
+            current_seq = max(current_seq, seq)
+            if "method" in event:
+                yield _protocol_event_sse(
+                    seq=seq,
+                    event_name=str(event["method"]),
+                    data=event.get("params", {}).get("data", {}),
+                )
+            else:
+                event_name = str(event.get("event", "message"))
+                event_payload: dict[str, object] = {"run_id": run_id, **event}
+                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
 
     return StreamingResponse(
         _event_iter(),

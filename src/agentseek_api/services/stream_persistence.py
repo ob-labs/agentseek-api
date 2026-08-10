@@ -182,7 +182,7 @@ async def persist_run_stream_event(run_id: str, *, seq: int, payload: dict[str, 
                     RunStreamEvent(
                         run_id=run_id,
                         seq=seq,
-                        event=str(payload.get("event", "message")),
+                        event=str(payload.get("method") or payload.get("event", "message")),
                         payload_json=dict(payload),
                     )
                 )

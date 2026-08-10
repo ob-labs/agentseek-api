@@ -209,7 +209,40 @@ class ThreadProtocolEventBroker:
 thread_protocol_broker = ThreadProtocolEventBroker()
 
 
+async def _persist_protocol_to_run_stream(run_id: str, payload: dict[str, Any]) -> None:
+    """Append a protocol event to the run's ordered stream.
+
+    Keeps the run stream (the source for ``GET /runs/{id}/stream``) as a single
+    run-scoped, monotonically sequenced log of both lifecycle records and
+    protocol frames, so the replay cursor is one domain instead of mixing run
+    and thread sequence spaces.
+    """
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
+        from agentseek_api.services.stream_persistence import append_redis_run_stream_event
+
+        try:
+            await append_redis_run_stream_event(run_id, payload)
+        except Exception:
+            logger.warning(
+                "Failed to atomically append Redis run stream event",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+        return
+    from agentseek_api.services.run_state import run_broker
+    from agentseek_api.services.stream_persistence import persist_run_stream_event
+
+    seq, _ = run_broker.publish_protocol(run_id, payload)
+    try:
+        await persist_run_stream_event(run_id, seq=seq, payload=payload)
+    except Exception:
+        return
+
+
 async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    run_id = (payload.get("params") or {}).get("run_id")
+    if run_id:
+        await _persist_protocol_to_run_stream(run_id, payload)
     if settings.EXECUTOR_BACKEND.strip().lower() != "redis":
         return await thread_protocol_broker.apublish(thread_id, payload)
     try:
