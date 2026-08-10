@@ -1154,6 +1154,14 @@ async def execute_run(
             async for event in stream:
                 if _astream_kwargs.get("subgraphs"):
                     ns, mode, chunk = event
+                    # astream(subgraphs=True) yields tuple namespaces. The
+                    # in-memory broker's live filter compares namespace slices
+                    # to list prefixes, so a tuple would never match and the
+                    # event would vanish under namespace filtering. Normalize
+                    # to a list before publication (persistence already
+                    # JSON-normalizes, which is why this only shows up live).
+                    if isinstance(ns, tuple):
+                        ns = list(ns)
                 else:
                     mode, chunk = event
                     ns = None

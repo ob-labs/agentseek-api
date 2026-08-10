@@ -979,3 +979,27 @@ async def test_execute_run_interrupt_merges_into_result_and_emits_input_requeste
     input_requested = [e for e in protocol_broker._events["t1"] if e["method"] == "input.requested"]
     assert len(input_requested) == 1
     assert input_requested[0]["params"]["data"]["payload"] == "Provide value:"
+
+
+class FakeTupleNamespaceGraph(FakeGraph):
+    """astream(subgraphs=True) yields tuple namespaces; they must be normalized
+    to lists before publication so the live broker's namespace filter (which
+    compares list slices against list prefixes) can match them."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (("node_1:task-1",), "updates", {"step": "partial"})
+        yield (("node_1:task-1",), "values", {"output": {"step": "final"}})
+
+
+@pytest.mark.asyncio
+async def test_execute_run_normalizes_tuple_namespaces_for_live_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _run_fake_graph(
+        monkeypatch, FakeTupleNamespaceGraph(), stream_modes=["updates"], stream_subgraphs=True
+    )
+    updates_events = [event for event in thread_events if event["method"] == "updates"]
+    assert updates_events, "expected updates event from tuple-namespaced subgraph"
+    assert updates_events[0]["params"]["namespace"] == ["node_1:task-1"]
+    assert isinstance(updates_events[0]["params"]["namespace"], list)
