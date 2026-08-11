@@ -40,12 +40,11 @@ Current release boundary:
 
 | Workflow | Use it when | Recommended command |
 | --- | --- | --- |
-| `langgraph dev` | You want the fastest mocked or in-memory local API loop for graph prototyping or Studio experimentation. | `langgraph dev` |
 | `agentseek-api dev` | You want the real AgentSeek API surface with your actual MySQL-family / seekdb / OceanBase-style persistence, auth, and Docker/runtime behavior. | `uv run agentseek-api dev` |
 
-Use `langgraph dev` when you do not need real backend validation. Use
-`agentseek-api dev` when you want to exercise the actual API contract this repo
-ships.
+Use `agentseek-api dev` for local graph development and for exercising the API
+contract this repo ships. Configure an in-memory or mock graph through the
+project graph manifest when persistence is not required.
 
 ### 1. Install
 
@@ -299,9 +298,9 @@ uv run agentseek-api version
   - Supports `--wait`, `--image`, `--base-image`, `--postgres-uri`,
     `--recreate`, and `--no-recreate`
 
-Some LangGraph CLI-shaped flags are parsed for command compatibility but
-rejected when their runtime behavior is not implemented yet. For mocked,
-in-memory, or tunneled local workflows, prefer `langgraph dev`.
+Some LangGraph-compatible flags are parsed for command compatibility but
+rejected when their runtime behavior is not implemented yet. Use
+`agentseek-api dev` with the project graph manifest for local workflows.
 
 ## ✨ Features
 
@@ -349,8 +348,8 @@ Cron-enabled deployments run three long-lived roles:
 - Scheduler: claims due cron jobs and submits their runs into the runtime
 
 For local development against a real backend, use `uv run agentseek-api dev`.
-For mocked or in-memory graph iteration, use `langgraph dev` instead. For
-durable cron execution, run the API server, worker, and scheduler together
+For mocked or in-memory graph iteration, use `agentseek-api dev` with an
+in-memory graph configuration. For durable cron execution, run the API server, worker, and scheduler together
 against the same database and Redis instance.
 
 ## 🗂️ Config
@@ -419,7 +418,7 @@ Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
 - Set `auth.disable_studio_auth` to `true` if Studio should use the same normal
   API auth path as every other client during `dev`
 - If you only need a mocked local API server for Studio experiments, use
-  `langgraph dev` instead of AgentSeek
+  `agentseek-api dev` with an in-memory graph configuration
 
 ## 🔌 MCP
 

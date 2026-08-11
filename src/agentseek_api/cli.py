@@ -14,6 +14,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
+from dotenv import dotenv_values
+
 from agentseek_api import __version__
 from agentseek_api.settings import DEFAULT_API_PORT
 
@@ -147,18 +149,8 @@ def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None
 
 
 def _parse_env_file(env_file: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for line_number, raw_line in enumerate(env_file.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        if "=" not in line:
-            raise CliError(f"Env file '{env_file}' has an invalid line {line_number}: '{raw_line}'.")
-        key, value = line.split("=", maxsplit=1)
-        values[key.strip()] = value.strip().strip("\"'")
-    return values
+    values = dotenv_values(env_file)
+    return {key: value for key, value in values.items() if value is not None}
 
 
 def _resolve_path_from_config(path_text: str, *, config_path: Path) -> Path:
@@ -277,7 +269,8 @@ def build_runtime_env(
     cwd: Path,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    env = dict(os.environ if base_env is None else base_env)
+    shell_env = dict(os.environ if base_env is None else base_env)
+    env: dict[str, str] = {}
     config: CliConfig | None = _load_cli_config(config_path) if config_path is not None else None
     if config is not None:
         if config.env_file is not None:
@@ -290,6 +283,10 @@ def build_runtime_env(
         if not resolved_env_file.exists():
             raise CliError(f"Env file '{resolved_env_file}' does not exist.")
         env.update(_parse_env_file(resolved_env_file))
+    # The launching shell is the highest-precedence source. This is important
+    # for agentseek dev, whose child environment may also be described by a
+    # langgraph.json env file.
+    env.update(shell_env)
     if config_path is not None:
         env["AGENTSEEK_GRAPHS"] = str(config_path)
     return env
@@ -974,7 +971,7 @@ def run_namespace(
                     "allow_blocking",
                     "tunnel",
                 ),
-                hint="Use 'langgraph dev' for mocked or tunneled local workflows.",
+                hint="Use 'agentseek-api dev' with a project graph configuration.",
             )
             return _execute_dev_command(args, runner=run, cwd=workdir, stdout=out)
         if command == "serve":

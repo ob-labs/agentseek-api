@@ -337,7 +337,7 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
 
     assert exit_code == 2
     assert "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
-    assert "Use 'langgraph dev' for mocked or tunneled local workflows." in stderr.getvalue()
+    assert "Use 'agentseek-api dev' with a project graph configuration." in stderr.getvalue()
 
 
 def test_dev_command_marks_runtime_as_local_dev_for_studio_auth(tmp_path: Path) -> None:
@@ -836,31 +836,49 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Pa
     assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]' in generated
 
 
-def test_build_runtime_env_rejects_invalid_env_lines(tmp_path: Path) -> None:
-    from agentseek_api.cli import build_runtime_env
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("BROKEN_LINE\n", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="invalid line 1"):
-        build_runtime_env(config_path=None, env_file=str(env_file), cwd=tmp_path, base_env={})
-
-
 def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
     from agentseek_api.cli import build_runtime_env
 
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "# comment\nexport TOKEN='quoted-value'\nPLAIN=value\n",
+        '# comment\nexport TOKEN="quoted # value\nnext"\nPLAIN=value # inline comment\n',
         encoding="utf-8",
     )
 
     env = build_runtime_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={})
 
-    assert env["TOKEN"] == "quoted-value"
+    assert env["TOKEN"] == "quoted # value\nnext"
     assert env["PLAIN"] == "value"
     assert env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
+
+
+def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    config_env = tmp_path / "config.env"
+    config_env.write_text("TOKEN=from-config\n", encoding="utf-8")
+    config_path.write_text(
+        """
+{
+  "graphs": {"chat": "chat.graph:graph"},
+  "env": "./config.env"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "override.env"
+    cli_env.write_text("TOKEN=from-cli-file\n", encoding="utf-8")
+
+    env = build_runtime_env(
+        config_path=config_path,
+        env_file=str(cli_env),
+        cwd=tmp_path,
+        base_env={"TOKEN": "from-shell"},
+    )
+
+    assert env["TOKEN"] == "from-shell"
 
 
 def test_build_runtime_env_rejects_invalid_config_env_shape(tmp_path: Path) -> None:

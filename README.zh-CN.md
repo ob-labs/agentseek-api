@@ -39,11 +39,10 @@
 
 | 工作流 | 适用场景 | 推荐命令 |
 | --- | --- | --- |
-| `langgraph dev` | 用于图原型开发或 Studio 实验，需要最快的 mock 或内存版本本地 API 循环。 | `langgraph dev` |
 | `agentseek-api dev` | 需要真实的 AgentSeek API 接口，配合真实的 MySQL 系列 / seekdb / OceanBase 风格持久化、鉴权以及 Docker/runtime 行为。 | `uv run agentseek-api dev` |
 
-当你不需要真实后端验证时，使用 `langgraph dev`；当你希望验证本仓库实际
-提供的 API 契约时，使用 `agentseek-api dev`。
+本地开发统一使用 `agentseek-api dev`；不需要持久化时，可在项目 graph
+配置中使用内存或 mock graph。
 
 ### 1. 安装
 
@@ -295,7 +294,7 @@ uv run agentseek-api version
 
 部分仿照 LangGraph CLI 的参数会为了命令兼容性被解析，但当对应运行时
 行为还未实现时会被直接拒绝。对于 mock、内存或 tunnel 化的本地工作流，
-建议继续使用 `langgraph dev`。
+请使用 `agentseek-api dev` 并在 graph 配置中选择对应实现。
 
 ## ✨ 功能特性
 
@@ -342,8 +341,8 @@ uv run agentseek-api version
 - Worker：执行 Redis 队列中的 run，并在重启后恢复持久化的流状态
 - Scheduler：抢占到期的 cron 任务并把对应的 run 提交给运行时
 
-针对真实后端进行本地开发时，请使用 `uv run agentseek-api dev`。如果只
-需要 mock 或内存版本进行图迭代，请改用 `langgraph dev`。如需持久化的
+本地开发统一使用 `uv run agentseek-api dev`。如果只需要 mock 或内存版本
+进行图迭代，请在 graph 配置中选择对应实现。如需持久化的
 cron 执行，请让 API 服务、worker 与 scheduler 共用同一套数据库与
 Redis 实例同时运行。
 
@@ -412,7 +411,7 @@ CLI 层会尽量容忍 LangGraph 在端点级别使用的配置键，例如 `htt
 - 若希望 `dev` 模式下 Studio 与其他客户端走同一条常规 API 鉴权路径，
   把 `auth.disable_studio_auth` 设为 `true`
 - 如果只是想给 Studio 实验提供一个 mock 的本地 API 服务，请使用
-  `langgraph dev`，而不是 AgentSeek
+  `agentseek-api dev` 并配置内存 graph
 
 ## 🔌 MCP
 
