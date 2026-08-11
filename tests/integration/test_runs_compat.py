@@ -882,3 +882,32 @@ def test_create_run_compat_openapi_documents_wait_and_stream_routes() -> None:
     assert "stream_resumable" in stateless_schema["properties"]
     assert "feedback_keys" in stateless_schema["properties"]
     assert "durability" in stateless_schema["properties"]
+
+
+def test_create_run_stream_events_mode_emits_raw_astream_events(client: TestClient) -> None:
+    """HTTP-level regression for ``stream_mode=events``.
+
+    The events channel must surface each raw ``astream_events()`` item (SSE
+    ``event: events`` with the raw event discriminator in ``data.event``), not
+    just the translated side effects.
+    """
+    assistant_id = _create_assistant(client, graph_id="stress_test")
+    thread_id = _create_thread(client)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={"assistant_id": assistant_id, "input": {"delay": 0.0, "steps": 1}, "stream_mode": "events"},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse_events(response.text)
+    raw_events = [event for event in events if event["event"] == "events"]
+    assert raw_events, "expected raw astream_events() items on the events channel"
+    raw_names = {
+        event["data"].get("event")
+        for event in raw_events
+        if isinstance(event["data"], dict)
+    }
+    assert any(name in raw_names for name in ("on_chain_start", "on_chain_stream")), (
+        f"expected raw on_chain_* events, got: {raw_names}"
+    )
