@@ -415,3 +415,48 @@ def test_message_chunk_finish_order_is_stable(monkeypatch: pytest.MonkeyPatch) -
         "content-block-finish",
         "message-finish",
     ]
+
+
+@pytest.mark.asyncio
+async def test_thread_protocol_stream_live_filter_rejects_tuple_and_accepts_list_namespace() -> None:
+    """A tuple subgraph namespace must be filtered OUT by the live broker's
+    namespace filter (the run_executor normalizes tuples to lists before
+    publication), while an equivalent list namespace must be delivered.
+
+    Regression for the live path described in review: real ``astream(
+    subgraphs=True)`` yields tuple namespaces, and without normalization the
+    in-memory broker's prefix filter never matches them, silently dropping
+    subgraph events for subscribers using ``namespaces``.
+    """
+    broker = ThreadProtocolEventBroker()
+    broker.run_started("thread-1")
+
+    # Published before normalization would have happened: tuple namespace.
+    broker.publish(
+        "thread-1",
+        {"method": "updates", "params": {"namespace": ("node_1:task-1",), "timestamp": 1, "data": {"step": "partial"}}},
+        persist=False,
+    )
+    # Post-fix, run_executor publishes a list namespace.
+    broker.publish(
+        "thread-1",
+        {"method": "updates", "params": {"namespace": ["node_1:task-1"], "timestamp": 2, "data": {"step": "partial"}}},
+        persist=False,
+    )
+    broker.run_finished("thread-1")
+
+    events = [
+        event
+        async for event in broker.stream(
+            "thread-1",
+            channels=["updates"],
+            namespaces=[["node_1:task-1"]],
+            depth=None,
+            since=0,
+        )
+    ]
+
+    # Only the list-namespaced event survives the prefix filter; the tuple one
+    # is coerced to root by the live filter and never matches the prefix.
+    assert [event["seq"] for event in events] == [2]
+    assert all(isinstance(event["params"]["namespace"], list) for event in events)
