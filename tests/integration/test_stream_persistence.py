@@ -841,3 +841,16 @@ def test_stream_ignores_malformed_last_event_id(client: TestClient) -> None:
         headers={"Last-Event-ID": "not-an-int"},
     )
     assert run_stream_response.status_code == 404
+
+
+def test_run_stream_midrun_reconnect_is_exactly_once_in_redis(midrun_app_factory, midrun_reconnect_flow) -> None:
+    """HTTP-level regression for the Redis executor path: a client connecting
+    to GET /runs/{id}/stream mid-run, disconnecting, then reconnecting with
+    Last-Event-ID must not replay delivered frames and must not lose frames
+    produced while disconnected. The Redis stream store is faked with
+    FakeRedisCounter so the test runs without a live Redis instance."""
+    import asyncio
+
+    fake_redis = FakeRedisCounter()
+    app = midrun_app_factory(executor_backend="redis", redis_client=fake_redis)
+    asyncio.run(midrun_reconnect_flow(app))

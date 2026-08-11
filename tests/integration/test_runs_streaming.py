@@ -1,5 +1,7 @@
-from fastapi.testclient import TestClient
+import asyncio
 import json
+
+from fastapi.testclient import TestClient
 
 
 def _stream_payloads(stream_text: str) -> list[dict[str, object]]:
@@ -375,3 +377,11 @@ def test_run_stream_resume_after_terminal_end_does_not_replay(client: TestClient
     assert resumed.status_code == 200
     resumed_ids = _sse_ids(resumed.text)
     assert resumed_ids == [], f"resume after terminal end should replay nothing, got: {resumed_ids}"
+
+
+def test_run_stream_midrun_reconnect_is_exactly_once(midrun_app_factory, midrun_reconnect_flow) -> None:
+    """HTTP-level regression: a client that connects mid-run, disconnects, and
+    reconnects with Last-Event-ID must not replay delivered frames and must not
+    lose frames produced while disconnected (inline executor path)."""
+    app = midrun_app_factory(executor_backend="inline")
+    asyncio.run(midrun_reconnect_flow(app))
