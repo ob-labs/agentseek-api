@@ -33,6 +33,24 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split())
 
 
+def _parse_sse_events(stream_text: str) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for chunk in stream_text.strip().split("\n\n"):
+        if not chunk.strip():
+            continue
+        event: dict[str, object] = {}
+        for line in chunk.splitlines():
+            if line.startswith("id: "):
+                event["id"] = line.removeprefix("id: ")
+            elif line.startswith("event: "):
+                event["event"] = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                event["data"] = json.loads(line.removeprefix("data: "))
+        if event:
+            events.append(event)
+    return events
+
+
 class FakeCheckpointer:
     def __init__(self, connection_args: dict[str, str]) -> None:
         self.connection_args = connection_args
@@ -176,3 +194,49 @@ def test_live_provider_stream_emits_multiple_message_chunks(live_provider_client
     assert _normalize_text(str(final_ai.get("content", ""))) == _normalize_text(
         waited_body["output"]["final_text"]
     )
+
+    # Token-level proof: an explicit ``stream_mode=messages`` run must surface
+    # real incremental ``messages/partial`` frames from the provider that
+    # accumulate to the final answer. This restores the incremental token
+    # assertion the manual live-provider workflow is contractually expected to
+    # prove (the default replay above only proves the final snapshot).
+    streamed = live_provider_client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "input": {
+                "message": (
+                    "Explain why token-level streaming verification matters in exactly two sentences, "
+                    "using at least forty words and no bullet points."
+                )
+            },
+            "stream_mode": "messages",
+        },
+    )
+    assert streamed.status_code == 200, streamed.text
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    streamed_events = _parse_sse_events(streamed.text)
+    streamed_names = [event["event"] for event in streamed_events]
+    assert streamed_names[0] == "metadata"
+    assert "messages/partial" in streamed_names
+    assert not any("content-block" in name for name in streamed_names)
+
+    partial_payloads = [event["data"] for event in streamed_events if event["event"] == "messages/partial"]
+    assert len(partial_payloads) >= 2, "expected at least one incremental token step"
+    accumulated_text = ""
+    for payload in partial_payloads:
+        if not isinstance(payload, list) or not payload:
+            continue
+        last = payload[-1]
+        if not isinstance(last, dict) or last.get("type") != "ai":
+            continue
+        accumulated_text = _text_from_content(last.get("content"))
+    assert accumulated_text, "messages/partial never carried an AI message"
+    streamed_run_id = str(
+        next(event["data"]["run_id"] for event in streamed_events if event["event"] == "metadata")
+    )
+    streamed_waited = live_provider_client.get(f"/threads/{thread_id}/runs/{streamed_run_id}/wait")
+    assert streamed_waited.status_code == 200
+    streamed_body = streamed_waited.json()
+    assert streamed_body["status"] == "success", streamed_body.get("last_error")
+    assert _normalize_text(accumulated_text) == _normalize_text(streamed_body["output"]["final_text"])
