@@ -924,19 +924,15 @@ async def stream_run(
             seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
         }
         records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=after_seq)})
-        # Run-scoped lifecycle records (start/end) from run_jobs. The terminal
-        # "end" record is deferred until after the protocol frames so the
-        # stream ends with the run's terminal status.
-        end_records: dict[int, dict[str, object]] = {
-            seq: event
-            for seq, event in records_by_seq.items()
-            if str(event.get("event")) == "end"
-        }
+        # Emit the persisted run log strictly by sequence. Lifecycle records
+        # (start/end) and protocol frames share one monotonic seq domain, and
+        # within a single run the terminal "end" is always published after that
+        # run's protocol frames, so a strict ascending replay keeps every id
+        # monotonic even across a resume: an earlier run's "end" keeps its
+        # original seq instead of being deferred past newer resume frames.
         current_seq = after_seq
         for seq in sorted(records_by_seq):
             event = records_by_seq[seq]
-            if str(event.get("event")) == "end":
-                continue
             current_seq = max(current_seq, seq)
             if "method" in event:
                 yield _protocol_event_sse(
@@ -948,13 +944,6 @@ async def stream_run(
                 event_name = str(event.get("event", "message"))
                 event_payload: dict[str, object] = {"run_id": run_id, **event}
                 yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
-
-        for seq in sorted(end_records):
-            event = end_records[seq]
-            current_seq = max(current_seq, seq)
-            event_name = str(event.get("event", "message"))
-            event_payload: dict[str, object] = {"run_id": run_id, **event}
-            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
 
         use_redis_executor = _uses_redis_executor()
         if use_redis_executor:

@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from redis.asyncio import Redis, from_url
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentseek_api.core.database import db_manager
@@ -138,7 +138,17 @@ async def _load_redis_stream_events(key: str, *, after_seq: int) -> list[tuple[i
 
 async def next_run_stream_seq(run_id: str) -> int | None:
     if not _uses_redis_executor():
-        return None
+        if not _metadata_db_ready():
+            return None
+        try:
+            session_factory = db_manager.get_session_factory()
+        except RuntimeError:
+            return None
+        async with session_factory() as session:
+            row = await session.scalar(
+                select(func.max(RunStreamEvent.seq)).where(RunStreamEvent.run_id == run_id)
+            )
+        return (row or 0) + 1
     return int(await _get_redis_client().incr(f"{_RUN_STREAM_SEQ_KEY_PREFIX}:{run_id}"))
 
 

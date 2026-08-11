@@ -3,6 +3,8 @@ import json
 
 from fastapi.testclient import TestClient
 
+from agentseek_api.services.run_state import run_broker
+
 
 def _stream_payloads(stream_text: str) -> list[dict[str, object]]:
     return [
@@ -146,6 +148,15 @@ def test_resumed_run_stream_preserves_each_terminal_status(client: TestClient) -
     payloads = _stream_payloads(stream_response.text)
     end_statuses = [payload["status"] for payload in payloads if payload.get("event") == "end"]
     assert end_statuses == ["interrupted", "success"]
+
+    # Every SSE id across the whole (interrupted + resumed) log must be
+    # strictly monotonic. The historical interrupted run's terminal "end" must
+    # keep its original seq and not be deferred past the resumed run's frames
+    # (a resumed stream previously re-ordered the earlier end after newer
+    # frames, producing a non-monotonic cursor like 1..9, 11..17, 10, 18).
+    ids = _sse_ids(stream_response.text)
+    assert ids == sorted(ids), f"resumed run stream ids not monotonic: {ids}"
+    assert len(set(ids)) == len(ids), f"resumed run stream ids not unique: {ids}"
 
 
 def test_create_run_rejects_configurable_and_context_together(client: TestClient) -> None:
@@ -385,3 +396,64 @@ def test_run_stream_midrun_reconnect_is_exactly_once(midrun_app_factory, midrun_
     lose frames produced while disconnected (inline executor path)."""
     app = midrun_app_factory(executor_backend="inline")
     asyncio.run(midrun_reconnect_flow(app))
+
+
+def test_run_stream_cold_broker_resume_keeps_monotonic_ids(client: TestClient, monkeypatch) -> None:
+    """A resume after the in-memory broker state is cleared must keep allocating
+    from the persisted seq watermark, not restart at 1.
+
+    Regression for a process-local allocation bug: clearing the broker's event
+    state *and* ``_next_seq`` before resuming a persisted run caused new frames
+    to reuse seqs already in the DB (e.g. ``1..7, 9, 8, 10``) and returned
+    contradictory terminal statuses. Lifecycle and protocol publication must
+    share one persistent run-scoped sequence.
+    """
+    assistant = client.post("/assistants", json={"name": "cold-broker", "graph_id": "subgraph_hitl_agent"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "cold-broker"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    run = client.post(
+        f"/threads/{thread_id}/runs",
+        json={"assistant_id": assistant_id, "input": {"foo": "hello "}},
+    )
+    assert run.status_code == 200
+    run_id = run.json()["run_id"]
+
+    # First run interrupted; its protocol frames + end are persisted.
+    waited = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
+    assert waited.json()["status"] == "interrupted"
+
+    # Simulate a cold broker (e.g. process restart): drop every in-memory
+    # trace of this run, including the seq counter.
+    run_broker._events.pop(run_id, None)
+    run_broker._seqs.pop(run_id, None)
+    run_broker._signals.pop(run_id, None)
+    run_broker._next_seq.pop(run_id, None)
+    run_broker._completed_runs.discard(run_id)
+    try:
+        run_broker._completed_order.remove(run_id)
+    except ValueError:
+        pass
+
+    resumed = client.post(
+        f"/threads/{thread_id}/runs/{run_id}/resume",
+        json={"resume": "world"},
+    )
+    assert resumed.status_code == 200
+
+    stream_response = client.get(f"/threads/{thread_id}/runs/{run_id}/stream")
+    assert stream_response.status_code == 200
+    ids = _sse_ids(stream_response.text)
+    assert ids, "expected frames across the interrupted + resumed log"
+    # ids must be strictly increasing and unique (no reuse of persisted seqs).
+    assert ids == sorted(ids), f"cold-broker resume ids not monotonic: {ids}"
+    assert len(set(ids)) == len(ids), f"cold-broker resume ids not unique: {ids}"
+
+    # Both runs' terminal statuses must be present and ordered by seq.
+    payloads = _stream_payloads(stream_response.text)
+    end_statuses = [payload["status"] for payload in payloads if payload.get("event") == "end"]
+    assert end_statuses == ["interrupted", "success"]

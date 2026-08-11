@@ -18,6 +18,11 @@ class RunEventBroker:
         event_payload = {"event": event, **payload}
         if seq is None:
             seq = self._next_seq[run_id]
+        else:
+            # Never regress below the in-memory watermark: an explicit seq from
+            # persistent state may be lower than what this process has already
+            # allocated (e.g. the broker was cleared and re-seeded from the DB).
+            seq = max(seq, self._next_seq[run_id])
         self._next_seq[run_id] = max(self._next_seq[run_id], seq + 1)
         self._events[run_id].append(event_payload)
         self._seqs[run_id].append(seq)
@@ -44,6 +49,12 @@ class RunEventBroker:
         """
         if seq is None:
             seq = self._next_seq[run_id]
+        else:
+            # Never regress below the in-memory watermark (same rationale as
+            # ``publish``): a persistent-state seq must not collide with seqs
+            # this process has already handed out, and a cold broker re-seeded
+            # from the DB must keep allocating after the persisted max.
+            seq = max(seq, self._next_seq[run_id])
         self._next_seq[run_id] = max(self._next_seq[run_id], seq + 1)
         self._events[run_id].append(payload)
         self._seqs[run_id].append(seq)

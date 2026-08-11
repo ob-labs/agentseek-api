@@ -230,9 +230,14 @@ async def _persist_protocol_to_run_stream(run_id: str, payload: dict[str, Any]) 
             )
         return
     from agentseek_api.services.run_state import run_broker
-    from agentseek_api.services.stream_persistence import persist_run_stream_event
+    from agentseek_api.services.stream_persistence import next_run_stream_seq, persist_run_stream_event
 
-    seq, _ = run_broker.publish_protocol(run_id, payload)
+    # Allocate from persistent state so a cold broker (e.g. after the in-memory
+    # state was cleared or the process restarted) keeps the run stream seq
+    # domain monotonic instead of restarting at 1 and colliding with persisted
+    # rows. publish_protocol never regresses below its own in-memory watermark.
+    seq = await next_run_stream_seq(run_id)
+    seq, _ = run_broker.publish_protocol(run_id, payload, seq=seq)
     try:
         await persist_run_stream_event(run_id, seq=seq, payload=payload)
     except Exception:
