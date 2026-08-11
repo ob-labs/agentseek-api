@@ -315,3 +315,36 @@ def test_protocol_stream_filters_subgraph_namespace_events(client: TestClient) -
     assert events
     assert {event["event"] for event in events} <= {"updates", "input.requested"}
     assert all(event["data"]["params"]["namespace"][:1] == namespace_prefix for event in events)
+
+
+def test_protocol_run_start_invalid_stream_mode_returns_400(client: TestClient) -> None:
+    """An invalid ``stream_mode`` on a protocol ``run.start`` command is a client
+    error (400 ``invalid_argument``), not a missing-resource 404 or a validation
+    422. 404 stays reserved for unknown assistants/graphs (covered elsewhere)."""
+    assistant = client.post("/assistants", json={"name": "protocol-bad-mode", "graph_id": "react_agent"})
+    assert assistant.status_code == 200
+    assistant_id = assistant.json()["assistant_id"]
+
+    thread = client.post("/threads", json={"metadata": {"case": "protocol-bad-mode"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    command = client.post(
+        f"/threads/{thread_id}/commands",
+        json={
+            "id": 1,
+            "method": "run.start",
+            "params": {
+                "assistant_id": assistant_id,
+                "input": {"message": "bad stream mode"},
+                "stream_mode": "nonexistent",
+            },
+        },
+    )
+
+    assert command.status_code == 400
+    body = command.json()
+    assert body["type"] == "error"
+    assert body["id"] == 1
+    assert body["error"] == "invalid_argument"
+    assert "nonexistent" in body["message"]
