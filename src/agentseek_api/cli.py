@@ -149,13 +149,20 @@ def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None
     return None
 
 
-_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+_ENV_REFERENCE = re.compile(
+    r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-(.*?))?\}"
+)
 
 
 def _resolve_env_references(value: str, *, context: dict[str, str]) -> str:
     def replace(match: re.Match[str]) -> str:
-        key = match.group(1) or match.group(2)
-        return context.get(key, match.group(0))
+        key = match.group(1)
+        default = match.group(2)
+        if key in context:
+            return context[key]
+        if default is not None:
+            return default
+        return match.group(0)
 
     return _ENV_REFERENCE.sub(replace, value)
 

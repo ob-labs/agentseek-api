@@ -344,6 +344,33 @@ def test_dev_command_merges_config_env_file_before_cli_env_file(
     assert capture.env["SHARED"] == "override"
 
 
+def test_dev_command_preserves_dotenv_default_and_bare_variable_syntax(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    monkeypatch.delenv("API_ORIGIN", raising=False)
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "defaults.env"
+    env_file.write_text(
+        "OPENAI_BASE_URL=${API_ORIGIN:-https://default.example.test}/v1\n"
+        "BARE_REFERENCE=$API_ORIGIN\n",
+        encoding="utf-8",
+    )
+    capture = _RunCapture()
+
+    exit_code = main(
+        ["dev", "--config", str(config_path), "--env-file", str(env_file), "--no-reload"],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.env is not None
+    assert capture.env["OPENAI_BASE_URL"] == "https://default.example.test/v1"
+    assert capture.env["BARE_REFERENCE"] == "$API_ORIGIN"
+
+
 def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -1442,6 +1469,31 @@ def test_up_command_resolves_same_file_references_without_expanding_disallowed_h
     assert container_env["OPENAI_BASE_URL"] == "https://api.example.test/v1"
     assert container_env["OPENAI_API_KEY"] == "${PR69_DISALLOWED_SECRET}"
     assert "PR69_DISALLOWED_SECRET" not in container_env
+
+
+def test_up_command_preserves_dotenv_default_and_bare_variable_syntax(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "docker.env"
+    env_file.write_text(
+        "OPENAI_BASE_URL=${MISSING_API_ORIGIN:-https://default.example.test}/v1\n"
+        "BARE_REFERENCE=$MISSING_API_ORIGIN\n",
+        encoding="utf-8",
+    )
+    capture = _RunCapture()
+
+    exit_code = main(
+        ["up", "--config", str(config_path), "--image", "agentseek:test", "--env-file", str(env_file)],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert container_env["OPENAI_BASE_URL"] == "https://default.example.test/v1"
+    assert container_env["BARE_REFERENCE"] == "$MISSING_API_ORIGIN"
 
 
 
