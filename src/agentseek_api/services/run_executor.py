@@ -887,7 +887,14 @@ async def execute_run(
         if isinstance(explicit_message_id, str) and explicit_message_id:
             message_id = explicit_message_id
         else:
-            message_id = f"{run_id}:message:{message_index}"
+            # Id-less streamed message: derive a stable identity from the stream
+            # context. ``message_index`` alone restarts for every yielded stream
+            # event, so two id-less chunks from different subgraph namespaces
+            # would collide on the same fallback id and be merged into one
+            # message by the client. The namespace disambiguates them; within one
+            # namespace the index keeps increments monotonic.
+            ns_suffix = ":".join(namespace) if namespace else ""
+            message_id = f"{run_id}:message:{ns_suffix}{':' if ns_suffix else ''}{message_index}"
         await protocol_messages.apublish_blocks(
             message_id=message_id,
             role=role,

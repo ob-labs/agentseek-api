@@ -1003,3 +1003,47 @@ async def test_execute_run_normalizes_tuple_namespaces_for_live_filter(
     assert updates_events, "expected updates event from tuple-namespaced subgraph"
     assert updates_events[0]["params"]["namespace"] == ["node_1:task-1"]
     assert isinstance(updates_events[0]["params"]["namespace"], list)
+
+
+class FakeParallelIdlessMessagesGraph(FakeGraph):
+    """Two id-less messages from different subgraph namespaces, each with one
+    incremental chunk.
+
+    ``AIMessageChunk`` has no ``id`` by default, so both go through the fallback
+    identity path. The namespaces differ, so the fallback id must keep the two
+    messages distinct (previously both collapsed to ``{run}:message:0`` and were
+    merged by the client).
+    """
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (("ns_a:task-1",), "messages", (AIMessageChunk(content="hello", id=None), {"langgraph_node": "ns_a"}))
+        yield (("ns_b:task-1",), "messages", (AIMessageChunk(content="world", id=None), {"langgraph_node": "ns_b"}))
+
+    async def aget_state(self, config: dict):
+        return SimpleNamespace(values={"output": {"ok": True}})
+
+
+@pytest.mark.asyncio
+async def test_execute_run_idless_messages_from_different_namespaces_get_distinct_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _run_fake_graph(
+        monkeypatch, FakeParallelIdlessMessagesGraph(), stream_modes=["messages"], stream_subgraphs=True
+    )
+    metadata_events = [
+        event for event in thread_events if event["method"] == "messages/metadata"
+    ]
+    assert len(metadata_events) == 2, (
+        f"expected one messages/metadata per distinct id-less message, got {len(metadata_events)}"
+    )
+    # The two metadata events must carry distinct message ids (their wire
+    # identity), so the SDK client routes them to two independent streams
+    # instead of merging the second chunk into the first message.
+    message_ids = [
+        next(iter(event["params"]["data"].keys()))
+        for event in metadata_events
+    ]
+    assert len(message_ids) == len(set(message_ids)), f"id-less message ids collided: {message_ids}"
+    assert any("ns_a" in mid for mid in message_ids)
+    assert any("ns_b" in mid for mid in message_ids)
