@@ -221,6 +221,26 @@ def test_live_provider_stream_emits_multiple_message_chunks(live_provider_client
     assert "messages/partial" in streamed_names
     assert not any("content-block" in name for name in streamed_names)
 
+    # The v1 messages wire contract emits one ``messages/metadata`` identity per
+    # streamed message (``{message_id: {"metadata": ...}}``) before its partials,
+    # so the client can route the incremental frames to the right message. A
+    # real provider run must surface at least one such identity.
+    metadata_events = [event for event in streamed_events if event["event"] == "messages/metadata"]
+    assert metadata_events, "expected messages/metadata identity events in the messages stream"
+    metadata_ids = [
+        message_id
+        for event in metadata_events
+        for message_id in event["data"].keys()
+        if isinstance(event["data"], dict)
+    ]
+    assert metadata_ids, "messages/metadata carried no message identity"
+    assert all(
+        isinstance(event["data"][message_id], dict) and "metadata" in event["data"][message_id]
+        for event in metadata_events
+        for message_id in event["data"].keys()
+        if isinstance(event["data"], dict)
+    ), "messages/metadata payload must be {message_id: {'metadata': {...}}}"
+
     partial_payloads = [event["data"] for event in streamed_events if event["event"] == "messages/partial"]
     assert len(partial_payloads) >= 2, "expected at least one incremental token step"
     accumulated_text = ""
@@ -232,6 +252,18 @@ def test_live_provider_stream_emits_multiple_message_chunks(live_provider_client
             continue
         accumulated_text = _text_from_content(last.get("content"))
     assert accumulated_text, "messages/partial never carried an AI message"
+    # The metadata identity must correspond to the AI message being streamed:
+    # the accumulated partial is an AI message, and its id is the metadata key.
+    partial_ids = {
+        str(message.get("id"))
+        for payload in partial_payloads
+        if isinstance(payload, list)
+        for message in payload
+        if isinstance(message, dict) and message.get("id")
+    }
+    assert metadata_ids and partial_ids and metadata_ids[0] in partial_ids, (
+        f"messages/metadata identity {metadata_ids} must match streamed partial ids {partial_ids}"
+    )
     streamed_run_id = str(
         next(event["data"]["run_id"] for event in streamed_events if event["event"] == "metadata")
     )
