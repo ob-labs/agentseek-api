@@ -216,14 +216,12 @@ async def test_execute_and_persist_publishes_terminal_run_event_before_terminal_
     async def fake_publish_lifecycle(*_args: Any, **_kwargs: Any) -> None:
         return None
 
-    async def fake_persist_thread_snapshot(_thread_id: str) -> None:
-        return None
 
     async def fake_add_run_stream_event_to_session(
         _session: FakeSession,
         _run_id: str,
         *,
-        seq: int,
+        seq: int | None = None,
         payload: dict[str, Any],
     ) -> None:
         operations.append(f"persist:{payload['event']}:{seq}")
@@ -232,7 +230,6 @@ async def test_execute_and_persist_publishes_terminal_run_event_before_terminal_
     monkeypatch.setattr("agentseek_api.services.run_preparation.execute_run", successful_execute_run)
     monkeypatch.setattr("agentseek_api.services.run_preparation._publish_run_event", fake_publish_run_event)
     monkeypatch.setattr("agentseek_api.services.run_preparation._publish_lifecycle", fake_publish_lifecycle)
-    monkeypatch.setattr("agentseek_api.services.run_preparation._persist_thread_snapshot", fake_persist_thread_snapshot)
     monkeypatch.setattr(
         "agentseek_api.services.run_preparation.add_run_stream_event_to_session",
         fake_add_run_stream_event_to_session,
@@ -249,13 +246,11 @@ async def test_execute_and_persist_publishes_terminal_run_event_before_terminal_
     assert exec_session.commits == 2
     assert published_run_events == [
         ("start", 1, {}),
-        ("end", 1, {"status": "success"}),
     ]
     assert operations == [
         "commit",
         "publish:start",
-        "publish:end",
-        "persist:end:2",
+        "persist:end:None",
         "commit",
     ]
 
@@ -313,15 +308,10 @@ async def test_prepare_run_cleans_protocol_state_when_submit_fails(monkeypatch: 
     persist_session = CallbackSession([lambda: create_session.added[-1], fake_thread])
     session_factory = FakeSessionFactory([create_session, persist_session])
     protocol_broker = ThreadProtocolEventBroker()
-    published_lifecycle: list[dict[str, Any]] = []
 
     monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: RaisingExecutor())
-    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.publish_lifecycle_event",
-        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
-    )
+    monkeypatch.setattr("agentseek_api.services.run_jobs.thread_protocol_broker", protocol_broker)
 
     with pytest.raises(RuntimeError, match="submit failed"):
         await run_prep_module.prepare_and_submit_run(
@@ -336,16 +326,13 @@ async def test_prepare_run_cleans_protocol_state_when_submit_fails(monkeypatch: 
     assert created_run.last_error == "submit failed"
     assert fake_thread.status == "error"
     assert protocol_broker._active_runs["t1"] == 0
-    assert published_lifecycle == [
-        {"thread_id": "t1", "event": "started", "graph_name": "default", "persist": False, "seq": None},
-        {
-            "thread_id": "t1",
-            "event": "failed",
-            "graph_name": "default",
-            "error": "submit failed",
-            "persist": False,
-            "seq": None,
-        },
+    lifecycle_events = [
+        (event["params"]["data"]["event"], event["params"]["data"].get("error"))
+        for event in protocol_broker.snapshot_records("t1")
+    ]
+    assert lifecycle_events == [
+        ("started", None),
+        ("failed", "submit failed"),
     ]
 
 
@@ -354,14 +341,10 @@ async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(monke
     cancelled_run = type("DbRun", (), {"run_id": "r1", "status": "error", "last_error": "Run cancelled"})()
     session_factory = FakeSessionFactory([FakeSession([cancelled_run])])
     protocol_broker = ThreadProtocolEventBroker()
-    published_lifecycle: list[dict[str, Any]] = []
 
     monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
     monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.publish_lifecycle_event",
-        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
-    )
+    monkeypatch.setattr("agentseek_api.services.run_jobs.thread_protocol_broker", protocol_broker)
 
     protocol_broker.run_started("t1")
     await run_prep_module._execute_and_persist(
@@ -373,16 +356,11 @@ async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(monke
     )
 
     assert protocol_broker._active_runs["t1"] == 0
-    assert published_lifecycle == [
-        {
-            "thread_id": "t1",
-            "event": "failed",
-            "graph_name": "default",
-            "error": "Run cancelled",
-            "persist": False,
-            "seq": None,
-        }
+    lifecycle_events = [
+        (event["params"]["data"]["event"], event["params"]["data"].get("error"))
+        for event in protocol_broker.snapshot_records("t1")
     ]
+    assert lifecycle_events == [("failed", "Run cancelled")]
 
 
 @pytest.mark.asyncio
@@ -455,15 +433,10 @@ async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypat
     persist_session = CallbackSession([db_run, fake_thread])
     session_factory = FakeSessionFactory([load_session, persist_session])
     protocol_broker = ThreadProtocolEventBroker()
-    published_lifecycle: list[dict[str, Any]] = []
 
     monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
     monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: RaisingExecutor())
-    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.publish_lifecycle_event",
-        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
-    )
+    monkeypatch.setattr("agentseek_api.services.run_jobs.thread_protocol_broker", protocol_broker)
 
     with pytest.raises(RuntimeError, match="submit failed"):
         await run_prep_module.resume_run(
@@ -477,16 +450,13 @@ async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypat
     assert db_run.last_error == "submit failed"
     assert fake_thread.status == "interrupted"
     assert protocol_broker._active_runs["t1"] == 0
-    assert published_lifecycle == [
-        {"thread_id": "t1", "event": "started", "graph_name": "subgraph_hitl_agent", "persist": False, "seq": None},
-        {
-            "thread_id": "t1",
-            "event": "failed",
-            "graph_name": "subgraph_hitl_agent",
-            "error": "submit failed",
-            "persist": False,
-            "seq": None,
-        },
+    lifecycle_events = [
+        (event["params"]["data"]["event"], event["params"]["data"].get("error"))
+        for event in protocol_broker.snapshot_records("t1")
+    ]
+    assert lifecycle_events == [
+        ("started", None),
+        ("failed", "submit failed"),
     ]
 
 

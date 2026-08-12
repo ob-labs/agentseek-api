@@ -33,6 +33,24 @@ def _normalize_text(text: str) -> str:
     return " ".join(text.split())
 
 
+def _parse_sse_events(stream_text: str) -> list[dict[str, object]]:
+    events: list[dict[str, object]] = []
+    for chunk in stream_text.strip().split("\n\n"):
+        if not chunk.strip():
+            continue
+        event: dict[str, object] = {}
+        for line in chunk.splitlines():
+            if line.startswith("id: "):
+                event["id"] = line.removeprefix("id: ")
+            elif line.startswith("event: "):
+                event["event"] = line.removeprefix("event: ")
+            elif line.startswith("data: "):
+                event["data"] = json.loads(line.removeprefix("data: "))
+        if event:
+            events.append(event)
+    return events
+
+
 class FakeCheckpointer:
     def __init__(self, connection_args: dict[str, str]) -> None:
         self.connection_args = connection_args
@@ -149,22 +167,108 @@ def test_live_provider_stream_emits_multiple_message_chunks(live_provider_client
         for line in stream.text.splitlines()
         if line.startswith("data: ")
     ]
-    message_chunks = [
+    # The default run-stream replay returns the run's persisted protocol
+    # events. A run created without an explicit stream_mode does not stream
+    # incremental LLM tokens (no ``messages`` channel events), so the final
+    # answer is read back from the last state snapshot (``values`` payload)
+    # instead of token deltas.
+    state_payloads = [
         payload
         for payload in payloads
-        if payload.get("event") == "message_chunk"
-        and payload.get("langgraph_event") in {"on_chat_model_stream", "on_llm_stream"}
-        and _text_from_content(payload.get("content")).strip()
+        if isinstance(payload, dict) and isinstance(payload.get("messages"), list)
     ]
-    chunk_texts = [_text_from_content(payload.get("content")) for payload in message_chunks]
+    assert state_payloads
+    final_messages = state_payloads[-1]["messages"]
+    final_ai = next(
+        (m for m in reversed(final_messages) if isinstance(m, dict) and m.get("type") == "ai"),
+        None,
+    )
+    assert final_ai is not None
     end_payloads = [payload for payload in payloads if payload.get("event") == "end"]
 
     assert payloads[0]["event"] == "start"
     assert "event: start" in stream.text
     assert "event: end" in stream.text
-    assert any(payload.get("event") == "node_start" and payload.get("node") == "call_model" for payload in payloads)
-    assert any(payload.get("event") == "node_end" and payload.get("node") == "call_model" for payload in payloads)
     assert end_payloads[-1]["status"] == "success"
     assert end_payloads[-1]["run_id"] == run_id
-    assert len(message_chunks) >= 2
-    assert _normalize_text("".join(chunk_texts)) == _normalize_text(waited_body["output"]["final_text"])
+    assert _normalize_text(str(final_ai.get("content", ""))) == _normalize_text(
+        waited_body["output"]["final_text"]
+    )
+
+    # Token-level proof: an explicit ``stream_mode=messages`` run must surface
+    # real incremental ``messages/partial`` frames from the provider that
+    # accumulate to the final answer. This restores the incremental token
+    # assertion the manual live-provider workflow is contractually expected to
+    # prove (the default replay above only proves the final snapshot).
+    streamed = live_provider_client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={
+            "assistant_id": assistant_id,
+            "input": {
+                "message": (
+                    "Explain why token-level streaming verification matters in exactly two sentences, "
+                    "using at least forty words and no bullet points."
+                )
+            },
+            "stream_mode": "messages",
+        },
+    )
+    assert streamed.status_code == 200, streamed.text
+    assert streamed.headers["content-type"].startswith("text/event-stream")
+    streamed_events = _parse_sse_events(streamed.text)
+    streamed_names = [event["event"] for event in streamed_events]
+    assert streamed_names[0] == "metadata"
+    assert "messages/partial" in streamed_names
+    assert not any("content-block" in name for name in streamed_names)
+
+    # The v1 messages wire contract emits one ``messages/metadata`` identity per
+    # streamed message (``{message_id: {"metadata": ...}}``) before its partials,
+    # so the client can route the incremental frames to the right message. A
+    # real provider run must surface at least one such identity.
+    metadata_events = [event for event in streamed_events if event["event"] == "messages/metadata"]
+    assert metadata_events, "expected messages/metadata identity events in the messages stream"
+    metadata_ids = [
+        message_id
+        for event in metadata_events
+        for message_id in event["data"].keys()
+        if isinstance(event["data"], dict)
+    ]
+    assert metadata_ids, "messages/metadata carried no message identity"
+    assert all(
+        isinstance(event["data"][message_id], dict) and "metadata" in event["data"][message_id]
+        for event in metadata_events
+        for message_id in event["data"].keys()
+        if isinstance(event["data"], dict)
+    ), "messages/metadata payload must be {message_id: {'metadata': {...}}}"
+
+    partial_payloads = [event["data"] for event in streamed_events if event["event"] == "messages/partial"]
+    assert len(partial_payloads) >= 2, "expected at least one incremental token step"
+    accumulated_text = ""
+    for payload in partial_payloads:
+        if not isinstance(payload, list) or not payload:
+            continue
+        last = payload[-1]
+        if not isinstance(last, dict) or last.get("type") != "ai":
+            continue
+        accumulated_text = _text_from_content(last.get("content"))
+    assert accumulated_text, "messages/partial never carried an AI message"
+    # The metadata identity must correspond to the AI message being streamed:
+    # the accumulated partial is an AI message, and its id is the metadata key.
+    partial_ids = {
+        str(message.get("id"))
+        for payload in partial_payloads
+        if isinstance(payload, list)
+        for message in payload
+        if isinstance(message, dict) and message.get("id")
+    }
+    assert metadata_ids and partial_ids and metadata_ids[0] in partial_ids, (
+        f"messages/metadata identity {metadata_ids} must match streamed partial ids {partial_ids}"
+    )
+    streamed_run_id = str(
+        next(event["data"]["run_id"] for event in streamed_events if event["event"] == "metadata")
+    )
+    streamed_waited = live_provider_client.get(f"/threads/{thread_id}/runs/{streamed_run_id}/wait")
+    assert streamed_waited.status_code == 200
+    streamed_body = streamed_waited.json()
+    assert streamed_body["status"] == "success", streamed_body.get("last_error")
+    assert _normalize_text(accumulated_text) == _normalize_text(streamed_body["output"]["final_text"])

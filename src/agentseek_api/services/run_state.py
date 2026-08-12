@@ -18,6 +18,11 @@ class RunEventBroker:
         event_payload = {"event": event, **payload}
         if seq is None:
             seq = self._next_seq[run_id]
+        else:
+            # Never regress below the in-memory watermark: an explicit seq from
+            # persistent state may be lower than what this process has already
+            # allocated (e.g. the broker was cleared and re-seeded from the DB).
+            seq = max(seq, self._next_seq[run_id])
         self._next_seq[run_id] = max(self._next_seq[run_id], seq + 1)
         self._events[run_id].append(event_payload)
         self._seqs[run_id].append(seq)
@@ -33,6 +38,28 @@ class RunEventBroker:
             self._prune_completed_runs()
         self._signals[run_id].set()
         return seq, dict(event_payload)
+
+    def publish_protocol(self, run_id: str, payload: dict[str, Any], *, seq: int | None = None) -> tuple[int, dict[str, Any]]:
+        """Publish a protocol-v2 event into the run's ordered log.
+
+        In inline mode this makes the run broker the single run-scoped log
+        shared by both lifecycle records (start/end) and protocol frames
+        (values/updates/messages/tools), so the replay endpoint reads one
+        monotonic ``seq`` cursor instead of mixing two sequence domains.
+        """
+        if seq is None:
+            seq = self._next_seq[run_id]
+        else:
+            # Never regress below the in-memory watermark (same rationale as
+            # ``publish``): a persistent-state seq must not collide with seqs
+            # this process has already handed out, and a cold broker re-seeded
+            # from the DB must keep allocating after the persisted max.
+            seq = max(seq, self._next_seq[run_id])
+        self._next_seq[run_id] = max(self._next_seq[run_id], seq + 1)
+        self._events[run_id].append(payload)
+        self._seqs[run_id].append(seq)
+        self._signals[run_id].set()
+        return seq, dict(payload)
 
     def snapshot(self, run_id: str) -> list[dict[str, Any]]:
         return [dict(event) for event in self._events.get(run_id, [])]

@@ -324,6 +324,14 @@ def _protocol_channels_for_stream_modes(stream_modes: list[str]) -> list[str]:
     return channels
 
 
+# Channels replayed by the legacy GET /threads/{id}/runs/{run_id}/stream when no
+# ``stream_mode`` query is given. The astream migration no longer publishes
+# run-scoped stream events, so the run's protocol-v2 thread events (values /
+# updates / messages / tools / custom) are replayed instead, alongside the
+# run-scoped lifecycle records (start/end) still published by run_jobs.
+DEFAULT_RUN_STREAM_REPLAY_CHANNELS = ["values", "updates", "messages", "tools", "custom", "input"]
+
+
 async def _iter_persisted_protocol_run_events(
     *,
     thread_id: str,
@@ -400,6 +408,7 @@ def _build_create_run_stream_response(
     async def _event_iter() -> AsyncIterator[str]:
         try:
             current_seq = after_seq
+            saw_interrupt = False
             if include_metadata:
                 yield _protocol_event_sse(event_name="metadata", data={"run_id": created.run_id, "attempt": 1})
 
@@ -417,10 +426,13 @@ def _build_create_run_stream_response(
                     continue
                 if suppress_block_messages and _is_block_message_event(event):
                     continue
+                event_data = event.get("params", {}).get("data", {})
+                if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                    saw_interrupt = True
                 yield _protocol_event_sse(
                     seq=current_seq,
                     event_name=str(event.get("method", "message")),
-                    data=event.get("params", {}).get("data", {}),
+                    data=event_data,
                 )
 
             if _uses_redis_executor():
@@ -438,10 +450,13 @@ def _build_create_run_stream_response(
                     current_seq = max(current_seq, int(event.get("seq", 0)))
                     if suppress_block_messages and _is_block_message_event(event):
                         continue
+                    event_data = event.get("params", {}).get("data", {})
+                    if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                        saw_interrupt = True
                     yield _protocol_event_sse(
                         seq=current_seq,
                         event_name=str(event.get("method", "message")),
-                        data=event.get("params", {}).get("data", {}),
+                        data=event_data,
                     )
             else:
                 async for event in iter_with_sse_keepalives(
@@ -462,10 +477,13 @@ def _build_create_run_stream_response(
                     current_seq = max(current_seq, int(event.get("seq", 0)))
                     if suppress_block_messages and _is_block_message_event(event):
                         continue
+                    event_data = event.get("params", {}).get("data", {})
+                    if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                        saw_interrupt = True
                     yield _protocol_event_sse(
                         seq=current_seq,
                         event_name=str(event.get("method", "message")),
-                        data=event.get("params", {}).get("data", {}),
+                        data=event_data,
                     )
 
             final_run = (
@@ -482,7 +500,15 @@ def _build_create_run_stream_response(
                 )
                 return
             interrupt_event = _interrupt_stream_event_name(stream_modes)
-            if final_run.status == "interrupted" and final_run.interrupts and interrupt_event is not None:
+            if (
+                final_run.status == "interrupted"
+                and final_run.interrupts
+                and interrupt_event is not None
+                # The interrupt is delivered in-stream (values/updates carrying
+                # ``__interrupt__``); only emit a trailing event when this
+                # connection never saw it.
+                and not saw_interrupt
+            ):
                 current_seq += 1
                 yield _protocol_event_sse(
                     seq=current_seq,
@@ -888,20 +914,38 @@ async def stream_run(
             )
 
     async def _event_iter() -> AsyncIterator[str]:
-        current_seq = after_seq
-        use_redis_executor = _uses_redis_executor()
+        # The run stream is a single run-scoped, monotonically sequenced log of
+        # both lifecycle records (start/end) and protocol frames
+        # (values/updates/messages/tools). Protocol events are appended to it
+        # at publication time, so the SSE cursor is one domain: a reconnect
+        # with ``Last-Event-ID`` (run stream seq) reads only frames with a
+        # higher seq and never replays already-delivered events.
         records_by_seq: dict[int, dict[str, object]] = {
             seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
         }
         records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=after_seq)})
+        # Emit the persisted run log strictly by sequence. Lifecycle records
+        # (start/end) and protocol frames share one monotonic seq domain, and
+        # within a single run the terminal "end" is always published after that
+        # run's protocol frames, so a strict ascending replay keeps every id
+        # monotonic even across a resume: an earlier run's "end" keeps its
+        # original seq instead of being deferred past newer resume frames.
+        current_seq = after_seq
         for seq in sorted(records_by_seq):
             event = records_by_seq[seq]
             current_seq = max(current_seq, seq)
-            event_name = str(event.get("event", "message"))
-            event_payload: dict[str, object] = {"run_id": run_id, **event}
-            payload = safe_json_dumps(event_payload)
-            yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
+            if "method" in event:
+                yield _protocol_event_sse(
+                    seq=seq,
+                    event_name=str(event["method"]),
+                    data=event.get("params", {}).get("data", {}),
+                )
+            else:
+                event_name = str(event.get("event", "message"))
+                event_payload: dict[str, object] = {"run_id": run_id, **event}
+                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
 
+        use_redis_executor = _uses_redis_executor()
         if use_redis_executor:
             async for item in iter_with_sse_keepalives(
                 _iter_persisted_run_records(
@@ -914,9 +958,17 @@ async def stream_run(
                     yield sse_keepalive_comment()
                     continue
                 seq, event = item
-                event_name = str(event.get("event", "message"))
-                event_payload = {"run_id": run_id, **event}
-                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
+                current_seq = max(current_seq, seq)
+                if "method" in event:
+                    yield _protocol_event_sse(
+                        seq=seq,
+                        event_name=str(event["method"]),
+                        data=event.get("params", {}).get("data", {}),
+                    )
+                else:
+                    event_name = str(event.get("event", "message"))
+                    event_payload: dict[str, object] = {"run_id": run_id, **event}
+                    yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
             return
 
         if row.status in TERMINAL_RUN_STATUSES:
@@ -927,9 +979,17 @@ async def stream_run(
                 yield sse_keepalive_comment()
                 continue
             seq, event = item
-            event_name = str(event.get("event", "message"))
-            event_payload = {"run_id": run_id, **event}
-            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
+            current_seq = max(current_seq, seq)
+            if "method" in event:
+                yield _protocol_event_sse(
+                    seq=seq,
+                    event_name=str(event["method"]),
+                    data=event.get("params", {}).get("data", {}),
+                )
+            else:
+                event_name = str(event.get("event", "message"))
+                event_payload: dict[str, object] = {"run_id": run_id, **event}
+                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
 
     return StreamingResponse(
         _event_iter(),

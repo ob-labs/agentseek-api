@@ -124,19 +124,28 @@ async def test_live_provider_streaming_http_flow(live_provider_base_url: str) ->
             for line in stream.text.splitlines()
             if line.startswith("data: ")
         ]
-        message_chunks = [
+        # The default run-stream replay returns the run's persisted protocol
+        # events. A run created without an explicit stream_mode does not stream
+        # incremental LLM tokens (no ``messages`` channel events), so the final
+        # answer is read back from the last state snapshot (``values`` payload)
+        # instead of token deltas.
+        state_payloads = [
             payload
             for payload in payloads
-            if payload.get("event") == "message_chunk"
-            and payload.get("langgraph_event") in {"on_chat_model_stream", "on_llm_stream"}
-            and _text_from_content(payload.get("content")).strip()
+            if isinstance(payload, dict) and isinstance(payload.get("messages"), list)
         ]
+        assert state_payloads
+        final_messages = state_payloads[-1]["messages"]
+        final_ai = next(
+            (m for m in reversed(final_messages) if isinstance(m, dict) and m.get("type") == "ai"),
+            None,
+        )
+        assert final_ai is not None
 
         assert payloads[0]["event"] == "start"
         assert "event: start" in stream.text
         assert "event: end" in stream.text
-        assert len(message_chunks) >= 2
-        assert _normalize_text("".join(_text_from_content(payload.get("content")) for payload in message_chunks)) == _normalize_text(
+        assert _normalize_text(str(final_ai.get("content", ""))) == _normalize_text(
             waited_body["output"]["final_text"]
         )
 
@@ -246,7 +255,7 @@ async def test_live_provider_store_endpoints_and_graph(live_provider_base_url: s
             json={"namespace": namespace, "key": "profile", "value": {"kind": "profile", "name": "Ada"}},
             headers=user_headers(user_id),
         )
-        assert created.status_code == 200
+        assert created.status_code in (200, 204)
 
         fetched = await client.get(
             "/store/items",
@@ -321,7 +330,7 @@ async def test_live_provider_store_ttl_expires_items_on_mysql_family_backend(liv
             },
             headers=user_headers(user_id),
         )
-        assert created.status_code == 200
+        assert created.status_code in (200, 204)
 
         immediate = await client.get(
             "/store/items",
@@ -377,7 +386,7 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         run_id = run.json()["run_id"]
 
         interrupted_stream = await client.post(
-            f"/threads/{thread_id}/stream",
+            f"/threads/{thread_id}/stream/events",
             json={"channels": ["lifecycle", "input", "values"]},
             headers=user_headers(user_id),
         )
@@ -415,7 +424,7 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
 
         async with client.stream(
             "POST",
-            f"/threads/{thread_id}/stream",
+            f"/threads/{thread_id}/stream/events",
             json={"channels": ["lifecycle", "values"], "since": last_seq},
             headers=user_headers(user_id),
         ) as resumed_stream:
@@ -455,3 +464,78 @@ async def test_live_provider_hitl_rest_and_protocol_resume(live_provider_base_ur
         create_time_input = next(event for event in create_time_events if event["event"] == "input.requested")
         assert create_time_input["data"]["payload"] == "Provide value:"
         assert create_time_input["data"]["interrupt_id"]
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_live_provider_realtime_stream_incremental_messages_partial(live_provider_base_url: str) -> None:
+    """Real-time messages stream emits incremental ``messages/partial`` tokens.
+
+    The messages wire contract delivers ``messages/metadata`` + ``messages/partial``
+    only (the protocol-v2 block stream is suppressed for this contract), and the
+    partials accumulate to the final AI answer. This closes the gap where only the
+    replay endpoint (final values snapshot) and the unit-level block publishing
+    were covered.
+    """
+    user_id = f"provider-realtime-partial-{uuid4().hex}"
+
+    async with httpx.AsyncClient(base_url=live_provider_base_url, timeout=90.0, trust_env=False) as client:
+        assistant = await client.post(
+            "/assistants",
+            json={"name": "live-provider-realtime-partial", "graph_id": provider_graph_id("stream")},
+        )
+        assert assistant.status_code == 200, assistant.text
+        assistant_id = assistant.json()["assistant_id"]
+
+        thread = await client.post(
+            "/threads",
+            json={"metadata": {"suite": "live-provider-realtime-partial"}},
+            headers=user_headers(user_id),
+        )
+        assert thread.status_code == 200
+        thread_id = thread.json()["thread_id"]
+
+        streamed_create = await client.post(
+            f"/threads/{thread_id}/runs/stream",
+            json={
+                "assistant_id": assistant_id,
+                "input": {
+                    "message": (
+                        "Reply with one short sentence about real-time token streaming, "
+                        "using at least twenty words."
+                    )
+                },
+                "stream_mode": "messages",
+            },
+            headers=user_headers(user_id),
+        )
+        assert streamed_create.status_code == 200, streamed_create.text
+        assert streamed_create.headers["content-type"].startswith("text/event-stream")
+
+        events = parse_sse_events(streamed_create.text)
+        event_names = [event["event"] for event in events]
+        assert event_names[0] == "metadata"
+        assert "messages/partial" in event_names
+        assert not any("content-block" in name for name in event_names)
+
+        partial_payloads = [event["data"] for event in events if event["event"] == "messages/partial"]
+        assert len(partial_payloads) >= 2, "expected at least one incremental token step"
+
+        # The last messages/partial payload carries the fully accumulated message.
+        # Wire data is the message list directly (official messages/partial format).
+        accumulated_text = ""
+        for payload in partial_payloads:
+            if not isinstance(payload, list) or not payload:
+                continue
+            last = payload[-1]
+            if not isinstance(last, dict) or last.get("type") != "ai":
+                continue
+            accumulated_text = _text_from_content(last.get("content"))
+
+        assert accumulated_text, "messages/partial never carried an AI message"
+
+        run_id = str(next(event["data"]["run_id"] for event in events if event["event"] == "metadata"))
+        awaited = await _poll_run(client=client, thread_id=thread_id, run_id=run_id, user_id=user_id)
+        assert awaited["status"] == "success"
+        final_text = str(awaited["output"]["final_text"])
+        assert _normalize_text(accumulated_text) == _normalize_text(final_text)

@@ -16,13 +16,18 @@ from agentseek_api.services.stream_persistence import (
     add_thread_stream_event_to_session,
     add_run_stream_event_to_session,
     append_redis_run_stream_event,
-    next_run_stream_seq,
-    next_thread_stream_seq,
-    persist_run_stream_event,
-    persist_thread_stream_event,
+    append_run_stream_event_atomic,
+    append_thread_stream_event_atomic,
+    next_run_stream_seq,  # noqa: F401 - module attribute; tests assert the redis path never calls it
+    next_thread_stream_seq,  # noqa: F401 - module attribute; tests assert the redis path never calls it
 )
 from agentseek_api.services.thread_checkpoint_store import checkpoint_to_payload, get_latest_checkpoint
-from agentseek_api.services.thread_protocol import apublish_lifecycle_event, publish_lifecycle_event, thread_protocol_broker
+from agentseek_api.services.thread_protocol import (
+    apublish_lifecycle_event,
+    protocol_timestamp_ms,
+    publish_lifecycle_event,  # noqa: F401 - run_preparation rebinds this module attribute
+    thread_protocol_broker,
+)
 
 RUN_EXECUTION_JOB_KIND = "run.execute"
 TERMINAL_RUN_STATUSES = {"success", "error", "interrupted"}
@@ -84,7 +89,16 @@ async def _publish_lifecycle(
     graph_name: str | None = None,
     error: str | None = None,
     session: AsyncSession | None = None,
-) -> None:
+) -> tuple[int, dict[str, Any]] | None:
+    """Publish a thread lifecycle event.
+
+    Durable-before-expose ordering: the event row (and its seq) is appended
+    atomically before the in-memory broker makes it visible, so a client can
+    never receive a seq that was not durably committed. When ``session`` is
+    given (terminal lifecycle), the row is staged inside that transaction
+    instead - the caller must commit and only then expose the event to the
+    broker, keeping it atomic with the run status.
+    """
     if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
         await apublish_lifecycle_event(
             thread_id,
@@ -92,33 +106,40 @@ async def _publish_lifecycle(
             graph_name=graph_name,
             error=error,
         )
-        return
-    kwargs: dict[str, Any] = {"event": event}
+        return None
+    data: dict[str, Any] = {"event": event}
     if graph_name is not None:
-        kwargs["graph_name"] = graph_name
+        data["graph_name"] = graph_name
     if error is not None:
-        kwargs["error"] = error
-    seq = await next_thread_stream_seq(thread_id)
-    published = publish_lifecycle_event(thread_id, persist=False, seq=seq, **kwargs)
+        data["error"] = error
+    payload: dict[str, Any] = {
+        "method": "lifecycle",
+        "params": {
+            "namespace": [],
+            "timestamp": protocol_timestamp_ms(),
+            "data": data,
+        },
+    }
     if session is None:
-        await persist_thread_stream_event(thread_id, published)
-        return
-    await add_thread_stream_event_to_session(
-        session,
-        thread_id,
-        seq=int(published["seq"]),
-        payload=published,
-    )
+        seq, _ = await append_thread_stream_event_atomic(thread_id, payload)
+        thread_protocol_broker.publish(thread_id, payload, persist=False, seq=seq)
+        return seq, payload
+    seq, _ = await add_thread_stream_event_to_session(session, thread_id, payload=payload)
+    return seq, payload
 
 
 async def _publish_run_event(
     run_id: str,
     event: str,
-    *,
-    persist: bool = True,
     **payload: Any,
 ) -> tuple[int, dict[str, Any]] | None:
-    if settings.EXECUTOR_BACKEND.strip().lower() == "redis" and persist:
+    """Append a run lifecycle record durably, then expose it to the broker.
+
+    The metadata-DB path allocates the seq and inserts the row in one atomic
+    transaction and only then publishes to the in-memory broker, so the broker
+    never exposes a seq that is not durable.
+    """
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
         event_payload = {"event": event, **payload}
         try:
             seq, _ = await append_redis_run_stream_event(run_id, event_payload)
@@ -130,32 +151,27 @@ async def _publish_run_event(
             )
             seq = None
         return run_broker.publish(run_id, event, seq=seq, **payload)
-    seq = await next_run_stream_seq(run_id)
-    published = run_broker.publish(run_id, event, seq=seq, **payload)
-    if published is None:
-        return None
-    seq, event_payload = published
-    if persist:
-        await persist_run_stream_event(run_id, seq=seq, payload=event_payload)
-    return seq, event_payload
+    seq, _ = await append_run_stream_event_atomic(run_id, {"event": event, **payload})
+    return run_broker.publish(run_id, event, seq=seq, **payload)
 
 
-async def _persist_thread_snapshot(thread_id: str) -> None:
+async def _publish_terminal_run_event(session: AsyncSession, run_id: str, *, status: str) -> tuple[int, dict[str, Any]] | None:
+    """Record the terminal ``end`` event.
+
+    Redis: the atomic Lua append already makes the record durable before the
+    broker publishes it, so this delegates to ``_publish_run_event`` unchanged.
+    Inline: the row is staged inside ``session`` (allocating its seq from the
+    locked counter row) without touching the broker; the caller commits and
+    then exposes the event so the terminal status and its stream record are
+    durable as one unit.
+    """
     if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
-        return
-    for event in thread_protocol_broker.snapshot_records(thread_id):
-        await persist_thread_stream_event(thread_id, event)
-
-
-async def _publish_terminal_run_event(session: AsyncSession, run_id: str, *, status: str) -> None:
-    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
-        await _publish_run_event(run_id, "end", status=status)
-        return
-    terminal_run_event = await _publish_run_event(run_id, "end", status=status, persist=False)
-    if terminal_run_event is None:
-        return
-    seq, event_payload = terminal_run_event
-    await add_run_stream_event_to_session(session, run_id, seq=seq, payload=event_payload)
+        return await _publish_run_event(run_id, "end", status=status)
+    return await add_run_stream_event_to_session(
+        session,
+        run_id,
+        payload={"event": "end", "status": status},
+    )
 
 
 def _apply_execution_result(db_run: Run, result: RunExecutionResult) -> None:
@@ -209,7 +225,6 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                 if job.kwargs:
                     execute_kwargs["kwargs"] = job.kwargs
                 result = await execute_run(**execute_kwargs)
-                await _persist_thread_snapshot(job.thread_id)
                 await execution_session.refresh(db_run)
                 if not _is_cancelled_run(db_run):
                     # A missing checkpoint lookup should not turn a successful run into a failed one.
@@ -234,13 +249,14 @@ async def execute_run_job(job: RunExecutionJob) -> None:
             if thread is not None:
                 thread.status = "interrupted" if db_run.status == "interrupted" else ("error" if db_run.status == "error" else "idle")
                 thread.state_updated_at = db_run.updated_at
-            await _publish_terminal_run_event(execution_session, job.run_id, status=db_run.status)
+            is_redis_executor = settings.EXECUTOR_BACKEND.strip().lower() == "redis"
+            terminal = await _publish_terminal_run_event(execution_session, job.run_id, status=db_run.status)
             lifecycle_state = "completed"
             if db_run.status == "interrupted":
                 lifecycle_state = "interrupted"
             elif db_run.status == "error":
                 lifecycle_state = "failed"
-            await _publish_lifecycle(
+            lifecycle = await _publish_lifecycle(
                 job.thread_id,
                 event=lifecycle_state,
                 graph_name=job.graph_id,
@@ -248,5 +264,16 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                 session=execution_session,
             )
             await execution_session.commit()
+            if not is_redis_executor and terminal is not None and lifecycle is not None:
+                # The terminal records are durable with the run state now; only
+                # then expose them to the in-memory brokers, so a client never
+                # sees a seq that was not durably committed.
+                run_broker.publish(job.run_id, "end", seq=terminal[0], status=db_run.status)
+                thread_protocol_broker.publish(
+                    job.thread_id,
+                    lifecycle[1],
+                    persist=False,
+                    seq=lifecycle[0],
+                )
     finally:
         thread_protocol_broker.run_finished(job.thread_id)

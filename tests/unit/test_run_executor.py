@@ -1,3 +1,4 @@
+﻿from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -5,62 +6,28 @@ from langchain_core.messages import AIMessage, AIMessageChunk, HumanMessage, Too
 from langgraph.constants import CONF, CONFIG_KEY_CHECKPOINTER
 
 from agentseek_api.core.runtime_store import UserScopedStore
-from agentseek_api.settings import settings
-from agentseek_api.services import run_executor as run_executor_module
 from agentseek_api.services.run_executor import (
     RunExecutionResult,
     _ProtocolMessageStreamState,
-    _translate_stream_events,
     execute_run,
 )
 from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
 
-@pytest.mark.asyncio
-async def test_publish_translated_run_event_uses_atomic_redis_append(monkeypatch: pytest.MonkeyPatch) -> None:
-    published: list[tuple[str, str, int | None, dict[str, Any]]] = []
-    monkeypatch.setattr(settings, "EXECUTOR_BACKEND", "redis")
-    publish_event = getattr(run_executor_module, "_publish_translated_run_event", None)
-
-    async def fake_append(run_id: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
-        assert run_id == "run-1"
-        return 11, payload
-
-    async def unexpected_next_seq(_run_id: str) -> int:
-        raise AssertionError("Redis sequence allocation must be part of the append")
-
-    monkeypatch.setattr(run_executor_module, "append_redis_run_stream_event", fake_append, raising=False)
-    monkeypatch.setattr(run_executor_module, "next_run_stream_seq", unexpected_next_seq)
-    monkeypatch.setattr(
-        run_executor_module.run_broker,
-        "publish",
-        lambda run_id, event, *, seq=None, **payload: (
-            published.append((run_id, event, seq, payload)) or (seq, {"event": event, **payload})
-        ),
-    )
-
-    assert callable(publish_event)
-    result = await publish_event("run-1", "message", {"data": "hello"})
-
-    assert result == (11, {"event": "message", "data": "hello"})
-    assert published == [("run-1", "message", 11, {"data": "hello"})]
-
-
 class FakeGraph:
+    """Fake compiled graph: the default path streams through ``astream()`` and
+    then reads the final state back via ``aget_state()``, mirroring how
+    ``execute_run`` drives a real langgraph graph."""
+
     def __init__(self) -> None:
         self.configs: list[dict] = []
 
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
         self.configs.append(config)
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "langgraph-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"output": {"ok": True, "received": prepared_input}}},
-        }
+        yield ("values", {"output": {"ok": True, "received": prepared_input}})
+
+    async def aget_state(self, config: dict):
+        return SimpleNamespace(values=None)
 
 
 class FakeEntry:
@@ -189,19 +156,11 @@ class FakeKwargsCapturingGraph(FakeGraph):
         self.stream_kwargs: list[dict] = []
         self.inputs: list[Any] = []
 
-    async def astream_events(self, prepared_input, config: dict, version: str = "v2", **kwargs):
+    async def astream(self, prepared_input, config: dict, **kwargs):
         self.configs.append(config)
         self.stream_kwargs.append(kwargs)
         self.inputs.append(prepared_input)
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "langgraph-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"output": {"ok": True}}},
-        }
+        yield ("values", {"output": {"ok": True}})
 
 
 class FakeKwargsCapturingEntry:
@@ -232,7 +191,10 @@ class FakeKwargsCapturingLangGraphService:
 async def test_execute_run_forwards_command_as_invocation(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDBManager()
     FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeKwargsCapturingLangGraphService())
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
 
     from langgraph.types import Command
@@ -256,7 +218,10 @@ async def test_execute_run_forwards_command_as_invocation(monkeypatch: pytest.Mo
 async def test_execute_run_forwards_interrupt_and_stream_mode_kwargs(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDBManager()
     FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    monkeypatch.setattr("agentseek_api.services.run_executor.get_langgraph_service", lambda: FakeKwargsCapturingLangGraphService())
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: FakeKwargsCapturingLangGraphService(),
+    )
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
 
     await execute_run(
@@ -277,34 +242,18 @@ async def test_execute_run_forwards_interrupt_and_stream_mode_kwargs(monkeypatch
     assert "values" in kwargs["stream_mode"]
     assert "debug" in kwargs["stream_mode"]
 
-
 class FakeInterruptGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
         self.configs.append(config)
-        yield {
-            "event": "on_chain_stream",
-            "name": "fake-graph",
-            "run_id": "langgraph-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {
-                "chunk": {
-                    "__interrupt__": [
-                        type("Interrupt", (), {"value": "Provide value:", "id": "interrupt-1"})(),
-                    ]
-                }
+        yield (
+            "updates",
+            {
+                "__interrupt__": [
+                    type("Interrupt", (), {"value": "Provide value:", "id": "interrupt-1"})(),
+                ]
             },
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "langgraph-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"foo": prepared_input["input"]["foo"]}},
-        }
+        )
+        yield ("values", {"foo": prepared_input["input"]["foo"]})
 
 
 class FakeInterruptEntry(FakeEntry):
@@ -330,14 +279,16 @@ class FakeInterruptLangGraphService(FakeLangGraphService):
 
 
 @pytest.mark.asyncio
-async def test_execute_run_preserves_interrupts_from_root_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_execute_run_preserves_interrupts_from_updates_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
     FakeInterruptEntry.graph = FakeInterruptGraph()
     monkeypatch.setattr(
         "agentseek_api.services.run_executor.get_langgraph_service",
         lambda: FakeInterruptLangGraphService(),
     )
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
     result = await execute_run(thread_id="t1", run_id="r1", payload={"foo": "hello"}, user_id="user-1")
 
@@ -345,486 +296,27 @@ async def test_execute_run_preserves_interrupts_from_root_stream(monkeypatch: py
     assert result.interrupts == [{"value": "Provide value:", "id": "interrupt-1"}]
     assert result.output["state"]["foo"] == "hello"
 
-
-def test_translate_stream_events_maps_chat_model_stream_to_message_chunk() -> None:
-    translated = _translate_stream_events(
-        {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "langgraph-run",
-            "parent_ids": ["parent-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": ["graph:step:1"],
-            "data": {"chunk": AIMessageChunk(content="hello")},
-        }
-    )
-
-    assert translated == [
-        (
-            "message_chunk",
-            {
-                "name": "chat-model",
-                "langgraph_event": "on_chat_model_stream",
-                "langgraph_run_id": "langgraph-run",
-                "metadata": {"langgraph_node": "call_model"},
-                "tags": ["graph:step:1"],
-                "parent_ids": ["parent-run"],
-                "node": "call_model",
-                "message_type": "AIMessageChunk",
-                "content": "hello",
-            },
-        )
+    # The interrupt rides on a ``values`` event with ``__interrupt__``
+    # intact (remapped from updates because updates were not explicitly requested),
+    # so the official SDK stream() parser can surface it.
+    value_events = [event for event in protocol_broker._events["t1"] if event["method"] == "values"]
+    interrupt_values = [event for event in value_events if "__interrupt__" in event["params"]["data"]]
+    assert len(interrupt_values) == 1
+    assert interrupt_values[0]["params"]["data"]["__interrupt__"] == [
+        {"value": "Provide value:", "id": "interrupt-1"}
     ]
 
 
-class FakeProtocolStreamingGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {"chunk": AIMessageChunk(content="hel")},
-        }
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {"chunk": AIMessageChunk(content="lo")},
-        }
-        yield {
-            "event": "on_chain_stream",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"chunk": {"step": "partial"}},
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"output": {"messages": [AIMessage(content="hello")], "step": "final"}}},
-        }
-
-
-class FakeProtocolLlmStreamingGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        yield {
-            "event": "on_llm_stream",
-            "name": "completion-model",
-            "run_id": "llm-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {"chunk": type("Chunk", (), {"text": "hel"})()},
-        }
-        yield {
-            "event": "on_llm_stream",
-            "name": "completion-model",
-            "run_id": "llm-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {"chunk": type("Chunk", (), {"text": "lo"})()},
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"output": {"text": "hello"}}},
-        }
-
-
-class FakeProtocolStreamingEntry(FakeEntry):
-    graph = FakeProtocolStreamingGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolStreamingGraph:
-        return FakeProtocolStreamingEntry.graph
-
-
-class FakeProtocolStreamingLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolStreamingEntry:
-        return FakeProtocolStreamingEntry()
-
-
-class FakeProtocolLlmStreamingEntry(FakeEntry):
-    graph = FakeProtocolLlmStreamingGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolLlmStreamingGraph:
-        return FakeProtocolLlmStreamingEntry.graph
-
-
-class FakeProtocolLlmStreamingLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolLlmStreamingEntry:
-        return FakeProtocolLlmStreamingEntry()
-
-
-class FakeProtocolNamespaceGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        yield {
-            "event": "on_tool_start",
-            "name": "search_docs",
-            "run_id": "tool-run",
-            "parent_ids": ["root-run"],
-            "metadata": {
-                "langgraph_node": "search_docs",
-                "langgraph_checkpoint_ns": "node_1:task-1|search_docs:task-2",
-            },
-            "tags": [],
-            "data": {"input": {"query": prepared_input["input"]["hello"]}},
-        }
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {
-                "langgraph_node": "call_model",
-                "langgraph_checkpoint_ns": "node_1:task-1|call_model:task-3",
-            },
-            "tags": [],
-            "data": {"chunk": AIMessageChunk(content="hello")},
-        }
-        yield {
-            "event": "on_chain_stream",
-            "name": "node_1",
-            "run_id": "subgraph-run",
-            "parent_ids": ["root-run"],
-            "metadata": {
-                "langgraph_node": "node_1",
-                "langgraph_checkpoint_ns": "node_1:task-1",
-            },
-            "tags": [],
-            "data": {"chunk": {"step": "partial"}},
-        }
-        yield {
-            "event": "on_tool_end",
-            "name": "search_docs",
-            "run_id": "tool-run",
-            "parent_ids": ["root-run"],
-            "metadata": {
-                "langgraph_node": "search_docs",
-                "langgraph_checkpoint_ns": "node_1:task-1|search_docs:task-2",
-            },
-            "tags": [],
-            "data": {"output": {"answer": "docs"}},
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"output": {"messages": [AIMessage(content="hello")], "step": "final"}}},
-        }
-
-
-class FakeProtocolNamespaceEntry(FakeEntry):
-    graph = FakeProtocolNamespaceGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolNamespaceGraph:
-        return FakeProtocolNamespaceEntry.graph
-
-
-class FakeProtocolNamespaceLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolNamespaceEntry:
-        return FakeProtocolNamespaceEntry()
-
-
-class FakeProtocolStructuredMessageGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {
-                "chunk": AIMessageChunk(
-                    content=[
-                        {"type": "text", "text": "hello"},
-                        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
-                    ]
-                )
-            },
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {
-                "output": {
-                    "output": {
-                        "messages": [
-                            AIMessage(
-                                content=[
-                                    {"type": "text", "text": "hello"},
-                                    {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
-                                ]
-                            )
-                        ]
-                    }
-                }
-            },
-        }
-
-
-class FakeProtocolStructuredMessageEntry(FakeEntry):
-    graph = FakeProtocolStructuredMessageGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolStructuredMessageGraph:
-        return FakeProtocolStructuredMessageEntry.graph
-
-
-class FakeProtocolStructuredMessageLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolStructuredMessageEntry:
-        return FakeProtocolStructuredMessageEntry()
-
-
-class FakeProtocolToolCallChunkGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {
-                "chunk": AIMessageChunk(
-                    content="",
-                    tool_call_chunks=[
-                        {"id": "call-1", "name": "search", "args": '{"q":"hel"}', "index": 0},
-                    ],
-                )
-            },
-        }
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {
-                "chunk": AIMessageChunk(
-                    content="",
-                    tool_call_chunks=[
-                        {"id": "call-1", "name": None, "args": 'lo"}', "index": 0},
-                    ],
-                )
-            },
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"output": {"messages": []}}},
-        }
-
-
-class FakeProtocolToolCallChunkEntry(FakeEntry):
-    graph = FakeProtocolToolCallChunkGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolToolCallChunkGraph:
-        return FakeProtocolToolCallChunkEntry.graph
-
-
-class FakeProtocolToolCallChunkLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolToolCallChunkEntry:
-        return FakeProtocolToolCallChunkEntry()
-
-
-class FakeProtocolMixedStructuredGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": [],
-            "data": {"chunk": AIMessageChunk(content="hello")},
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {
-                "output": {
-                    "output": {
-                        "messages": [
-                            {
-                                "type": "AIMessage",
-                                "content": [
-                                    {"type": "text", "text": "hello"},
-                                    {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
-                                ],
-                            }
-                        ]
-                    }
-                }
-            },
-        }
-
-
-class FakeProtocolMixedStructuredEntry(FakeEntry):
-    graph = FakeProtocolMixedStructuredGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolMixedStructuredGraph:
-        return FakeProtocolMixedStructuredEntry.graph
-
-
-class FakeProtocolMixedStructuredLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolMixedStructuredEntry:
-        return FakeProtocolMixedStructuredEntry()
-
-
-class FakeProtocolMultiMessageGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        yield {
-            "event": "on_chain_stream",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"chunk": {"messages": [HumanMessage(content="hi"), AIMessage(content="hello")]}}
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {"output": {"output": {"messages": [HumanMessage(content="hi"), AIMessage(content="hello")]}}}
-        }
-
-
-class FakeProtocolMultiMessageEntry(FakeEntry):
-    graph = FakeProtocolMultiMessageGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolMultiMessageGraph:
-        return FakeProtocolMultiMessageEntry.graph
-
-
-class FakeProtocolMultiMessageLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolMultiMessageEntry:
-        return FakeProtocolMultiMessageEntry()
-
-
-class FakeProtocolToolMessageGraph(FakeGraph):
-    async def astream_events(self, prepared_input: dict, config: dict, version: str = "v2", **kwargs):
-        self.configs.append(config)
-        tool_message = ToolMessage(
-            content="42 characters",
-            tool_call_id="call-character-count",
-            id="tool-message-1",
-        )
-        tool_event = {
-            "event": "on_chain_stream",
-            "name": "tools",
-            "run_id": "tool-run",
-            "parent_ids": ["root-run"],
-            "metadata": {
-                "langgraph_node": "tools",
-                "langgraph_checkpoint_ns": "tools:task-1",
-                "provider": "deterministic",
-            },
-            "tags": ["graph:step:2"],
-            "data": {"chunk": {"messages": [tool_message]}},
-        }
-        yield tool_event
-        yield tool_event
-        yield {
-            "event": "on_chat_model_stream",
-            "name": "chat-model",
-            "run_id": "chat-run",
-            "parent_ids": ["root-run"],
-            "metadata": {"langgraph_node": "call_model"},
-            "tags": ["graph:step:3"],
-            "data": {"chunk": AIMessageChunk(content="Final answer", id="ai-message-1")},
-        }
-        yield {
-            "event": "on_chain_end",
-            "name": "fake-graph",
-            "run_id": "root-run",
-            "parent_ids": [],
-            "metadata": {},
-            "tags": [],
-            "data": {
-                "output": {
-                    "output": {
-                        "messages": [tool_message, AIMessage(content="Final answer", id="ai-message-1")]
-                    }
-                }
-            },
-        }
-
-
-class FakeProtocolToolMessageEntry(FakeEntry):
-    graph = FakeProtocolToolMessageGraph()
-
-    @staticmethod
-    def build_graph(_checkpointer=None) -> FakeProtocolToolMessageGraph:
-        return FakeProtocolToolMessageEntry.graph
-
-
-class FakeProtocolToolMessageLangGraphService(FakeLangGraphService):
-    def get_entry(self, _graph_id: str | None) -> FakeProtocolToolMessageEntry:
-        return FakeProtocolToolMessageEntry()
-
-
-async def _execute_protocol_tool_message_graph(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    stream_modes: list[str],
-) -> list[dict[str, Any]]:
+@pytest.mark.asyncio
+async def test_execute_run_keeps_interrupt_in_updates_when_updates_requested(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When the client explicitly requests updates, the interrupt stays on the
+    updates channel with ``__interrupt__`` intact (official behavior)."""
     fake_db = FakeDBManager()
     protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolToolMessageEntry.graph = FakeProtocolToolMessageGraph()
+    FakeInterruptEntry.graph = FakeInterruptGraph()
     monkeypatch.setattr(
         "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolToolMessageLangGraphService(),
+        lambda: FakeInterruptLangGraphService(),
     )
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
@@ -832,20 +324,339 @@ async def _execute_protocol_tool_message_graph(
     await execute_run(
         thread_id="t1",
         run_id="r1",
-        payload={"hello": "world"},
+        payload={"foo": "hello"},
         user_id="user-1",
-        kwargs={"stream_modes": stream_modes},
+        kwargs={"stream_modes": ["updates"]},
     )
+
+    update_events = [event for event in protocol_broker._events["t1"] if event["method"] == "updates"]
+    interrupt_updates = [event for event in update_events if "__interrupt__" in event["params"]["data"]]
+    assert len(interrupt_updates) == 1
+    assert interrupt_updates[0]["params"]["data"]["__interrupt__"] == [
+        {"value": "Provide value:", "id": "interrupt-1"}
+    ]
+
+
+class FakeProtocolStreamingGraph(FakeGraph):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield ("messages", (AIMessageChunk(content="hel"), {"langgraph_node": "call_model"}))
+        yield ("messages", (AIMessageChunk(content="lo"), {"langgraph_node": "call_model"}))
+        yield ("updates", {"step": "partial"})
+        yield ("values", {"output": {"messages": [AIMessage(content="hello")], "step": "final"}})
+
+
+class FakeProtocolLlmStreamingGraph(FakeGraph):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield ("messages", (AIMessageChunk(content="hel"), {"langgraph_node": "call_model"}))
+        yield ("messages", (AIMessageChunk(content="lo"), {"langgraph_node": "call_model"}))
+        yield ("values", {"output": {"text": "hello"}})
+
+
+class FakeProtocolNamespaceGraph(FakeGraph):
+    """Namespaces flow through the ``(namespace, mode, chunk)`` tuples produced
+    when the run requests ``stream_subgraphs``."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (
+            ["node_1:task-1", "call_model:task-3"],
+            "messages",
+            (AIMessageChunk(content="hello"), {"langgraph_node": "call_model"}),
+        )
+        yield (["node_1:task-1"], "updates", {"step": "partial"})
+        yield ([], "values", {"output": {"messages": [AIMessage(content="hello")], "step": "final"}})
+
+
+class FakeProtocolStructuredMessageGraph(FakeGraph):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content=[
+                        {"type": "text", "text": "hello"},
+                        {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
+                    ]
+                ),
+                {"langgraph_node": "call_model"},
+            ),
+        )
+        yield (
+            "values",
+            {
+                "output": {
+                    "messages": [
+                        {
+                            "type": "AIMessage",
+                            "content": [
+                                {"type": "text", "text": "hello"},
+                                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+
+
+class FakeProtocolToolCallChunkGraph(FakeGraph):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {"id": "call-1", "name": "search", "args": '{"q":"hel"}', "index": 0},
+                    ],
+                ),
+                {"langgraph_node": "call_model"},
+            ),
+        )
+        yield (
+            "messages",
+            (
+                AIMessageChunk(
+                    content="",
+                    tool_call_chunks=[
+                        {"id": "call-1", "name": None, "args": 'lo"}', "index": 0},
+                    ],
+                ),
+                {"langgraph_node": "call_model"},
+            ),
+        )
+        yield ("values", {"output": {"messages": []}})
+
+
+class FakeProtocolMixedStructuredGraph(FakeGraph):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield ("messages", (AIMessageChunk(content="hello"), {"langgraph_node": "call_model"}))
+        yield (
+            "values",
+            {
+                "output": {
+                    "messages": [
+                        {
+                            "type": "AIMessage",
+                            "content": [
+                                {"type": "text", "text": "hello"},
+                                {"type": "reasoning", "summary": [{"type": "summary_text", "text": "why"}]},
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+
+
+class FakeProtocolMultiMessageGraph(FakeGraph):
+    """A single state update carrying several non-LLM messages at once; each
+    must surface as its own distinct protocol message (issue #48 regression:
+    updates are emitted 1:1, never duplicated or collapsed into one id)."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (
+            "updates",
+            {
+                "some_node": {
+                    "messages": [
+                        HumanMessage(content="hi"),
+                        ToolMessage(content="tool result", tool_call_id="call-1"),
+                    ]
+                }
+            },
+        )
+        yield (
+            "values",
+            {
+                "output": {
+                    "messages": [
+                        HumanMessage(content="hi"),
+                        ToolMessage(content="tool result", tool_call_id="call-1"),
+                    ]
+                }
+            },
+        )
+
+
+class FakeProtocolToolMessageGraph(FakeGraph):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        tool_message = ToolMessage(
+            content="42 characters",
+            tool_call_id="call-character-count",
+            id="tool-message-1",
+        )
+        tool_meta = {
+            "langgraph_node": "tools",
+            "langgraph_checkpoint_ns": "tools:task-1",
+            "provider": "deterministic",
+        }
+        yield (["tools:task-1"], "messages", (tool_message, tool_meta))
+        # The same tool message is streamed twice; it must only be published once.
+        yield (["tools:task-1"], "messages", (tool_message, tool_meta))
+        yield (
+            ["call_model:task-3"],
+            "messages",
+            (AIMessageChunk(content="Final answer", id="ai-message-1"), {"langgraph_node": "call_model"}),
+        )
+        yield (
+            [],
+            "values",
+            {"output": {"messages": [tool_message, AIMessage(content="Final answer", id="ai-message-1")]}},
+        )
+
+
+class _FakeProtocolEntry(FakeEntry):
+    graph = FakeGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None) -> FakeGraph:
+        return _FakeProtocolEntry.graph
+
+
+class _FakeProtocolLangGraphService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> _FakeProtocolEntry:
+        return _FakeProtocolEntry()
+
+
+async def _run_fake_graph(
+    monkeypatch: pytest.MonkeyPatch,
+    graph: FakeGraph,
+    *,
+    stream_modes: list[str] | None = None,
+    stream_subgraphs: bool = False,
+) -> list[dict[str, Any]]:
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    _FakeProtocolEntry.graph = graph
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: _FakeProtocolLangGraphService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    kwargs: dict[str, Any] = {}
+    if stream_modes is not None:
+        kwargs["stream_modes"] = stream_modes
+    if stream_subgraphs:
+        kwargs["stream_subgraphs"] = True
+    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1", kwargs=kwargs)
     return protocol_broker._events["t1"]
 
+
+@pytest.mark.asyncio
+async def test_execute_run_publishes_incremental_protocol_messages_and_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread_events = await _run_fake_graph(
+        monkeypatch, FakeProtocolStreamingGraph(), stream_modes=["updates", "values"]
+    )
+    message_events = [event for event in thread_events if event["method"] == "messages"]
+    update_events = [event for event in thread_events if event["method"] == "updates"]
+    value_events = [event for event in thread_events if event["method"] == "values"]
+
+    assert [event["params"]["data"]["event"] for event in message_events[:3]] == [
+        "message-start",
+        "content-block-start",
+        "content-block-delta",
+    ]
+    assert message_events[2]["params"]["data"]["delta"] == {"type": "text-delta", "text": "hel"}
+    assert update_events[0]["params"]["data"] == {"step": "partial"}
+    assert len(value_events) == 1
+    assert value_events[0]["params"]["data"]["output"]["step"] == "final"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_publishes_incremental_protocol_messages_for_llm_text_chunks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _run_fake_graph(monkeypatch, FakeProtocolLlmStreamingGraph())
+    message_events = [event for event in thread_events if event["method"] == "messages"]
+    assert [event["params"]["data"]["event"] for event in message_events] == [
+        "message-start",
+        "content-block-start",
+        "content-block-delta",
+        "content-block-delta",
+        "content-block-finish",
+        "message-finish",
+    ]
+    assert message_events[2]["params"]["data"]["delta"] == {"type": "text-delta", "text": "hel"}
+    assert message_events[3]["params"]["data"]["delta"] == {"type": "text-delta", "text": "lo"}
+
+
+@pytest.mark.asyncio
+async def test_execute_run_uses_langgraph_namespaces_for_protocol_events(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread_events = await _run_fake_graph(
+        monkeypatch, FakeProtocolNamespaceGraph(), stream_modes=["updates"], stream_subgraphs=True
+    )
+    message_events = [event for event in thread_events if event["method"] == "messages"]
+    updates_events = [event for event in thread_events if event["method"] == "updates"]
+
+    assert message_events[0]["params"]["namespace"] == ["node_1:task-1", "call_model:task-3"]
+    assert updates_events[0]["params"]["namespace"] == ["node_1:task-1"]
+
+
+@pytest.mark.asyncio
+async def test_execute_run_publishes_structured_protocol_message_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread_events = await _run_fake_graph(monkeypatch, FakeProtocolStructuredMessageGraph())
+    message_events = [event for event in thread_events if event["method"] == "messages"]
+    block_starts = [
+        event["params"]["data"]
+        for event in message_events
+        if event["params"]["data"]["event"] == "content-block-start"
+    ]
+    assert any(block["content"]["type"] == "reasoning" for block in block_starts)
+    ordered_events = [event["params"]["data"] for event in message_events]
+    text_finish_index = next(
+        index
+        for index, event in enumerate(ordered_events)
+        if event["event"] == "content-block-finish" and event["index"] == 0
+    )
+    reasoning_start_index = next(
+        index
+        for index, event in enumerate(ordered_events)
+        if event["event"] == "content-block-start" and event["content"]["type"] == "reasoning"
+    )
+    assert text_finish_index < reasoning_start_index
+
+
+@pytest.mark.asyncio
+async def test_execute_run_streams_tool_call_chunks_without_duplicate_complete_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _run_fake_graph(monkeypatch, FakeProtocolToolCallChunkGraph())
+    message_events = [event["params"]["data"] for event in thread_events if event["method"] == "messages"]
+    block_starts = [event for event in message_events if event["event"] == "content-block-start"]
+    block_deltas = [event for event in message_events if event["event"] == "content-block-delta"]
+
+    assert len(block_starts) == 1
+    assert block_starts[0]["content"]["type"] == "tool_call_chunk"
+    assert len(block_deltas) == 1
+    assert block_deltas[0]["delta"]["type"] == "tool_call_chunk"
+
+
+@pytest.mark.asyncio
+async def test_execute_run_merges_final_structured_blocks_after_live_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread_events = await _run_fake_graph(monkeypatch, FakeProtocolMixedStructuredGraph())
+    message_events = [event["params"]["data"] for event in thread_events if event["method"] == "messages"]
+    block_starts = [event for event in message_events if event["event"] == "content-block-start"]
+    assert any(block["content"]["type"] == "reasoning" for block in block_starts)
 
 @pytest.mark.asyncio
 async def test_execute_run_mirrors_tool_message_to_requested_tuple_stream_once_and_before_final_answer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    thread_events = await _execute_protocol_tool_message_graph(
+    thread_events = await _run_fake_graph(
         monkeypatch,
+        FakeProtocolToolMessageGraph(),
         stream_modes=["messages-tuple", "values"],
+        stream_subgraphs=True,
     )
     complete_events = [event for event in thread_events if event["method"] == "messages/complete"]
     tuple_events = [event for event in thread_events if event["method"] == "messages-tuple"]
@@ -878,7 +689,9 @@ async def test_execute_run_mirrors_tool_message_to_requested_tuple_stream_once_a
 async def test_execute_run_keeps_tool_message_complete_without_unrequested_tuple_mirror(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    thread_events = await _execute_protocol_tool_message_graph(monkeypatch, stream_modes=["values"])
+    thread_events = await _run_fake_graph(
+        monkeypatch, FakeProtocolToolMessageGraph(), stream_modes=["values"], stream_subgraphs=True
+    )
     complete_events = [event for event in thread_events if event["method"] == "messages/complete"]
     tuple_events = [event for event in thread_events if event["method"] == "messages-tuple"]
 
@@ -888,168 +701,50 @@ async def test_execute_run_keeps_tool_message_complete_without_unrequested_tuple
 
 
 @pytest.mark.asyncio
-async def test_execute_run_publishes_incremental_protocol_messages_and_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolStreamingEntry.graph = FakeProtocolStreamingGraph()
+async def test_execute_run_keeps_multiple_messages_in_single_chunk_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+    thread_events = await _run_fake_graph(monkeypatch, FakeProtocolMultiMessageGraph(), stream_modes=["updates"])
+    message_events = [event["params"]["data"] for event in thread_events if event["method"] == "messages"]
+    message_starts = [event for event in message_events if event["event"] == "message-start"]
 
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolStreamingLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+    assert [event["role"] for event in message_starts] == ["human", "tool"]
+    assert message_starts[0]["id"] != message_starts[1]["id"]
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
 
-    thread_events = protocol_broker._events["t1"]
-    message_events = [event for event in thread_events if event["method"] == "messages"]
-    update_events = [event for event in thread_events if event["method"] == "updates"]
-    value_events = [event for event in thread_events if event["method"] == "values"]
+@pytest.mark.asyncio
+async def test_execute_run_publishes_each_astream_updates_chunk_exactly_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default astream path must forward every ``updates`` chunk to the wire
+    exactly once. This pins the issue #48 regression: parallel (Send-style)
+    worker updates used to be emitted twice (once bare, once node-wrapped)
+    through the astream_events translation."""
+    graph = FakeUpdatesOnceGraph()
+    thread_events = await _run_fake_graph(monkeypatch, graph, stream_modes=["updates"])
+    updates = [event for event in thread_events if event["method"] == "updates"]
 
-    assert [event["params"]["data"]["event"] for event in message_events[:3]] == [
-        "message-start",
-        "content-block-start",
-        "content-block-delta",
+    assert [event["params"]["data"] for event in updates] == [
+        {"process_item": {"results": [{"processed_item": "a", "length": 1}]}},
+        {"process_item": {"results": [{"processed_item": "b", "length": 1}]}},
+        {"process_item": {"results": [{"processed_item": "c", "length": 1}]}},
     ]
-    assert message_events[2]["params"]["data"]["delta"] == {"type": "text-delta", "text": "hel"}
-    assert update_events[0]["params"]["data"] == {"step": "partial"}
-    assert len(value_events) == 1
-    assert value_events[0]["params"]["data"]["output"]["step"] == "final"
 
 
-@pytest.mark.asyncio
-async def test_execute_run_publishes_incremental_protocol_messages_for_llm_text_chunks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_db = FakeDBManager()
-    protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolLlmStreamingEntry.graph = FakeProtocolLlmStreamingGraph()
-
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolLlmStreamingLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
-
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
-
-    message_events = [event for event in protocol_broker._events["t1"] if event["method"] == "messages"]
-    assert [event["params"]["data"]["event"] for event in message_events] == [
-        "message-start",
-        "content-block-start",
-        "content-block-delta",
-        "content-block-delta",
-        "content-block-finish",
-        "message-finish",
-    ]
-    assert message_events[2]["params"]["data"]["delta"] == {"type": "text-delta", "text": "hel"}
-    assert message_events[3]["params"]["data"]["delta"] == {"type": "text-delta", "text": "lo"}
-
-
-@pytest.mark.asyncio
-async def test_execute_run_uses_langgraph_namespaces_for_protocol_events(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolNamespaceEntry.graph = FakeProtocolNamespaceGraph()
-
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolNamespaceLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
-
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
-
-    thread_events = protocol_broker._events["t1"]
-    message_events = [event for event in thread_events if event["method"] == "messages"]
-    tool_events = [event for event in thread_events if event["method"] == "tools"]
-    updates_events = [event for event in thread_events if event["method"] == "updates"]
-
-    assert message_events[0]["params"]["namespace"] == ["node_1:task-1", "call_model:task-3"]
-    assert all(event["params"]["namespace"] == ["node_1:task-1", "search_docs:task-2"] for event in tool_events)
-    assert updates_events[0]["params"]["namespace"] == ["node_1:task-1"]
-
-
-@pytest.mark.asyncio
-async def test_execute_run_publishes_structured_protocol_message_blocks(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolStructuredMessageEntry.graph = FakeProtocolStructuredMessageGraph()
-
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolStructuredMessageLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
-
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
-
-    message_events = [event for event in protocol_broker._events["t1"] if event["method"] == "messages"]
-    block_starts = [event["params"]["data"] for event in message_events if event["params"]["data"]["event"] == "content-block-start"]
-    assert any(block["content"]["type"] == "reasoning" for block in block_starts)
-    ordered_events = [event["params"]["data"] for event in message_events]
-    text_finish_index = next(
-        index
-        for index, event in enumerate(ordered_events)
-        if event["event"] == "content-block-finish" and event["index"] == 0
-    )
-    reasoning_start_index = next(
-        index
-        for index, event in enumerate(ordered_events)
-        if event["event"] == "content-block-start" and event["content"]["type"] == "reasoning"
-    )
-    assert text_finish_index < reasoning_start_index
-
-
-@pytest.mark.asyncio
-async def test_execute_run_streams_tool_call_chunks_without_duplicate_complete_blocks(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fake_db = FakeDBManager()
-    protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolToolCallChunkEntry.graph = FakeProtocolToolCallChunkGraph()
-
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolToolCallChunkLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
-
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
-
-    message_events = [event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"]
-    block_starts = [event for event in message_events if event["event"] == "content-block-start"]
-    block_deltas = [event for event in message_events if event["event"] == "content-block-delta"]
-
-    assert len(block_starts) == 1
-    assert block_starts[0]["content"]["type"] == "tool_call_chunk"
-    assert len(block_deltas) == 1
-    assert block_deltas[0]["delta"]["type"] == "tool_call_chunk"
-
-
-@pytest.mark.asyncio
-async def test_execute_run_merges_final_structured_blocks_after_live_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolMixedStructuredEntry.graph = FakeProtocolMixedStructuredGraph()
-
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolMixedStructuredLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
-
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
-
-    message_events = [event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"]
-    block_starts = [event for event in message_events if event["event"] == "content-block-start"]
-    assert any(block["content"]["type"] == "reasoning" for block in block_starts)
+class FakeUpdatesOnceGraph(FakeGraph):
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield ("updates", {"process_item": {"results": [{"processed_item": "a", "length": 1}]}})
+        yield ("updates", {"process_item": {"results": [{"processed_item": "b", "length": 1}]}})
+        yield ("updates", {"process_item": {"results": [{"processed_item": "c", "length": 1}]}})
+        yield (
+            "values",
+            {
+                "output": {
+                    "results": [
+                        {"processed_item": "a", "length": 1},
+                        {"processed_item": "b", "length": 1},
+                        {"processed_item": "c", "length": 1},
+                    ]
+                }
+            },
+        )
 
 
 def test_protocol_message_stream_state_merges_open_messages_against_transcript_tail(
@@ -1069,163 +764,286 @@ def test_protocol_message_stream_state_merges_open_messages_against_transcript_t
     )
     state.finish_all()
 
-    message_events = [event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"]
+    message_events = [
+        event["params"]["data"] for event in protocol_broker._events["t1"] if event["method"] == "messages"
+    ]
     message_starts = [event for event in message_events if event["event"] == "message-start"]
     assert message_starts == [{"event": "message-start", "role": "ai", "id": "m1"}]
     assert {"event": "content-block-delta", "index": 0, "delta": {"type": "text-delta", "text": "lo"}} in message_events
     assert [event for event in message_events if event["event"] == "message-finish"] == [{"event": "message-finish"}]
 
 
+class FakeAstreamEventsGraph(FakeGraph):
+    """Fake graph for the ``events`` stream mode: executes through the retained
+    ``astream_events`` path (raw event stream) instead of the default astream."""
+
+    async def astream_events(self, prepared_input: dict, config: dict, *, version: str, **kwargs):
+        self.configs.append(config)
+        yield {
+            "event": "on_chat_model_stream",
+            "data": {"chunk": AIMessageChunk(content="hi")},
+            "metadata": {"langgraph_node": "call_model"},
+            "parent_ids": [],
+        }
+        yield {
+            "event": "on_custom_event",
+            "data": {"custom": "payload"},
+            "metadata": {},
+            "parent_ids": [],
+        }
+        yield {
+            "event": "on_chain_stream",
+            "data": {"chunk": ("values", {"output": {"ok": True}})},
+            "metadata": {"langgraph_node": "root"},
+            "parent_ids": [],
+        }
+        yield {
+            "event": "on_chain_end",
+            "data": {"output": {"ok": True}},
+            "metadata": {"langgraph_node": "root"},
+            "parent_ids": [],
+        }
+
+
+class _FakeAstreamEventsEntry(FakeEntry):
+    graph = FakeAstreamEventsGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None, store=None) -> FakeAstreamEventsGraph:
+        return _FakeAstreamEventsEntry.graph
+
+    @staticmethod
+    def extract_output(result: dict, _payload: dict) -> dict:
+        return result if isinstance(result, dict) else {}
+
+
+class _FakeAstreamEventsLangGraphService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> _FakeAstreamEventsEntry:
+        return _FakeAstreamEventsEntry()
+
+
 @pytest.mark.asyncio
-async def test_execute_run_keeps_multiple_messages_in_single_chunk_distinct(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_execute_run_events_mode_uses_astream_events_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``stream_mode=["events"]`` keeps the raw ``astream_events`` path: message
+    chunks surface as protocol messages, custom events surface on the custom
+    channel, and the root on_chain_end finalizes the stream."""
     fake_db = FakeDBManager()
     protocol_broker = ThreadProtocolEventBroker()
-    FakeProtocolMultiMessageEntry.graph = FakeProtocolMultiMessageGraph()
-
     monkeypatch.setattr(
         "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeProtocolMultiMessageLangGraphService(),
+        lambda: _FakeAstreamEventsLangGraphService(),
     )
     monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
     monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
 
-    await execute_run(thread_id="t1", run_id="r1", payload={"hello": "world"}, user_id="user-1")
+    result = await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"msg": "hello"},
+        user_id="user-1",
+        kwargs={"stream_modes": ["events"]},
+    )
 
-    message_starts = [
-        event["params"]["data"]
-        for event in protocol_broker._events["t1"]
-        if event["method"] == "messages" and event["params"]["data"]["event"] == "message-start"
+    assert result.output == {"ok": True}
+    message_events = [e for e in protocol_broker._events["t1"] if e["method"] == "messages"]
+    assert message_events, "expected protocol message events from on_chat_model_stream"
+    custom_events = [e for e in protocol_broker._events["t1"] if e["method"] == "custom"]
+    assert custom_events
+    assert custom_events[0]["params"]["data"] == {"custom": "payload"}
+    # Each raw astream_events() item is published onto the events channel.
+    raw_events = [e for e in protocol_broker._events["t1"] if e["method"] == "events"]
+    assert raw_events, "expected raw astream_events() items on the events channel"
+    assert len(raw_events) >= 4, "expected one events frame per astream_events() item"
+
+
+class FakeSubgraphAggregateGraph(FakeGraph):
+    """Graph whose root-level on_chain_end result differs from the values chunk,
+    exercising the final-state capture fallback via aget_state root probe."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (["sub:1"], "values", {"output": {"partial": True}})
+
+    async def aget_state(self, config: dict):
+        if not (config.get(CONF) or {}).get("checkpoint_ns"):
+            return SimpleNamespace(values={"output": {"final": True}})
+        return SimpleNamespace(values=None)
+
+
+class _FakeSubgraphAggregateEntry(FakeEntry):
+    graph = FakeSubgraphAggregateGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None, store=None) -> FakeSubgraphAggregateGraph:
+        return _FakeSubgraphAggregateEntry.graph
+
+
+class _FakeSubgraphAggregateService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> _FakeSubgraphAggregateEntry:
+        return _FakeSubgraphAggregateEntry()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_subgraphs_namespace_uses_root_state_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With ``stream_subgraphs=True`` events are (ns, mode, chunk) triples and,
+    absent a root values chunk, the final state is captured from the checkpointer
+    root-namespace probe."""
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: _FakeSubgraphAggregateService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    result = await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"msg": "hello"},
+        user_id="user-1",
+        kwargs={"stream_modes": ["values"], "stream_subgraphs": True},
+    )
+
+    assert result.output == {"final": True}
+    value_events = [e for e in protocol_broker._events["t1"] if e["method"] == "values"]
+    assert value_events
+    assert value_events[0]["params"]["namespace"] == ["sub:1"]
+
+
+class FakeInterruptResultGraph(FakeInterruptGraph):
+    """HITL interrupt: the interrupt arrives in the updates stream with a
+    non-empty state, so the run result must merge __interrupt__ into the final
+    values and emit input.requested."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (
+            "updates",
+            {
+                "__interrupt__": [
+                    type("Interrupt", (), {"value": "Provide value:", "id": "interrupt-1"})(),
+                ],
+                "foo": prepared_input["input"]["foo"],
+            },
+        )
+
+
+class _FakeInterruptResultEntry(FakeEntry):
+    graph = FakeInterruptResultGraph()
+
+    @staticmethod
+    def build_graph(_checkpointer=None, store=None) -> FakeInterruptResultGraph:
+        return _FakeInterruptResultEntry.graph
+
+    @staticmethod
+    def extract_output(result: dict, _payload: dict) -> dict:
+        interrupts = result.get("__interrupt__", [])
+        return {
+            "state": result.get("foo"),
+            "interrupted": bool(interrupts),
+            "interrupts": [{"value": item.value, "id": item.id} for item in interrupts],
+        }
+
+
+class _FakeInterruptResultService(FakeLangGraphService):
+    def get_entry(self, _graph_id: str | None) -> _FakeInterruptResultEntry:
+        return _FakeInterruptResultEntry()
+
+
+@pytest.mark.asyncio
+async def test_execute_run_interrupt_merges_into_result_and_emits_input_requested(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """HITL interrupt with non-empty state: __interrupt__ is merged into the run
+    result (so extract_output sees it) and input.requested is emitted."""
+    fake_db = FakeDBManager()
+    protocol_broker = ThreadProtocolEventBroker()
+    monkeypatch.setattr(
+        "agentseek_api.services.run_executor.get_langgraph_service",
+        lambda: _FakeInterruptResultService(),
+    )
+    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
+    monkeypatch.setattr("agentseek_api.services.thread_protocol.thread_protocol_broker", protocol_broker)
+
+    result = await execute_run(
+        thread_id="t1",
+        run_id="r1",
+        payload={"foo": "hello"},
+        user_id="user-1",
+        kwargs={"stream_modes": ["values"]},
+    )
+
+    assert result.interrupted is True
+    assert result.interrupts == [{"value": "Provide value:", "id": "interrupt-1"}]
+    input_requested = [e for e in protocol_broker._events["t1"] if e["method"] == "input.requested"]
+    assert len(input_requested) == 1
+    assert input_requested[0]["params"]["data"]["payload"] == "Provide value:"
+
+
+class FakeTupleNamespaceGraph(FakeGraph):
+    """astream(subgraphs=True) yields tuple namespaces; they must be normalized
+    to lists before publication so the live broker's namespace filter (which
+    compares list slices against list prefixes) can match them."""
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (("node_1:task-1",), "updates", {"step": "partial"})
+        yield (("node_1:task-1",), "values", {"output": {"step": "final"}})
+
+
+@pytest.mark.asyncio
+async def test_execute_run_normalizes_tuple_namespaces_for_live_filter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _run_fake_graph(
+        monkeypatch, FakeTupleNamespaceGraph(), stream_modes=["updates"], stream_subgraphs=True
+    )
+    updates_events = [event for event in thread_events if event["method"] == "updates"]
+    assert updates_events, "expected updates event from tuple-namespaced subgraph"
+    assert updates_events[0]["params"]["namespace"] == ["node_1:task-1"]
+    assert isinstance(updates_events[0]["params"]["namespace"], list)
+
+
+class FakeParallelIdlessMessagesGraph(FakeGraph):
+    """Two id-less messages from different subgraph namespaces, each with one
+    incremental chunk.
+
+    ``AIMessageChunk`` has no ``id`` by default, so both go through the fallback
+    identity path. The namespaces differ, so the fallback id must keep the two
+    messages distinct (previously both collapsed to ``{run}:message:0`` and were
+    merged by the client).
+    """
+
+    async def astream(self, prepared_input: dict, config: dict, **kwargs):
+        self.configs.append(config)
+        yield (("ns_a:task-1",), "messages", (AIMessageChunk(content="hello", id=None), {"langgraph_node": "ns_a"}))
+        yield (("ns_b:task-1",), "messages", (AIMessageChunk(content="world", id=None), {"langgraph_node": "ns_b"}))
+
+    async def aget_state(self, config: dict):
+        return SimpleNamespace(values={"output": {"ok": True}})
+
+
+@pytest.mark.asyncio
+async def test_execute_run_idless_messages_from_different_namespaces_get_distinct_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    thread_events = await _run_fake_graph(
+        monkeypatch, FakeParallelIdlessMessagesGraph(), stream_modes=["messages"], stream_subgraphs=True
+    )
+    metadata_events = [
+        event for event in thread_events if event["method"] == "messages/metadata"
     ]
-    assert [event["role"] for event in message_starts] == ["human", "ai"]
-    assert message_starts[0]["id"] != message_starts[1]["id"]
-
-
-class FakeContextSchema:
-    tenant: str
-    org: str
-
-
-@pytest.mark.asyncio
-async def test_execute_run_mirrors_context_into_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeKwargsCapturingLangGraphService(),
+    assert len(metadata_events) == 2, (
+        f"expected one messages/metadata per distinct id-less message, got {len(metadata_events)}"
     )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-
-    await execute_run(
-        thread_id="t1",
-        run_id="r1",
-        payload={"a": 1},
-        user_id="user-1",
-        kwargs={"context": {"tenant": "acme"}},
-    )
-
-    config = FakeKwargsCapturingEntry.graph.configs[0]
-    assert config[CONF]["tenant"] == "acme"
-    assert config[CONF]["thread_id"] == "t1"
-
-
-@pytest.mark.asyncio
-async def test_execute_run_derives_context_from_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeKwargsCapturingLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-
-    await execute_run(
-        thread_id="t1",
-        run_id="r1",
-        payload={"a": 1},
-        user_id="user-1",
-        kwargs={"config": {"configurable": {"tenant": "acme"}}},
-    )
-
-    config = FakeKwargsCapturingEntry.graph.configs[0]
-    assert config[CONF]["tenant"] == "acme"
-    assert config[CONF]["thread_id"] == "t1"
-
-
-@pytest.mark.asyncio
-async def test_execute_run_passes_context_kwarg_when_context_schema_present(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    FakeKwargsCapturingEntry.graph.context_schema = FakeContextSchema
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeKwargsCapturingLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-
-    await execute_run(
-        thread_id="t1",
-        run_id="r1",
-        payload={"a": 1},
-        user_id="user-1",
-        kwargs={"context": {"tenant": "acme", "org": "ob"}},
-    )
-
-    kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
-    assert kwargs["context"] == {"tenant": "acme", "org": "ob"}
-
-
-@pytest.mark.asyncio
-async def test_execute_run_filters_context_by_schema(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_db = FakeDBManager()
-    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    FakeKwargsCapturingEntry.graph.context_schema = FakeContextSchema
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeKwargsCapturingLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-
-    await execute_run(
-        thread_id="t1",
-        run_id="r1",
-        payload={"a": 1},
-        user_id="user-1",
-        kwargs={"context": {"tenant": "acme", "extra": "ignored"}},
-    )
-
-    kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
-    assert kwargs["context"] == {"tenant": "acme"}
-
-
-@pytest.mark.asyncio
-async def test_execute_run_merges_context_and_configurable_without_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Assistant-level context (merged into kwargs["context"]) must not conflict with
-    client-supplied config.configurable; both stay visible and no error is raised."""
-    fake_db = FakeDBManager()
-    FakeKwargsCapturingEntry.graph = FakeKwargsCapturingGraph()
-    FakeKwargsCapturingEntry.graph.context_schema = FakeContextSchema
-    monkeypatch.setattr(
-        "agentseek_api.services.run_executor.get_langgraph_service",
-        lambda: FakeKwargsCapturingLangGraphService(),
-    )
-    monkeypatch.setattr("agentseek_api.services.run_executor.db_manager", fake_db)
-
-    await execute_run(
-        thread_id="t1",
-        run_id="r1",
-        payload={"a": 1},
-        user_id="user-1",
-        kwargs={
-            "config": {"configurable": {"client_param": "x"}},
-            "context": {"tenant": "acme"},
-        },
-    )
-
-    config = FakeKwargsCapturingEntry.graph.configs[0]
-    kwargs = FakeKwargsCapturingEntry.graph.stream_kwargs[0]
-    # configurable carries both the client configurable key and the context key
-    assert config[CONF]["client_param"] == "x"
-    assert config[CONF]["tenant"] == "acme"
-    assert config[CONF]["thread_id"] == "t1"
-    # context kwarg still reflects the effective context
-    assert kwargs["context"] == {"tenant": "acme"}
+    # The two metadata events must carry distinct message ids (their wire
+    # identity), so the SDK client routes them to two independent streams
+    # instead of merging the second chunk into the first message.
+    message_ids = [
+        next(iter(event["params"]["data"].keys()))
+        for event in metadata_events
+    ]
+    assert len(message_ids) == len(set(message_ids)), f"id-less message ids collided: {message_ids}"
+    assert any("ns_a" in mid for mid in message_ids)
+    assert any("ns_b" in mid for mid in message_ids)

@@ -14,7 +14,6 @@ from agentseek_api.services.run_jobs import RunExecutionJob
 execute_run = run_jobs_module.execute_run
 run_broker = run_jobs_module.run_broker
 _publish_run_event = run_jobs_module._publish_run_event
-_persist_thread_snapshot = run_jobs_module._persist_thread_snapshot
 add_run_stream_event_to_session = run_jobs_module.add_run_stream_event_to_session
 publish_lifecycle_event = run_jobs_module.publish_lifecycle_event
 thread_protocol_broker = run_jobs_module.thread_protocol_broker
@@ -122,7 +121,6 @@ async def _execute_and_persist(
     run_jobs_module.execute_run = execute_run
     run_jobs_module.run_broker = run_broker
     run_jobs_module._publish_run_event = _publish_run_event
-    run_jobs_module._persist_thread_snapshot = _persist_thread_snapshot
     run_jobs_module.add_run_stream_event_to_session = add_run_stream_event_to_session
     run_jobs_module.publish_lifecycle_event = publish_lifecycle_event
     run_jobs_module.thread_protocol_broker = thread_protocol_broker

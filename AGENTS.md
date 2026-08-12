@@ -22,4 +22,4 @@
 - `workflow_dispatch` inputs may override the model and base URL for a single run.
 - API keys stay in GitHub secrets only; do not add dispatch inputs for secrets.
 - The workflow runs `tests/integration/test_live_provider_streaming.py` against manifest-registered graphs in `examples/live_provider_graphs/manifest.json`.
-- The proof target is SSE `message_chunk` events from real provider-backed graphs, not just a final successful response.
+- The proof target is incremental SSE `messages/partial` frames (aligned to the official LangGraph v1 messages wire contract: `messages/metadata` + `messages/partial`/`messages/complete`) from real provider-backed graphs, not just a final successful response. The legacy `message_chunk` event no longer exists in the official SDK wire format.
