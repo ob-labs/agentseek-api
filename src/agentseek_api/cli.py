@@ -14,7 +14,7 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
-from pydantic_settings.sources.providers.dotenv import dotenv_values
+from dotenv import dotenv_values
 
 from agentseek_api import __version__
 from agentseek_api.settings import DEFAULT_API_PORT
@@ -148,8 +148,8 @@ def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None
     return None
 
 
-def _parse_env_file(env_file: Path) -> dict[str, str]:
-    values = dotenv_values(env_file)
+def _parse_env_file(env_file: Path, *, interpolate: bool = True) -> dict[str, str]:
+    values = dotenv_values(env_file, interpolate=interpolate)
     return {key: value for key, value in values.items() if value is not None}
 
 
@@ -268,13 +268,14 @@ def build_runtime_env(
     env_file: str | None,
     cwd: Path,
     base_env: dict[str, str] | None = None,
+    interpolate_env_file: bool = True,
 ) -> dict[str, str]:
     shell_env = dict(os.environ if base_env is None else base_env)
     env: dict[str, str] = {}
     config: CliConfig | None = _load_cli_config(config_path) if config_path is not None else None
     if config is not None:
         if config.env_file is not None:
-            env.update(_parse_env_file(config.env_file))
+            env.update(_parse_env_file(config.env_file, interpolate=interpolate_env_file))
         env.update(config.env_mapping)
         if config.auth_path:
             env["AUTH_MODULE_PATH"] = config.auth_path
@@ -282,7 +283,7 @@ def build_runtime_env(
         resolved_env_file = _resolve_path(env_file, cwd=cwd)
         if not resolved_env_file.exists():
             raise CliError(f"Env file '{resolved_env_file}' does not exist.")
-        env.update(_parse_env_file(resolved_env_file))
+        env.update(_parse_env_file(resolved_env_file, interpolate=interpolate_env_file))
     # The launching shell is the highest-precedence source. This is important
     # for agentseek dev, whose child environment may also be described by a
     # langgraph.json env file.
@@ -625,6 +626,7 @@ def build_container_env(*, config_path: Path, env_file: str | None, cwd: Path) -
         env_file=env_file,
         cwd=cwd,
         base_env=_ambient_container_env(),
+        interpolate_env_file=False,
     )
     env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
     auth_module_path = env.get("AUTH_MODULE_PATH")

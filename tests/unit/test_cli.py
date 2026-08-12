@@ -12,6 +12,12 @@ import pytest
 from agentseek_api.services.langgraph_service import LangGraphService
 
 
+def test_python_dotenv_dependency_is_available() -> None:
+    from dotenv import dotenv_values
+
+    assert callable(dotenv_values)
+
+
 @dataclass
 class _RunCapture:
     calls: list[list[str]] | None = None
@@ -223,9 +229,12 @@ def test_scheduler_command_runs_in_process_with_default_runner(
     assert cli_module.os.environ.get(sentinel_key) == "before"
 
 
-def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) -> None:
+def test_dev_command_accepts_langgraph_cli_flags_and_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from agentseek_api.cli import main
 
+    monkeypatch.delenv("AUTH_MODULE_PATH", raising=False)
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / ".env"
     env_file.write_text("AUTH_MODULE_PATH=test.module:backend\n", encoding="utf-8")
@@ -255,9 +264,13 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) ->
     assert capture.env["AUTH_MODULE_PATH"] == "test.module:backend"
 
 
-def test_dev_command_loads_config_env_mapping_and_auth_path(tmp_path: Path) -> None:
+def test_dev_command_loads_config_env_mapping_and_auth_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from agentseek_api.cli import main
 
+    for key in ("OPENAI_API_KEY", "FEATURE_FLAG", "AUTH_MODULE_PATH"):
+        monkeypatch.delenv(key, raising=False)
     package_dir = tmp_path / "chat"
     package_dir.mkdir()
     (package_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -292,9 +305,13 @@ def test_dev_command_loads_config_env_mapping_and_auth_path(tmp_path: Path) -> N
     assert capture.env["AUTH_MODULE_PATH"] == f"{(tmp_path / 'auth.py').resolve()}:auth"
 
 
-def test_dev_command_merges_config_env_file_before_cli_env_file(tmp_path: Path) -> None:
+def test_dev_command_merges_config_env_file_before_cli_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from agentseek_api.cli import main
 
+    for key in ("TOKEN", "SHARED"):
+        monkeypatch.delenv(key, raising=False)
     config_path = _write_basic_langgraph_config(tmp_path)
     config_env = tmp_path / "config.env"
     config_env.write_text("TOKEN=from-config\nSHARED=config\n", encoding="utf-8")
@@ -879,6 +896,22 @@ def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(tmp_path:
     )
 
     assert env["TOKEN"] == "from-shell"
+
+
+def test_build_container_env_does_not_interpolate_disallowed_host_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import build_container_env
+
+    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text("OPENAI_API_KEY=${PR69_DISALLOWED_SECRET}\n", encoding="utf-8")
+
+    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
+
+    assert env["OPENAI_API_KEY"] == "${PR69_DISALLOWED_SECRET}"
+    assert "PR69_DISALLOWED_SECRET" not in env
 
 
 def test_build_runtime_env_rejects_invalid_config_env_shape(tmp_path: Path) -> None:
