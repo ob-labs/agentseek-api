@@ -854,3 +854,46 @@ def test_run_stream_midrun_reconnect_is_exactly_once_in_redis(midrun_app_factory
     fake_redis = FakeRedisCounter()
     app = midrun_app_factory(executor_backend="redis", redis_client=fake_redis)
     asyncio.run(midrun_reconnect_flow(app))
+
+
+def test_thread_protocol_cold_broker_keeps_monotonic_seq_inline(client: TestClient) -> None:
+    """A thread-level protocol event published after the in-memory broker state
+    is cleared must keep allocating from the persisted seq watermark, not
+    restart at 1.
+
+    Regression for the thread-domain analogue of the run-domain cold-broker
+    bug: ``next_thread_stream_seq`` used to return None on the inline executor,
+    so a cleared ``thread_protocol_broker`` reused seqs already persisted to the
+    DB (e.g. ``1..N, N+1 colliding with an earlier row``), corrupting the
+    ``since``/``Last-Event-ID`` resume cursor for ``/threads/{id}/stream/events``.
+    """
+    thread_id = "thread-cold-broker-inline"
+
+    # First lifecycle event: persisted as seq 1.
+    client.portal.call(
+        lambda: run_jobs_module._publish_lifecycle(thread_id, event="started", graph_name="default")
+    )
+
+    # Simulate a cold broker: drop every in-memory trace of this thread,
+    # including the seq counter.
+    thread_protocol_broker._events.pop(thread_id, None)
+    thread_protocol_broker._signals.pop(thread_id, None)
+    thread_protocol_broker._next_seq.pop(thread_id, None)
+    thread_protocol_broker._active_runs.pop(thread_id, None)
+
+    # Second lifecycle event after the broker reset must continue at seq 2.
+    client.portal.call(
+        lambda: run_jobs_module._publish_lifecycle(thread_id, event="completed", graph_name="default")
+    )
+
+    # Persisted rows must reflect both, in order, without a seq collision.
+    persisted = client.portal.call(
+        lambda: stream_module.load_thread_stream_events(
+            thread_id,
+            channels=["lifecycle"],
+            namespaces=None,
+            depth=None,
+        )
+    )
+    assert [event["seq"] for event in persisted] == [1, 2]
+    assert [event["params"]["data"]["event"] for event in persisted] == ["started", "completed"]

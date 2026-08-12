@@ -154,7 +154,17 @@ async def next_run_stream_seq(run_id: str) -> int | None:
 
 async def next_thread_stream_seq(thread_id: str) -> int | None:
     if not _uses_redis_executor():
-        return None
+        if not _metadata_db_ready():
+            return None
+        try:
+            session_factory = db_manager.get_session_factory()
+        except RuntimeError:
+            return None
+        async with session_factory() as session:
+            row = await session.scalar(
+                select(func.max(ThreadStreamEvent.seq)).where(ThreadStreamEvent.thread_id == thread_id)
+            )
+        return (row or 0) + 1
     return int(await _get_redis_client().incr(f"{_THREAD_STREAM_SEQ_KEY_PREFIX}:{thread_id}"))
 
 

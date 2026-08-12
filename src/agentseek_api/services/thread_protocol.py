@@ -102,6 +102,12 @@ class ThreadProtocolEventBroker:
         self._mark_active(thread_id)
         if seq is None:
             seq = self._next_seq[thread_id]
+        else:
+            # Never regress below the in-memory watermark: an explicit seq from
+            # persistent state may be lower than what this process has already
+            # handed out (e.g. the broker was cleared and re-seeded from the DB
+            # mid-run). Clamping here keeps the wire seq monotonic.
+            seq = max(seq, self._next_seq[thread_id])
         self._next_seq[thread_id] = max(self._next_seq[thread_id], seq + 1)
         event = {
             "type": "event",
@@ -249,7 +255,15 @@ async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dic
     if run_id:
         await _persist_protocol_to_run_stream(run_id, payload)
     if settings.EXECUTOR_BACKEND.strip().lower() != "redis":
-        return await thread_protocol_broker.apublish(thread_id, payload)
+        # Allocate from persistent state so a cold broker (e.g. after the
+        # in-memory state was cleared or the process restarted) keeps the
+        # thread-level seq domain monotonic instead of restarting at 1 and
+        # colliding with persisted rows. ``_record_event`` never regresses
+        # below its own in-memory watermark.
+        from agentseek_api.services.stream_persistence import next_thread_stream_seq
+
+        seq = await next_thread_stream_seq(thread_id)
+        return await thread_protocol_broker.apublish(thread_id, payload, seq=seq)
     try:
         from agentseek_api.services.stream_persistence import append_redis_thread_stream_event
 
