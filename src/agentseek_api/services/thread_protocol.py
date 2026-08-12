@@ -125,7 +125,7 @@ class ThreadProtocolEventBroker:
         thread_id: str,
         payload: dict[str, Any],
         *,
-        persist: bool = True,
+        persist: bool = False,
         seq: int | None = None,
     ) -> dict[str, Any]:
         event = self._record_event(thread_id, payload, seq=seq)
@@ -221,7 +221,8 @@ async def _persist_protocol_to_run_stream(run_id: str, payload: dict[str, Any]) 
     Keeps the run stream (the source for ``GET /runs/{id}/stream``) as a single
     run-scoped, monotonically sequenced log of both lifecycle records and
     protocol frames, so the replay cursor is one domain instead of mixing run
-    and thread sequence spaces.
+    and thread sequence spaces. Durable before expose: the event row (and its
+    seq) is committed first; the in-memory broker is only updated afterwards.
     """
     if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
         from agentseek_api.services.stream_persistence import append_redis_run_stream_event
@@ -236,18 +237,10 @@ async def _persist_protocol_to_run_stream(run_id: str, payload: dict[str, Any]) 
             )
         return
     from agentseek_api.services.run_state import run_broker
-    from agentseek_api.services.stream_persistence import next_run_stream_seq, persist_run_stream_event
+    from agentseek_api.services.stream_persistence import append_run_stream_event_atomic
 
-    # Allocate from persistent state so a cold broker (e.g. after the in-memory
-    # state was cleared or the process restarted) keeps the run stream seq
-    # domain monotonic instead of restarting at 1 and colliding with persisted
-    # rows. publish_protocol never regresses below its own in-memory watermark.
-    seq = await next_run_stream_seq(run_id)
-    seq, _ = run_broker.publish_protocol(run_id, payload, seq=seq)
-    try:
-        await persist_run_stream_event(run_id, seq=seq, payload=payload)
-    except Exception:
-        return
+    seq, _ = await append_run_stream_event_atomic(run_id, payload)
+    run_broker.publish_protocol(run_id, payload, seq=seq)
 
 
 async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -255,15 +248,15 @@ async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dic
     if run_id:
         await _persist_protocol_to_run_stream(run_id, payload)
     if settings.EXECUTOR_BACKEND.strip().lower() != "redis":
-        # Allocate from persistent state so a cold broker (e.g. after the
-        # in-memory state was cleared or the process restarted) keeps the
-        # thread-level seq domain monotonic instead of restarting at 1 and
-        # colliding with persisted rows. ``_record_event`` never regresses
-        # below its own in-memory watermark.
-        from agentseek_api.services.stream_persistence import next_thread_stream_seq
+        # Durable before expose: the thread event row (and its seq) is appended
+        # atomically first; the broker only records it after the append
+        # succeeded, so a client can never receive a seq that was not durably
+        # committed. ``_record_event`` never regresses below its in-memory
+        # watermark, keeping the wire seq monotonic across a cold broker.
+        from agentseek_api.services.stream_persistence import append_thread_stream_event_atomic
 
-        seq = await next_thread_stream_seq(thread_id)
-        return await thread_protocol_broker.apublish(thread_id, payload, seq=seq)
+        seq, _ = await append_thread_stream_event_atomic(thread_id, payload)
+        return thread_protocol_broker.publish(thread_id, payload, persist=False, seq=seq)
     try:
         from agentseek_api.services.stream_persistence import append_redis_thread_stream_event
 
@@ -285,7 +278,7 @@ def publish_lifecycle_event(
     graph_name: str | None = None,
     error: str | None = None,
     namespace: list[str] | None = None,
-    persist: bool = True,
+    persist: bool = False,
     seq: int | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {"event": event}
@@ -405,6 +398,7 @@ def publish_values_event(
     values: Any,
     namespace: list[str] | None = None,
     run_id: str | None = None,
+    persist: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "namespace": namespace or [],
@@ -419,6 +413,7 @@ def publish_values_event(
             "method": "values",
             "params": params,
         },
+        persist=persist,
     )
 
 

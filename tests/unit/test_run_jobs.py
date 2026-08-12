@@ -5,6 +5,7 @@ import pytest
 
 from agentseek_api.settings import settings
 from agentseek_api.services import run_jobs as run_jobs_module
+from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
 
 class FakeSession:
@@ -54,26 +55,6 @@ def _job(*, run_id: str = "r1", thread_id: str = "t1") -> run_jobs_module.RunExe
         payload={"message": "hello"},
         graph_id="default",
     )
-
-
-@pytest.mark.asyncio
-async def test_persist_thread_snapshot_skips_duplicate_redis_writes(monkeypatch: pytest.MonkeyPatch) -> None:
-    persisted: list[tuple[str, dict[str, Any]]] = []
-    monkeypatch.setattr(settings, "EXECUTOR_BACKEND", "redis")
-    monkeypatch.setattr(
-        run_jobs_module.thread_protocol_broker,
-        "snapshot_records",
-        lambda _thread_id: [{"seq": 1, "method": "values"}],
-    )
-
-    async def fake_persist(thread_id: str, event: dict[str, Any]) -> None:
-        persisted.append((thread_id, event))
-
-    monkeypatch.setattr(run_jobs_module, "persist_thread_stream_event", fake_persist)
-
-    await run_jobs_module._persist_thread_snapshot("thread-1")
-
-    assert persisted == []
 
 
 @pytest.mark.asyncio
@@ -190,17 +171,16 @@ async def test_execute_run_job_persists_terminal_lifecycle_before_final_commit(
         operations.append(f"publish:{event}")
         return (1 if event == "start" else 2), {"event": event, **payload}
 
-    async def fake_persist_thread_snapshot(_thread_id: str) -> None:
-        return None
 
     async def fake_add_run_stream_event_to_session(
         _session: FakeSession,
         _run_id: str,
         *,
-        seq: int,
+        seq: int | None = None,
         payload: dict[str, Any],
-    ) -> None:
+    ) -> tuple[int | None, dict[str, Any]]:
         operations.append(f"persist:run:{payload['event']}:{seq}")
+        return seq or 0, payload
 
     def fake_publish_lifecycle_event(
         _thread_id: str,
@@ -224,15 +204,15 @@ async def test_execute_run_job_persists_terminal_lifecycle_before_final_commit(
         _session: FakeSession,
         _thread_id: str,
         *,
-        seq: int,
+        seq: int | None = None,
         payload: dict[str, Any],
-    ) -> None:
+    ) -> tuple[int | None, dict[str, Any]]:
         operations.append(f"persist:thread:{payload['params']['data']['event']}:{seq}")
+        return seq or 0, payload
 
     monkeypatch.setattr(run_jobs_module.db_manager, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(run_jobs_module, "execute_run", successful_execute_run)
     monkeypatch.setattr(run_jobs_module, "_publish_run_event", fake_publish_run_event)
-    monkeypatch.setattr(run_jobs_module, "_persist_thread_snapshot", fake_persist_thread_snapshot)
     monkeypatch.setattr(run_jobs_module, "add_run_stream_event_to_session", fake_add_run_stream_event_to_session)
     monkeypatch.setattr(run_jobs_module, "publish_lifecycle_event", fake_publish_lifecycle_event)
     monkeypatch.setattr(run_jobs_module, "add_thread_stream_event_to_session", fake_add_thread_stream_event_to_session)
@@ -242,10 +222,8 @@ async def test_execute_run_job_persists_terminal_lifecycle_before_final_commit(
     assert operations == [
         "commit",
         "publish:start",
-        "publish:end",
-        "persist:run:end:2",
-        "publish:lifecycle:completed:False",
-        "persist:thread:completed:3",
+        "persist:run:end:None",
+        "persist:thread:completed:None",
         "commit",
     ]
 
@@ -256,23 +234,25 @@ async def test_execute_run_job_publishes_failed_lifecycle_when_run_deleted(
 ) -> None:
     operations: list[str] = []
     session_factory = FakeSessionFactory([FakeSession([None], operations)])
+    protocol_broker = ThreadProtocolEventBroker()
 
-    def fake_publish_lifecycle_event(
-        _thread_id: str, *, event: str, graph_name: str | None = None, error: str | None = None, **_kw: Any,
-    ) -> dict[str, Any]:
-        operations.append(f"lifecycle:{event}:{error}")
-        return {"seq": 1, "method": "lifecycle", "params": {"namespace": [], "timestamp": 1, "data": {"event": event}}}
-
-    async def fake_add_thread_stream_event_to_session(_session: Any, _thread_id: str, *, seq: int, payload: dict[str, Any]) -> None:
+    async def fake_add_thread_stream_event_to_session(_session: Any, _thread_id: str, *, seq: int | None = None, payload: dict[str, Any]) -> None:
         pass
 
     monkeypatch.setattr(run_jobs_module.db_manager, "get_session_factory", lambda: session_factory)
-    monkeypatch.setattr(run_jobs_module, "publish_lifecycle_event", fake_publish_lifecycle_event)
+    monkeypatch.setattr(run_jobs_module, "thread_protocol_broker", protocol_broker)
     monkeypatch.setattr(run_jobs_module, "add_thread_stream_event_to_session", fake_add_thread_stream_event_to_session)
 
     await run_jobs_module.execute_run_job(_job())
 
-    assert any("lifecycle:failed:Run was deleted" in op for op in operations)
+    lifecycle_events = [
+        event["params"]["data"]
+        for event in protocol_broker.snapshot_records("t1")
+    ]
+    assert any(
+        event.get("event") == "failed" and "Run was deleted" in (event.get("error") or "")
+        for event in lifecycle_events
+    )
 
 
 def test_from_payload_rejects_unsupported_kind() -> None:
@@ -308,17 +288,16 @@ async def test_execute_run_job_publishes_interrupted_lifecycle(
         operations.append(f"publish:{event}")
         return (1 if event == "start" else 2), {"event": event, **payload}
 
-    async def fake_persist_thread_snapshot(_thread_id: str) -> None:
-        return None
 
     async def fake_add_run_stream_event_to_session(
         _session: FakeSession,
         _run_id: str,
         *,
-        seq: int,
+        seq: int | None = None,
         payload: dict[str, Any],
-    ) -> None:
+    ) -> tuple[int | None, dict[str, Any]]:
         operations.append(f"persist:run:{payload['event']}:{seq}")
+        return seq or 0, payload
 
     def fake_publish_lifecycle_event(
         _thread_id: str,
@@ -342,15 +321,15 @@ async def test_execute_run_job_publishes_interrupted_lifecycle(
         _session: FakeSession,
         _thread_id: str,
         *,
-        seq: int,
+        seq: int | None = None,
         payload: dict[str, Any],
-    ) -> None:
+    ) -> tuple[int | None, dict[str, Any]]:
         operations.append(f"persist:thread:{payload['params']['data']['event']}:{seq}")
+        return seq or 0, payload
 
     monkeypatch.setattr(run_jobs_module.db_manager, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(run_jobs_module, "execute_run", interrupted_execute_run)
     monkeypatch.setattr(run_jobs_module, "_publish_run_event", fake_publish_run_event)
-    monkeypatch.setattr(run_jobs_module, "_persist_thread_snapshot", fake_persist_thread_snapshot)
     monkeypatch.setattr(run_jobs_module, "add_run_stream_event_to_session", fake_add_run_stream_event_to_session)
     monkeypatch.setattr(run_jobs_module, "publish_lifecycle_event", fake_publish_lifecycle_event)
     monkeypatch.setattr(run_jobs_module, "add_thread_stream_event_to_session", fake_add_thread_stream_event_to_session)
@@ -358,4 +337,4 @@ async def test_execute_run_job_publishes_interrupted_lifecycle(
     await run_jobs_module.execute_run_job(_job())
 
     assert db_run.status == "interrupted"
-    assert "publish:lifecycle:interrupted:False" in operations
+    assert "persist:thread:interrupted:None" in operations

@@ -169,6 +169,31 @@ class ThreadStreamEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
 
 
+class StreamSequence(Base):
+    """Per-stream monotonic sequence counter for run/thread stream events.
+
+    One row per (scope, scope_id). Appending an event locks this row
+    (``UPDATE ... WHERE scope=:s AND scope_id=:id``) inside the same transaction
+    as the event insert, so concurrent publishers of the same stream serialize
+    and can never allocate the same seq. The row is also the anchor for the
+    "durable before expose" contract: a broker only exposes a seq after the
+    event row (and this counter row) committed.
+
+    The row lives in the metadata DB (not the business tables), so it shares the
+    lifecycle of the stream events it counts and can be self-healed from
+    ``MAX(seq)`` if it is ever deleted out from under a running stream.
+    """
+
+    __tablename__ = "stream_sequences"
+    __table_args__ = (UniqueConstraint("scope", "scope_id", name="uq_stream_sequences_scope_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    scope_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+
+
 async def get_session(session_factory: async_sessionmaker[AsyncSession]) -> AsyncIterator[AsyncSession]:
     async with session_factory() as session:
         yield session

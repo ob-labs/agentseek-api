@@ -702,7 +702,10 @@ def test_protocol_events_are_persisted_when_published(client: TestClient) -> Non
     assert thread.status_code == 200
     thread_id = thread.json()["thread_id"]
 
-    publish_values_event(thread_id, values={"early": True})
+    # Explicitly request persistence: the synchronous publish helpers default
+    # to ``persist=False`` (they exist for tests/back-compat and must not
+    # silently hit the non-atomic persistence path).
+    publish_values_event(thread_id, values={"early": True}, persist=True)
     thread_protocol_broker.delete_thread(thread_id)
 
     replay = client.post(f"/threads/{thread_id}/stream/events", json={"channels": ["values"]})
