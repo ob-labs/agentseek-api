@@ -1135,7 +1135,10 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / "docker.env"
     env_file.write_text(
-        "METADATA_DB_URL=sqlite+aiosqlite:////tmp/agentseek.db\nOCEANBASE_HOST=host.docker.internal\n",
+        "METADATA_DB_URL=sqlite+aiosqlite:////tmp/agentseek.db\n"
+        "OCEANBASE_HOST=host.docker.internal\n"
+        "API_ORIGIN=https://api.example.test\n"
+        "OPENAI_BASE_URL=${API_ORIGIN}/v1\n",
         encoding="utf-8",
     )
     capture = _RunCapture()
@@ -1176,6 +1179,7 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["METADATA_DB_URL"] == "sqlite+aiosqlite:////tmp/agentseek.db"
     assert container_env["OCEANBASE_HOST"] == "host.docker.internal"
+    assert container_env["OPENAI_BASE_URL"] == "https://api.example.test/v1"
 
 
 def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
@@ -1400,6 +1404,44 @@ def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatc
     assert capture.calls is not None
     container_env = _docker_env_from_run_command(capture.calls[1])
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
+
+
+def test_up_command_resolves_same_file_references_without_expanding_disallowed_host_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "docker.env"
+    env_file.write_text(
+        "API_ORIGIN=https://api.example.test\n"
+        "OPENAI_BASE_URL=${API_ORIGIN}/v1\n"
+        "OPENAI_API_KEY=${PR69_DISALLOWED_SECRET}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--env-file",
+            str(env_file),
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    container_env = _docker_env_from_run_command(capture.calls[1])
+    assert container_env["OPENAI_BASE_URL"] == "https://api.example.test/v1"
+    assert container_env["OPENAI_API_KEY"] == "${PR69_DISALLOWED_SECRET}"
+    assert "PR69_DISALLOWED_SECRET" not in container_env
 
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -148,9 +149,34 @@ def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None
     return None
 
 
-def _parse_env_file(env_file: Path, *, interpolate: bool = True) -> dict[str, str]:
-    values = dotenv_values(env_file, interpolate=interpolate)
-    return {key: value for key, value in values.items() if value is not None}
+_ENV_REFERENCE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _resolve_env_references(value: str, *, context: dict[str, str]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        key = match.group(1) or match.group(2)
+        return context.get(key, match.group(0))
+
+    return _ENV_REFERENCE.sub(replace, value)
+
+
+def _parse_env_file(env_file: Path, *, base_env: dict[str, str] | None = None) -> dict[str, str]:
+    """Parse dotenv syntax and resolve only previously selected values.
+
+    python-dotenv supplies the standards-compliant parser. Interpolation is
+    deliberately performed here so callers can provide a restricted context
+    for container handoff instead of exposing the full host environment.
+    """
+    raw_values = dotenv_values(env_file, interpolate=False)
+    context = dict(base_env or {})
+    values: dict[str, str] = {}
+    for key, value in raw_values.items():
+        if value is None:
+            continue
+        resolved = _resolve_env_references(value, context=context)
+        values[key] = resolved
+        context[key] = resolved
+    return values
 
 
 def _resolve_path_from_config(path_text: str, *, config_path: Path) -> Path:
@@ -268,22 +294,28 @@ def build_runtime_env(
     env_file: str | None,
     cwd: Path,
     base_env: dict[str, str] | None = None,
-    interpolate_env_file: bool = True,
 ) -> dict[str, str]:
     shell_env = dict(os.environ if base_env is None else base_env)
     env: dict[str, str] = {}
+    interpolation_context = dict(shell_env)
     config: CliConfig | None = _load_cli_config(config_path) if config_path is not None else None
     if config is not None:
         if config.env_file is not None:
-            env.update(_parse_env_file(config.env_file, interpolate=interpolate_env_file))
+            parsed_config_env = _parse_env_file(config.env_file, base_env=interpolation_context)
+            env.update(parsed_config_env)
+            interpolation_context.update(parsed_config_env)
         env.update(config.env_mapping)
+        interpolation_context.update(config.env_mapping)
         if config.auth_path:
             env["AUTH_MODULE_PATH"] = config.auth_path
+            interpolation_context["AUTH_MODULE_PATH"] = config.auth_path
     if env_file:
         resolved_env_file = _resolve_path(env_file, cwd=cwd)
         if not resolved_env_file.exists():
             raise CliError(f"Env file '{resolved_env_file}' does not exist.")
-        env.update(_parse_env_file(resolved_env_file, interpolate=interpolate_env_file))
+        parsed_cli_env = _parse_env_file(resolved_env_file, base_env=interpolation_context)
+        env.update(parsed_cli_env)
+        interpolation_context.update(parsed_cli_env)
     # The launching shell is the highest-precedence source. This is important
     # for agentseek dev, whose child environment may also be described by a
     # langgraph.json env file.
@@ -626,7 +658,6 @@ def build_container_env(*, config_path: Path, env_file: str | None, cwd: Path) -
         env_file=env_file,
         cwd=cwd,
         base_env=_ambient_container_env(),
-        interpolate_env_file=False,
     )
     env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
     auth_module_path = env.get("AUTH_MODULE_PATH")

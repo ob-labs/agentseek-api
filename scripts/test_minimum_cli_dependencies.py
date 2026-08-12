@@ -15,7 +15,16 @@ def main() -> None:
         subprocess.run(["uv", "venv", "--python", sys.executable, str(environment)], check=True)
         python = environment / ("Scripts/python.exe" if sys.platform == "win32" else "bin/python")
         subprocess.run(
-            ["uv", "pip", "install", "--python", str(python), "pydantic-settings==2.4.0", "python-dotenv>=1.0"],
+            [
+                "uv",
+                "pip",
+                "install",
+                "--python",
+                str(python),
+                "pydantic-settings==2.4.0",
+                "pydantic==2.8.0",
+                "python-dotenv==1.0.0",
+            ],
             check=True,
         )
         subprocess.run(["uv", "pip", "install", "--python", str(python), "--no-deps", "-e", str(repository)], check=True)
