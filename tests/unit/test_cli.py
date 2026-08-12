@@ -870,6 +870,19 @@ def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
     assert env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
+def test_build_runtime_env_ignores_dotenv_entries_without_values(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text("MALFORMED_LINE\nTOKEN=present\n", encoding="utf-8")
+
+    env = build_runtime_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={})
+
+    assert "MALFORMED_LINE" not in env
+    assert env["TOKEN"] == "present"
+
+
 def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(tmp_path: Path) -> None:
     from agentseek_api.cli import build_runtime_env
 

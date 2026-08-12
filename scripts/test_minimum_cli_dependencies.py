@@ -1,4 +1,4 @@
-"""Verify the CLI imports and runs with the declared minimum dotenv stack."""
+"""Verify the installed CLI runs with the declared minimum dotenv stack."""
 
 from __future__ import annotations
 
@@ -19,10 +19,9 @@ def main() -> None:
             check=True,
         )
         subprocess.run(["uv", "pip", "install", "--python", str(python), "--no-deps", "-e", str(repository)], check=True)
-        subprocess.run(
-            [str(python), "-c", "from agentseek_api.cli import main; raise SystemExit(main(['version']))"],
-            check=True,
-        )
+        cli = environment / ("Scripts/agentseek-api.exe" if sys.platform == "win32" else "bin/agentseek-api")
+        result = subprocess.run([str(cli), "version"], check=True, capture_output=True, text=True)
+        assert result.stdout.strip() == "agentseek-api 0.2.1"
 
 
 if __name__ == "__main__":
