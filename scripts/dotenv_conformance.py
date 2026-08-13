@@ -130,23 +130,56 @@ CROSS_LAYER_CONFORMANCE_CASES = (
         "absent": (),
     },
     {
-        "name": "config-dotenv-tombstone",
+        "name": "config-dotenv-valueless",
         "config_env": "./config.env",
         "config_dotenv": "CONF_TOMBSTONE=from-config-dotenv\n",
-        "cli_dotenv": "CONF_TOMBSTONE\n",
+        "cli_dotenv": "CONF_TOMBSTONE\nCONF_RESULT=${CONF_TOMBSTONE:-fallback}\n",
         "shell_env": {},
-        "expected": {},
-        "absent": ("CONF_TOMBSTONE",),
+        "expected": {
+            "CONF_TOMBSTONE": "from-config-dotenv",
+            "CONF_RESULT": "",
+        },
+        "absent": (),
     },
     {
-        "name": "config-mapping-tombstone",
+        "name": "config-mapping-valueless",
         "config_env": {"CONF_TOMBSTONE": "from-config-mapping"},
         "config_dotenv": None,
-        "cli_dotenv": "CONF_TOMBSTONE\n",
+        "cli_dotenv": "CONF_TOMBSTONE\nCONF_RESULT=${CONF_TOMBSTONE:-fallback}\n",
         "shell_env": {},
-        "expected": {},
-        "absent": ("CONF_TOMBSTONE",),
+        "expected": {
+            "CONF_TOMBSTONE": "from-config-mapping",
+            "CONF_RESULT": "",
+        },
+        "absent": (),
     },
+    {
+        "name": "config-dotenv-valueless-does-not-mask-shell-for-next-file",
+        "config_env": "./config.env",
+        "config_dotenv": "OPENAI_API_KEY\n",
+        "cli_dotenv": "CONF_RESULT=${OPENAI_API_KEY}\n",
+        "shell_env": {"OPENAI_API_KEY": "from-shell"},
+        "expected": {
+            "OPENAI_API_KEY": "from-shell",
+            "CONF_RESULT": "from-shell",
+        },
+        "absent": (),
+    },
+)
+
+CONFORMANCE_AMBIENT_MODES = (
+    ("clean", {}),
+    (
+        "hostile",
+        {
+            "OPENAI_API_KEY": "ambient-provider-key",
+            "OPENAI_ALLOWED_SOURCE": "ambient-allowed-source",
+            "PR69_MISSING": "ambient-missing-value",
+            "PR69_DISALLOWED_SECRET": "host-sensitive-value",
+            "A.B": "ambient-dotted-value",
+            "1LEADING": "ambient-digit-value",
+        },
+    ),
 )
 
 
@@ -196,44 +229,54 @@ def assert_runtime_conformance(*, expected_dotenv_version: str | None = None) ->
     try:
         with tempfile.TemporaryDirectory(prefix="agentseek-dotenv-") as directory:
             root = Path(directory)
-            for index, case in enumerate(DOTENV_CONFORMANCE_CASES):
-                for key in DOTENV_CONFORMANCE_ENV_KEYS:
-                    os.environ.pop(key, None)
-                os.environ.update(case["ambient"])
-                env_file = root / f"{index}.env"
-                env_file.write_text(case["contents"], encoding="utf-8")
-                upstream = dotenv_values(env_file)
-                expected = {key: value for key, value in upstream.items() if value is not None}
-                actual = build_runtime_env(
-                    config_path=None,
-                    env_file=str(env_file),
-                    cwd=root,
-                    base_env=dict(os.environ),
-                )
-                assert {key: actual[key] for key in expected} == expected, case["name"]
-                assert all(key not in actual for key, value in upstream.items() if value is None), case["name"]
+            for mode_name, mode_ambient in CONFORMANCE_AMBIENT_MODES:
+                for index, case in enumerate(DOTENV_CONFORMANCE_CASES):
+                    for key in DOTENV_CONFORMANCE_ENV_KEYS:
+                        os.environ.pop(key, None)
+                    os.environ.update(mode_ambient)
+                    os.environ.update(case["ambient"])
+                    env_file = root / f"{mode_name}-{index}.env"
+                    env_file.write_text(case["contents"], encoding="utf-8")
+                    upstream = dotenv_values(env_file)
+                    expected = {key: value for key, value in upstream.items() if value is not None}
+                    expected.update({key: os.environ[key] for key in upstream.keys() & os.environ.keys()})
+                    actual = build_runtime_env(
+                        config_path=None,
+                        env_file=str(env_file),
+                        cwd=root,
+                        base_env=dict(os.environ),
+                    )
+                    assertion = f"{mode_name}/{case['name']}"
+                    assert {key: actual[key] for key in expected} == expected, assertion
+                    assert all(
+                        key not in actual
+                        for key, value in upstream.items()
+                        if value is None and key not in os.environ
+                    ), assertion
 
-            for index, case in enumerate(CROSS_LAYER_CONFORMANCE_CASES):
-                for key in DOTENV_CONFORMANCE_ENV_KEYS:
-                    os.environ.pop(key, None)
-                os.environ.update(case["shell_env"])
-                config_path = root / f"cross-layer-{index}.json"
-                config_path.write_text(
-                    json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": case["config_env"]}),
-                    encoding="utf-8",
-                )
-                if case["config_dotenv"] is not None:
-                    (root / "config.env").write_text(case["config_dotenv"], encoding="utf-8")
-                env_file = root / f"cross-layer-{index}.env"
-                env_file.write_text(case["cli_dotenv"], encoding="utf-8")
-                actual = build_runtime_env(
-                    config_path=config_path,
-                    env_file=str(env_file),
-                    cwd=root,
-                    base_env=dict(os.environ),
-                )
-                assert {key: actual[key] for key in case["expected"]} == case["expected"], case["name"]
-                assert all(key not in actual for key in case["absent"]), case["name"]
+                for index, case in enumerate(CROSS_LAYER_CONFORMANCE_CASES):
+                    for key in DOTENV_CONFORMANCE_ENV_KEYS:
+                        os.environ.pop(key, None)
+                    os.environ.update(mode_ambient)
+                    os.environ.update(case["shell_env"])
+                    config_path = root / f"cross-layer-{mode_name}-{index}.json"
+                    config_path.write_text(
+                        json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": case["config_env"]}),
+                        encoding="utf-8",
+                    )
+                    if case["config_dotenv"] is not None:
+                        (root / "config.env").write_text(case["config_dotenv"], encoding="utf-8")
+                    env_file = root / f"cross-layer-{mode_name}-{index}.env"
+                    env_file.write_text(case["cli_dotenv"], encoding="utf-8")
+                    actual = build_runtime_env(
+                        config_path=config_path,
+                        env_file=str(env_file),
+                        cwd=root,
+                        base_env=dict(os.environ),
+                    )
+                    assertion = f"{mode_name}/{case['name']}"
+                    assert {key: actual[key] for key in case["expected"]} == case["expected"], assertion
+                    assert all(key not in actual for key in case["absent"]), assertion
     finally:
         for key, value in previous.items():
             if value is None:

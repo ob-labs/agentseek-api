@@ -10,6 +10,7 @@ import tempfile
 from pathlib import Path
 
 from dotenv_conformance import (
+    CONFORMANCE_AMBIENT_MODES,
     CROSS_LAYER_CONFORMANCE_CASES,
     DOTENV_CONFORMANCE_CASES,
     DOTENV_CONFORMANCE_ENV_KEYS,
@@ -89,49 +90,52 @@ def main() -> None:
         (package / "graph.py").write_text("graph = object()\n", encoding="utf-8")
 
         port = 18125
-        for index, case in enumerate(DOTENV_CONFORMANCE_CASES):
-            config = root / f"matrix-{index}.json"
-            config.write_text('{"graphs":{"chat":"chat.graph:graph"}}\n', encoding="utf-8")
-            env_file = root / f"matrix-{index}.env"
-            env_file.write_text(case["contents"], encoding="utf-8")
-            process_env = {**clean_env, **case["ambient"]}
+        for mode_name, mode_ambient in CONFORMANCE_AMBIENT_MODES:
+            for index, case in enumerate(DOTENV_CONFORMANCE_CASES):
+                config = root / f"matrix-{mode_name}-{index}.json"
+                config.write_text('{"graphs":{"chat":"chat.graph:graph"}}\n', encoding="utf-8")
+                env_file = root / f"matrix-{mode_name}-{index}.env"
+                env_file.write_text(case["contents"], encoding="utf-8")
+                process_env = {**clean_env, **mode_ambient, **case["ambient"]}
 
-            actual = _inspect_real_up(
-                root=root,
-                config=config,
-                env_file=env_file,
-                port=port,
-                process_env=process_env,
-            )
+                actual = _inspect_real_up(
+                    root=root,
+                    config=config,
+                    env_file=env_file,
+                    port=port,
+                    process_env=process_env,
+                )
 
-            expected = case["container_expected"]
-            assert {key: actual[key] for key in expected} == expected, case["name"]
-            assert all(key not in actual for key in case["container_absent"]), case["name"]
-            port += 1
+                assertion = f"{mode_name}/{case['name']}"
+                expected = case["container_expected"]
+                assert {key: actual[key] for key in expected} == expected, assertion
+                assert all(key not in actual for key in case["container_absent"]), assertion
+                port += 1
 
-        for index, case in enumerate(CROSS_LAYER_CONFORMANCE_CASES):
-            config = root / f"cross-layer-{index}.json"
-            config.write_text(
-                json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": case["config_env"]}),
-                encoding="utf-8",
-            )
-            if case["config_dotenv"] is not None:
-                (root / "config.env").write_text(case["config_dotenv"], encoding="utf-8")
-            env_file = root / f"cross-layer-{index}.env"
-            env_file.write_text(case["cli_dotenv"], encoding="utf-8")
-            process_env = {**clean_env, **case["shell_env"]}
+            for index, case in enumerate(CROSS_LAYER_CONFORMANCE_CASES):
+                config = root / f"cross-layer-{mode_name}-{index}.json"
+                config.write_text(
+                    json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": case["config_env"]}),
+                    encoding="utf-8",
+                )
+                if case["config_dotenv"] is not None:
+                    (root / "config.env").write_text(case["config_dotenv"], encoding="utf-8")
+                env_file = root / f"cross-layer-{mode_name}-{index}.env"
+                env_file.write_text(case["cli_dotenv"], encoding="utf-8")
+                process_env = {**clean_env, **mode_ambient, **case["shell_env"]}
 
-            actual = _inspect_real_up(
-                root=root,
-                config=config,
-                env_file=env_file,
-                port=port,
-                process_env=process_env,
-            )
+                actual = _inspect_real_up(
+                    root=root,
+                    config=config,
+                    env_file=env_file,
+                    port=port,
+                    process_env=process_env,
+                )
 
-            assert {key: actual[key] for key in case["expected"]} == case["expected"], case["name"]
-            assert all(key not in actual for key in case["absent"]), case["name"]
-            port += 1
+                assertion = f"{mode_name}/{case['name']}"
+                assert {key: actual[key] for key in case["expected"]} == case["expected"], assertion
+                assert all(key not in actual for key in case["absent"]), assertion
+                port += 1
 
     os.environ.update(inherited_allowlisted)
     print("container dotenv conformance passed")

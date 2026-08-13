@@ -184,6 +184,7 @@ def _parse_env_file(
     preserve_unresolved: bool,
 ) -> dict[str, str | None]:
     """Parse and interpolate dotenv bindings in physical source order."""
+    local_context = dict(context)
     values: dict[str, str | None] = {}
     with env_file.open(encoding="utf-8") as stream:
         bindings = with_warn_for_invalid_lines(parse_stream(stream))
@@ -193,24 +194,23 @@ def _parse_env_file(
             if binding.value is None:
                 # A valueless binding participates in interpolation just as it
                 # does in python-dotenv, but is not exported to child processes.
-                context[binding.key] = None
+                local_context[binding.key] = None
                 values[binding.key] = None
                 continue
             resolved = _resolve_env_value(
                 binding.value,
-                context=context,
+                context=local_context,
                 preserve_unresolved=preserve_unresolved,
             )
             values[binding.key] = resolved
-            context[binding.key] = resolved
+            local_context[binding.key] = resolved
+    context.update({key: value for key, value in values.items() if value is not None})
     return values
 
 
 def _apply_env_layer(env: dict[str, str], layer: dict[str, str | None]) -> None:
     for key, value in layer.items():
-        if value is None:
-            env.pop(key, None)
-        else:
+        if value is not None:
             env[key] = value
 
 

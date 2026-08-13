@@ -1068,7 +1068,7 @@ def test_cli_dotenv_interpolation_sees_literal_config_mapping(tmp_path: Path) ->
     assert env["RESULT"] == "https://mapping.example/v1"
 
 
-def test_higher_precedence_valueless_binding_masks_lower_export(tmp_path: Path) -> None:
+def test_higher_precedence_valueless_binding_keeps_lower_export(tmp_path: Path) -> None:
     from agentseek_api.cli import build_runtime_env
 
     config_env = tmp_path / "config.env"
@@ -1083,7 +1083,7 @@ def test_higher_precedence_valueless_binding_masks_lower_export(tmp_path: Path) 
 
     env = build_runtime_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path, base_env={})
 
-    assert "TOKEN" not in env
+    assert env["TOKEN"] == "from-config"
     assert env["RESULT"] == ""
 
 
