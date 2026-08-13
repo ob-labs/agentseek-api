@@ -3,13 +3,25 @@ from __future__ import annotations
 import argparse
 import importlib
 import io
+import json
+import os
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
 
+from agentseek_api.cli import _CONTAINER_ENV_PREFIXES
 from agentseek_api.services.langgraph_service import LangGraphService
+from scripts.dotenv_conformance import DOTENV_CONFORMANCE_CASES, DOTENV_CONFORMANCE_ENV_KEYS
+
+
+@pytest.fixture(autouse=True)
+def _clean_ambient_container_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep allowlisted host variables out of tests unless a test opts in."""
+    for key in tuple(os.environ):
+        if key.startswith(_CONTAINER_ENV_PREFIXES):
+            monkeypatch.delenv(key)
 
 
 def test_python_dotenv_dependency_is_available() -> None:
@@ -936,6 +948,187 @@ def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(tmp_path:
     )
 
     assert env["TOKEN"] == "from-shell"
+
+
+@pytest.mark.parametrize(
+    "case",
+    DOTENV_CONFORMANCE_CASES,
+    ids=[case["name"] for case in DOTENV_CONFORMANCE_CASES],
+)
+def test_runtime_dotenv_interpolation_conforms_to_python_dotenv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: dict[str, object],
+) -> None:
+    from dotenv import dotenv_values
+
+    from agentseek_api.cli import build_runtime_env
+
+    for key in DOTENV_CONFORMANCE_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    ambient = case["ambient"]
+    assert isinstance(ambient, dict)
+    for key, value in ambient.items():
+        monkeypatch.setenv(key, value)
+    env_file = tmp_path / ".env"
+    contents = case["contents"]
+    assert isinstance(contents, str)
+    env_file.write_text(contents, encoding="utf-8")
+    expected = {key: value for key, value in dotenv_values(env_file).items() if value is not None}
+
+    actual = build_runtime_env(
+        config_path=None,
+        env_file=str(env_file),
+        cwd=tmp_path,
+        base_env=dict(os.environ),
+    )
+
+    assert {key: actual[key] for key in expected} == expected
+
+
+def test_runtime_dotenv_interpolation_sees_prior_layers_before_final_shell_override(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_env = tmp_path / "config.env"
+    config_env.write_text("ORIGIN=https://config.example\n", encoding="utf-8")
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"env":"./config.env"}',
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "cli.env"
+    cli_env.write_text("RESULT=${ORIGIN}/v1\n", encoding="utf-8")
+
+    env = build_runtime_env(
+        config_path=config_path,
+        env_file=str(cli_env),
+        cwd=tmp_path,
+        base_env={"ORIGIN": "https://shell.example"},
+    )
+
+    assert env["RESULT"] == "https://config.example/v1"
+    assert env["ORIGIN"] == "https://shell.example"
+
+
+def test_cli_dotenv_interpolation_sees_literal_config_mapping(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"env":{"ORIGIN":"https://mapping.example"}}',
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "cli.env"
+    cli_env.write_text("RESULT=${ORIGIN}/v1\n", encoding="utf-8")
+
+    env = build_runtime_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path, base_env={})
+
+    assert env["RESULT"] == "https://mapping.example/v1"
+
+
+def test_higher_precedence_valueless_binding_masks_lower_export(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_env = tmp_path / "config.env"
+    config_env.write_text("TOKEN=from-config\n", encoding="utf-8")
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"env":"./config.env"}',
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "cli.env"
+    cli_env.write_text("TOKEN\nRESULT=${TOKEN:-fallback}\n", encoding="utf-8")
+
+    env = build_runtime_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path, base_env={})
+
+    assert "TOKEN" not in env
+    assert env["RESULT"] == ""
+
+
+def test_container_dotenv_uses_full_grammar_but_preserves_unavailable_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import build_container_env
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "A.B=dotted\n"
+        "1LEADING=digit\n"
+        "OPENAI_BASE_URL=${A.B}-${1LEADING}-${PR69_DISALLOWED_SECRET}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
+
+    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
+
+    assert env["OPENAI_BASE_URL"] == "dotted-digit-${PR69_DISALLOWED_SECRET}"
+    assert "PR69_DISALLOWED_SECRET" not in env
+
+
+def test_container_dotenv_preserves_physical_duplicate_order(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_container_env
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "API_ORIGIN=https://first.example\n"
+        "OPENAI_BASE_URL=${API_ORIGIN}/v1\n"
+        "API_ORIGIN=https://second.example\n",
+        encoding="utf-8",
+    )
+
+    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
+
+    assert env["OPENAI_BASE_URL"] == "https://first.example/v1"
+
+
+@pytest.mark.parametrize("config_env", ["./config.env", {"API_ORIGIN": "https://mapping.example"}])
+def test_container_dotenv_sees_selected_config_layer(
+    tmp_path: Path,
+    config_env: str | dict[str, str],
+) -> None:
+    from agentseek_api.cli import build_container_env
+
+    if isinstance(config_env, str):
+        (tmp_path / "config.env").write_text("API_ORIGIN=https://dotenv.example\n", encoding="utf-8")
+        expected_origin = "https://dotenv.example"
+    else:
+        expected_origin = "https://mapping.example"
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": config_env}),
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "cli.env"
+    cli_env.write_text("OPENAI_BASE_URL=${API_ORIGIN}/v1\n", encoding="utf-8")
+
+    env = build_container_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path)
+
+    assert env["OPENAI_BASE_URL"] == f"{expected_origin}/v1"
+
+
+def test_container_dotenv_resolves_allowlisted_but_not_disallowed_ambient_reference(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api.cli import build_container_env
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text(
+        "ALLOWED_COPY=${OPENAI_API_KEY}\n"
+        "DISALLOWED_COPY=${PR69_DISALLOWED_SECRET}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "allowlisted-value")
+    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
+
+    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
+
+    assert env["ALLOWED_COPY"] == "allowlisted-value"
+    assert env["DISALLOWED_COPY"] == "${PR69_DISALLOWED_SECRET}"
+    assert "PR69_DISALLOWED_SECRET" not in env
 
 
 def test_build_container_env_does_not_interpolate_disallowed_host_values(

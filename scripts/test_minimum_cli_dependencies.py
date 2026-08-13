@@ -31,6 +31,23 @@ def main() -> None:
         cli = environment / ("Scripts/agentseek-api.exe" if sys.platform == "win32" else "bin/agentseek-api")
         result = subprocess.run([str(cli), "version"], check=True, capture_output=True, text=True)
         assert result.stdout.strip() == "agentseek-api 0.2.1"
+        conformance = subprocess.run(
+            [
+                str(python),
+                "-c",
+                (
+                    "import sys; "
+                    f"sys.path.insert(0, {str(repository / 'scripts')!r}); "
+                    "from dotenv_conformance import assert_runtime_conformance; "
+                    "assert_runtime_conformance(expected_dotenv_version='1.0.0')"
+                ),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if conformance.returncode != 0:
+            raise RuntimeError(f"Minimum dependency dotenv conformance failed: {conformance.stderr.strip()}")
 
 
 if __name__ == "__main__":
