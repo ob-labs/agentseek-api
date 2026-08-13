@@ -13,7 +13,11 @@ import pytest
 
 from agentseek_api.cli import _CONTAINER_ENV_PREFIXES
 from agentseek_api.services.langgraph_service import LangGraphService
-from scripts.dotenv_conformance import DOTENV_CONFORMANCE_CASES, DOTENV_CONFORMANCE_ENV_KEYS
+from scripts.dotenv_conformance import (
+    CROSS_LAYER_CONFORMANCE_CASES,
+    DOTENV_CONFORMANCE_CASES,
+    DOTENV_CONFORMANCE_ENV_KEYS,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -1008,6 +1012,44 @@ def test_runtime_dotenv_interpolation_sees_prior_layers_before_final_shell_overr
 
     assert env["RESULT"] == "https://config.example/v1"
     assert env["ORIGIN"] == "https://shell.example"
+
+
+@pytest.mark.parametrize(
+    "case",
+    CROSS_LAYER_CONFORMANCE_CASES,
+    ids=[case["name"] for case in CROSS_LAYER_CONFORMANCE_CASES],
+)
+def test_runtime_cross_layer_dotenv_conformance(tmp_path: Path, case: dict[str, object]) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": case["config_env"]}),
+        encoding="utf-8",
+    )
+    config_dotenv = case["config_dotenv"]
+    if isinstance(config_dotenv, str):
+        (tmp_path / "config.env").write_text(config_dotenv, encoding="utf-8")
+    cli_env = tmp_path / "cli.env"
+    cli_dotenv = case["cli_dotenv"]
+    assert isinstance(cli_dotenv, str)
+    cli_env.write_text(cli_dotenv, encoding="utf-8")
+    shell_env = case["shell_env"]
+    assert isinstance(shell_env, dict)
+
+    actual = build_runtime_env(
+        config_path=config_path,
+        env_file=str(cli_env),
+        cwd=tmp_path,
+        base_env=shell_env,
+    )
+
+    expected = case["expected"]
+    assert isinstance(expected, dict)
+    assert {key: actual[key] for key in expected} == expected
+    absent = case["absent"]
+    assert isinstance(absent, tuple)
+    assert all(key not in actual for key in absent)
 
 
 def test_cli_dotenv_interpolation_sees_literal_config_mapping(tmp_path: Path) -> None:
