@@ -14,12 +14,9 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
 
-from dotenv.main import with_warn_for_invalid_lines
-from dotenv.parser import parse_stream
-from dotenv.variables import parse_variables
-
 from agentseek_api import __version__
 from agentseek_api.constants import DEFAULT_API_PORT
+from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
 
 DEFAULT_CLI_NAME = "agentseek-api"
 
@@ -150,93 +147,24 @@ def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None
     return None
 
 
-def _resolve_env_value(
-    value: str,
-    *,
-    context: dict[str, str | None],
-) -> str:
-    """Resolve a value with python-dotenv's grammar and missing-value rules."""
-    return "".join(atom.resolve(context) for atom in parse_variables(value))
-
-
-def _parse_env_file(
-    env_file: Path,
-    *,
-    context: dict[str, str | None],
-) -> dict[str, str | None]:
-    """Parse and interpolate dotenv bindings in physical source order."""
-    local_context = dict(context)
-    values: dict[str, str | None] = {}
-    with env_file.open(encoding="utf-8") as stream:
-        bindings = with_warn_for_invalid_lines(parse_stream(stream))
-        for binding in bindings:
-            if binding.key is None:
-                continue
-            if binding.value is None:
-                # A valueless binding participates in interpolation just as it
-                # does in python-dotenv, but is not exported to child processes.
-                local_context[binding.key] = None
-                values[binding.key] = None
-                continue
-            resolved = _resolve_env_value(
-                binding.value,
-                context=local_context,
-            )
-            values[binding.key] = resolved
-            local_context[binding.key] = resolved
-    context.update({key: value for key, value in values.items() if value is not None})
-    return values
-
-
-def _apply_env_layer(env: dict[str, str], layer: dict[str, str | None]) -> None:
+def _apply_env_layer(
+    env: dict[str, str],
+    layer: dict[str, str | None],
+) -> None:
     for key, value in layer.items():
         if value is not None:
             env[key] = value
 
 
-def _build_env(
+def _read_env_layer(
+    path: Path,
     *,
-    config_path: Path | None,
-    env_file: str | None,
-    cwd: Path,
-    shell_env: dict[str, str],
-) -> dict[str, str]:
-    env: dict[str, str] = {}
-    interpolation_context: dict[str, str | None] = dict(shell_env)
-    config: CliConfig | None = _load_cli_config(config_path) if config_path is not None else None
-    if config is not None:
-        if config.env_file is not None:
-            _apply_env_layer(
-                env,
-                _parse_env_file(
-                    config.env_file,
-                    context=interpolation_context,
-                ),
-            )
-        # JSON env mappings are literal values. They form the next precedence
-        # layer and are available to interpolation in the CLI dotenv layer.
-        env.update(config.env_mapping)
-        interpolation_context.update(config.env_mapping)
-        if config.auth_path:
-            env["AUTH_MODULE_PATH"] = config.auth_path
-            interpolation_context["AUTH_MODULE_PATH"] = config.auth_path
-    if env_file:
-        resolved_env_file = _resolve_path(env_file, cwd=cwd)
-        if not resolved_env_file.exists():
-            raise CliError(f"Env file '{resolved_env_file}' does not exist.")
-        _apply_env_layer(
-            env,
-            _parse_env_file(
-                resolved_env_file,
-                context=interpolation_context,
-            ),
-        )
-    # The launching shell is both the initial interpolation context and the
-    # highest-precedence output layer.
-    env.update(shell_env)
-    if config_path is not None:
-        env["AGENTSEEK_GRAPHS"] = str(config_path)
-    return env
+    inherited: dict[str, str],
+) -> dict[str, str | None]:
+    try:
+        return parse_dotenv_file(path, ambient=inherited)
+    except DotenvFileError as exc:
+        raise CliError(str(exc)) from exc
 
 
 def _resolve_path_from_config(path_text: str, *, config_path: Path) -> Path:
@@ -355,13 +283,32 @@ def build_runtime_env(
     cwd: Path,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    shell_env = dict(os.environ if base_env is None else base_env)
-    return _build_env(
-        config_path=config_path,
-        env_file=env_file,
-        cwd=cwd,
-        shell_env=shell_env,
-    )
+    inherited = dict(os.environ if base_env is None else base_env)
+    env: dict[str, str] = {}
+    config = _load_cli_config(config_path) if config_path is not None else None
+
+    if config is not None:
+        if config.env_file is not None:
+            _apply_env_layer(
+                env,
+                _read_env_layer(config.env_file, inherited=inherited),
+            )
+        env.update(config.env_mapping)
+        if config.auth_path:
+            env["AUTH_MODULE_PATH"] = config.auth_path
+
+    if env_file:
+        resolved_env_file = _resolve_path(env_file, cwd=cwd)
+        _apply_env_layer(
+            env,
+            _read_env_layer(resolved_env_file, inherited=inherited),
+        )
+
+    env.update(inherited)
+    env.pop("AGENTSEEK_GRAPHS", None)
+    if config_path is not None:
+        env["AGENTSEEK_GRAPHS"] = str(config_path)
+    return env
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:

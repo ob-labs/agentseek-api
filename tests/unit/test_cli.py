@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import io
-import json
 import os
 import tomllib
 from dataclasses import dataclass
@@ -13,7 +12,6 @@ import pytest
 
 from agentseek_api.services.langgraph_service import LangGraphService
 from scripts.dotenv_conformance import (
-    CROSS_LAYER_CONFORMANCE_CASES,
     DOTENV_CONFORMANCE_CASES,
     DOTENV_CONFORMANCE_ENV_KEYS,
 )
@@ -391,10 +389,14 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
     assert "Use 'langgraph dev' for mocked or tunneled local workflows." in stderr.getvalue()
 
 
-def test_dev_command_marks_runtime_as_local_dev_for_studio_auth(tmp_path: Path) -> None:
+def test_dev_command_forces_local_studio_auth_after_inherited_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("STUDIO_AUTH_LOCAL_DEV", "false")
     capture = _RunCapture()
 
     exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
@@ -402,6 +404,29 @@ def test_dev_command_marks_runtime_as_local_dev_for_studio_auth(tmp_path: Path) 
     assert exit_code == 0
     assert capture.env is not None
     assert capture.env["STUDIO_AUTH_LOCAL_DEV"] == "true"
+
+
+def test_serve_port_flag_does_not_rewrite_inherited_port_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("PORT", "7777")
+    capture = _RunCapture()
+
+    exit_code = main(
+        ["serve", "--port", "3030"],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.command is not None
+    assert capture.command[-2:] == ["--port", "3030"]
+    assert capture.env is not None
+    assert capture.env["PORT"] == "7777"
 
 
 def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
@@ -979,84 +1004,6 @@ def test_runtime_dotenv_interpolation_conforms_to_python_dotenv(
     )
 
     assert {key: actual[key] for key in expected} == expected
-
-
-def test_runtime_dotenv_interpolation_sees_prior_layers_before_final_shell_override(tmp_path: Path) -> None:
-    from agentseek_api.cli import build_runtime_env
-
-    config_env = tmp_path / "config.env"
-    config_env.write_text("ORIGIN=https://config.example\n", encoding="utf-8")
-    config_path = tmp_path / "langgraph.json"
-    config_path.write_text(
-        '{"graphs":{"chat":"chat.graph:graph"},"env":"./config.env"}',
-        encoding="utf-8",
-    )
-    cli_env = tmp_path / "cli.env"
-    cli_env.write_text("RESULT=${ORIGIN}/v1\n", encoding="utf-8")
-
-    env = build_runtime_env(
-        config_path=config_path,
-        env_file=str(cli_env),
-        cwd=tmp_path,
-        base_env={"ORIGIN": "https://shell.example"},
-    )
-
-    assert env["RESULT"] == "https://config.example/v1"
-    assert env["ORIGIN"] == "https://shell.example"
-
-
-@pytest.mark.parametrize(
-    "case",
-    CROSS_LAYER_CONFORMANCE_CASES,
-    ids=[case["name"] for case in CROSS_LAYER_CONFORMANCE_CASES],
-)
-def test_runtime_cross_layer_dotenv_conformance(tmp_path: Path, case: dict[str, object]) -> None:
-    from agentseek_api.cli import build_runtime_env
-
-    config_path = tmp_path / "langgraph.json"
-    config_path.write_text(
-        json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": case["config_env"]}),
-        encoding="utf-8",
-    )
-    config_dotenv = case["config_dotenv"]
-    if isinstance(config_dotenv, str):
-        (tmp_path / "config.env").write_text(config_dotenv, encoding="utf-8")
-    cli_env = tmp_path / "cli.env"
-    cli_dotenv = case["cli_dotenv"]
-    assert isinstance(cli_dotenv, str)
-    cli_env.write_text(cli_dotenv, encoding="utf-8")
-    shell_env = case["shell_env"]
-    assert isinstance(shell_env, dict)
-
-    actual = build_runtime_env(
-        config_path=config_path,
-        env_file=str(cli_env),
-        cwd=tmp_path,
-        base_env=shell_env,
-    )
-
-    expected = case["expected"]
-    assert isinstance(expected, dict)
-    assert {key: actual[key] for key in expected} == expected
-    absent = case["absent"]
-    assert isinstance(absent, tuple)
-    assert all(key not in actual for key in absent)
-
-
-def test_cli_dotenv_interpolation_sees_literal_config_mapping(tmp_path: Path) -> None:
-    from agentseek_api.cli import build_runtime_env
-
-    config_path = tmp_path / "langgraph.json"
-    config_path.write_text(
-        '{"graphs":{"chat":"chat.graph:graph"},"env":{"ORIGIN":"https://mapping.example"}}',
-        encoding="utf-8",
-    )
-    cli_env = tmp_path / "cli.env"
-    cli_env.write_text("RESULT=${ORIGIN}/v1\n", encoding="utf-8")
-
-    env = build_runtime_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path, base_env={})
-
-    assert env["RESULT"] == "https://mapping.example/v1"
 
 
 def test_higher_precedence_valueless_binding_keeps_lower_export(tmp_path: Path) -> None:
