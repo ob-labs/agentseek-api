@@ -315,24 +315,15 @@ def test_dockerfile_rendering_ignores_invalid_runtime_settings(
 )
 def test_invalid_runtime_setting_is_redacted_and_fresh_child_exits(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     role: str,
     invalid_field: str,
     invalid_value: str,
     error_type: str,
 ) -> None:
-    monkeypatch.setenv(
-        invalid_field,
-        "2024" if invalid_field == "PORT" else "10",
-    )
-    validation_child_pid_path = tmp_path / f"{role}-validation-child.pid"
     config_path = _write_runtime_config(
         tmp_path,
         f"invalid-{role}",
-        {
-            invalid_field: invalid_value,
-            VALIDATION_CHILD_PID_PATH_ENV: str(validation_child_pid_path),
-        },
+        {invalid_field: invalid_value},
     )
     arguments = [
         "-m",
@@ -344,22 +335,11 @@ def test_invalid_runtime_setting_is_redacted_and_fresh_child_exits(
     if role == "dev":
         arguments.append("--no-reload")
 
-    observed_pid: int | None = None
-    child_alive_after_cli: bool | None = None
-    try:
-        result = _run_python(
-            *arguments,
-            cwd=tmp_path,
-            extra_env={"PYTHONPATH": _probe_pythonpath()},
-            removed_env=(invalid_field, VALIDATION_CHILD_PID_PATH_ENV),
-        )
-        observed_pid = _read_observed_pid(validation_child_pid_path)
-        child_alive_after_cli = _pid_is_alive(observed_pid)
-    finally:
-        if observed_pid is None and validation_child_pid_path.exists():
-            observed_pid = int(validation_child_pid_path.read_text(encoding="utf-8"))
-        if observed_pid is not None:
-            _terminate_observed_pid(observed_pid)
+    result = _run_python(
+        *arguments,
+        cwd=tmp_path,
+        removed_env=(invalid_field, VALIDATION_CHILD_PID_PATH_ENV),
+    )
 
     assert result.returncode == 2
     assert result.stderr == (
@@ -369,7 +349,49 @@ def test_invalid_runtime_setting_is_redacted_and_fresh_child_exits(
     assert "ValidationError" not in result.stderr
     assert "input_value" not in result.stderr
     assert "Traceback" not in result.stderr
-    assert child_alive_after_cli is False
+
+
+def test_invalid_uvicorn_runtime_setting_is_redacted_and_process_exits(
+    tmp_path: Path,
+) -> None:
+    invalid_value = "invalid-port-canary"
+    environment = dict(os.environ)
+    environment["PORT"] = invalid_value
+    environment.pop("PYTHONPATH", None)
+    environment.pop(VALIDATION_CHILD_PID_PATH_ENV, None)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "agentseek_api.runtime_entrypoint",
+            "uvicorn",
+            "--",
+            "agentseek_api.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "2024",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    runtime_pid = process.pid
+    try:
+        stdout, stderr = process.communicate(timeout=20)
+        assert _pid_is_alive(runtime_pid) is False
+    finally:
+        _stop_test_process(process)
+
+    assert process.returncode == 2
+    assert stdout == ""
+    assert stderr == "Invalid runtime setting(s): PORT (int_parsing).\n"
+    assert invalid_value not in stderr
+    assert "ValidationError" not in stderr
+    assert "input_value" not in stderr
+    assert "Traceback" not in stderr
 
 
 def test_invalid_internal_runtime_target_returns_fixed_error(

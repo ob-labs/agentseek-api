@@ -340,6 +340,7 @@ def test_failed_guard_entry_retries_exact_mask_restore(
     assert harness.handlers == harness.previous
 
 
+@_POSIX_ONLY
 def test_signal_arriving_during_popen_is_pending_until_attachment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1638,6 +1639,43 @@ class _FakeWin32Api:
 
     def close_handle(self, handle) -> None:
         self._record(f"close-{handle}", handle)
+
+
+def test_windows_signal_during_process_creation_is_pending_until_attachment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _SignalHarness()
+    supervisor_module = _install_signal_harness(
+        monkeypatch,
+        harness,
+        is_windows=True,
+    )
+    api = _FakeWin32Api()
+    create_suspended_process = api.create_suspended_process
+
+    def create_with_sigterm(command, *, env, cwd, job=None):
+        result = create_suspended_process(command, env=env, cwd=cwd, job=job)
+        harness.handlers[signal.SIGTERM](signal.SIGTERM, None)
+        return result
+
+    monkeypatch.setattr(api, "create_suspended_process", create_with_sigterm)
+    child = None
+    try:
+        with supervisor_module.ForwardingSignalGuard() as guard:
+            child = supervisor_module._WindowsChild.start(
+                ["child"],
+                env={},
+                cwd=None,
+                api=api,
+            )
+            assert "terminate-job" not in [name for name, _value in api.events]
+            with pytest.raises(supervisor_module._ForwardedSignal) as captured:
+                guard.attach(child)
+    finally:
+        if child is not None:
+            child.close()
+
+    assert captured.value.signum == signal.SIGTERM
 
 
 class _FakeWindowsLaunchNative:
