@@ -19,7 +19,7 @@ from dotenv.parser import parse_stream
 from dotenv.variables import parse_variables
 
 from agentseek_api import __version__
-from agentseek_api.settings import DEFAULT_API_PORT
+from agentseek_api.constants import DEFAULT_API_PORT
 
 DEFAULT_CLI_NAME = "agentseek-api"
 
