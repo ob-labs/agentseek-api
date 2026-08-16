@@ -4,24 +4,53 @@ Notable changes to AgentSeek API are documented in this file.
 
 ## Unreleased
 
+## 0.2.2 - 2026-08-16
+
+### Highlights
+
+- Added bounded parallel Redis job execution within a worker process. Set
+  `WORKER_CONCURRENT_JOBS` to control the limit; the default is `10`.
+- Aligned assistant and run `config.configurable` / `context` handling with the
+  LangGraph API contract, including assistant defaults and legacy configurable
+  access for graphs without a context schema.
+- Defined one deterministic environment-ownership contract for the `dev`,
+  `serve`, `worker`, and `scheduler` host runtimes.
+
 ### Fixed
 
+- Made Redis job acknowledgement conditional on ownership of the active worker
+  lease, and stopped scheduling safely when a job fails or the lease is lost.
+- Rejected client requests that provide both non-empty `config.configurable` and
+  `context`, mirrored either input into the other representation, and merged
+  assistant configuration into run configuration without discarding nested
+  defaults.
 - Made inherited host environment keys, including explicit empty strings,
   authoritative over config and CLI dotenv sources.
-- Parse each dotenv source independently with strict malformed-file handling,
-  and distinguish valueless `KEY` from explicit empty `KEY=`.
-- Start worker and scheduler roles in fresh child processes so their settings
-  are constructed after the resolved environment is installed.
+- Parsed each dotenv source independently with strict malformed-file handling,
+  and distinguished valueless `KEY` from explicit empty `KEY=`.
+- Ran host runtime roles in supervised child processes so settings are built
+  after the resolved environment is installed, signals are forwarded, and
+  descendant processes are cleaned up on exit across supported platforms.
 - Kept version, help, and Dockerfile rendering independent of runtime settings
   validation.
+- Fell back to an ASCII CLI banner when a legacy Windows console cannot encode
+  the Unicode banner.
 
 ### Upgrade notes
 
+- Redis workers now execute up to `10` jobs concurrently by default. Set
+  `WORKER_CONCURRENT_JOBS=1` to retain the previous serial behavior.
+- Clients must not send both non-empty `config.configurable` and `context` in
+  one assistant or run request; such requests now return HTTP 400. Prefer
+  `context` for new integrations.
 - Dotenv values no longer interpolate from config mappings or other dotenv
   files. Put dependent bindings in one physical file or pass the final literal
   value.
 - Malformed dotenv syntax now exits with status 2 instead of warning and
   continuing with a partial runtime configuration.
+- Dependency resolution now requires SQLAlchemy 2.0.12 or newer, LangGraph
+  1.0.6 or newer, LangChain Core 1.2.5 or newer, and MCP 1.27.1 through the 1.x
+  series. `python-dotenv` 1.0 through 1.2 is now a direct dependency.
 
 ## 0.2.1 - 2026-07-14
 

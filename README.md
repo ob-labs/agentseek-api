@@ -185,7 +185,7 @@ When the server starts it prints the banner and local URLs:
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-     AgentSeek v0.2.1
+     AgentSeek v0.2.2
 
 - 🚀 API: http://localhost:2024
 - 📚 Docs: http://localhost:2024/docs
