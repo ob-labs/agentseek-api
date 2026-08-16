@@ -4,6 +4,21 @@ Notable changes to AgentSeek API are documented in this file.
 
 ## Unreleased
 
+## 0.2.3 - 2026-08-17
+
+### Fixed
+
+- When `METADATA_DB_BACKEND=sqlite`, store completed-run snapshots in the
+  configured SQLite metadata database instead of constructing an OceanBase
+  saver and attempting a MySQL-family connection.
+
+### Upgrade notes
+
+- No manual schema or configuration migration is required. The
+  `agentseek_checkpoints` table is created idempotently at startup.
+- This fix covers completed-run snapshots only. LangGraph checkpoint state
+  remains in memory when the metadata backend is SQLite.
+
 ## 0.2.2 - 2026-08-16
 
 ### Highlights
