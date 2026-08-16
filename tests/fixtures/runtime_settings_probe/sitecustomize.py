@@ -22,9 +22,12 @@ if validation_child_pid_path:
 termination_probe_path = os.environ.get("AGENTSEEK_TERMINATION_PROBE_PATH")
 probe_path = os.environ.get("AGENTSEEK_SETTINGS_PROBE_PATH")
 if termination_probe_path:
+
     def _block_runtime_role(awaitable) -> int:
         awaitable.close()
-        termination_fixture = Path(__file__).resolve().parents[1] / "termination_tree.py"
+        termination_fixture = (
+            Path(__file__).resolve().parents[1] / "termination_tree.py"
+        )
         grandchild = subprocess.Popen(
             [sys.executable, str(termination_fixture), "--grandchild"]
         )

@@ -303,8 +303,7 @@ def test_each_dotenv_file_uses_an_independent_interpolation_context(
 
     config_env = tmp_path / "config.env"
     config_env.write_text(
-        "ORIGIN=https://config.example\n"
-        "CONFIG_RESULT=${ORIGIN}/v1\n",
+        "ORIGIN=https://config.example\nCONFIG_RESULT=${ORIGIN}/v1\n",
         encoding="utf-8",
     )
     config_path = _write_config(tmp_path, env="./config.env")
@@ -359,8 +358,7 @@ def test_inherited_override_does_not_recompute_earlier_file_value(
 
     config_env = tmp_path / "config.env"
     config_env.write_text(
-        "ORIGIN=https://config.example\n"
-        "BASE_URL=${ORIGIN}/v1\n",
+        "ORIGIN=https://config.example\nBASE_URL=${ORIGIN}/v1\n",
         encoding="utf-8",
     )
     config_path = _write_config(tmp_path, env="./config.env")
@@ -519,16 +517,12 @@ def test_shared_lifecycle_dotenv_mutation_cannot_replace_inherited_present_value
 
     shared_env = tmp_path / ".env"
     shared_env.write_text(
-        "PRESENT=initial\n"
-        "EMPTY=\n"
-        "CHILD_ONLY=initial\n",
+        "PRESENT=initial\nEMPTY=\nCHILD_ONLY=initial\n",
         encoding="utf-8",
     )
     snapshot = {"PRESENT": "initial", "EMPTY": ""}
     shared_env.write_text(
-        "PRESENT=mutated\n"
-        "EMPTY=mutated\n"
-        "CHILD_ONLY=added-later\n",
+        "PRESENT=mutated\nEMPTY=mutated\nCHILD_ONLY=added-later\n",
         encoding="utf-8",
     )
     config_path = _write_config(tmp_path, env="./.env")
