@@ -15,7 +15,14 @@ from pathlib import Path
 from typing import TextIO
 
 from agentseek_api import __version__
-from agentseek_api.settings import DEFAULT_API_PORT
+from agentseek_api.constants import DEFAULT_API_PORT
+from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
+from agentseek_api.process_supervisor import (
+    ForegroundChildSupervisor,
+    ForwardingSignalGuard,
+    ProcessSupervisionError,
+    _ForwardedSignal,
+)
 
 DEFAULT_CLI_NAME = "agentseek-api"
 
@@ -28,6 +35,15 @@ AGENTSEEK_ONBOARD_BANNER = (
     "╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴\n"
     "\n"
     "     AgentSeek v{version}\n"
+)
+
+AGENTSEEK_ONBOARD_BANNER_ASCII = (
+    "\n"
+    "        Welcome to\n"
+    "\n"
+    "========================\n"
+    "     AgentSeek v{version}\n"
+    "========================\n"
 )
 
 __all__ = [
@@ -79,6 +95,31 @@ class DevServerUrls:
     api_url: str
     docs_url: str
     studio_url: str
+
+
+def _write_banner(
+    stdout: TextIO,
+    *,
+    unicode_text: str,
+    ascii_text: str,
+) -> None:
+    text = unicode_text
+    encoding = getattr(stdout, "encoding", None)
+    if isinstance(encoding, str) and encoding:
+        try:
+            unicode_text.encode(encoding, errors="strict")
+        except (UnicodeEncodeError, LookupError):
+            text = ascii_text.encode("ascii", errors="replace").decode("ascii")
+    stdout.write(text)
+    stdout.flush()
+
+
+def _write_onboard_banner(stdout: TextIO) -> None:
+    _write_banner(
+        stdout,
+        unicode_text=AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n",
+        ascii_text=AGENTSEEK_ONBOARD_BANNER_ASCII.format(version=__version__) + "\n",
+    )
 
 
 def _resolve_path(path_text: str, *, cwd: Path) -> Path:
@@ -146,19 +187,24 @@ def discover_config_path(*, explicit_path: str | None, cwd: Path) -> Path | None
     return None
 
 
-def _parse_env_file(env_file: Path) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for line_number, raw_line in enumerate(env_file.read_text(encoding="utf-8").splitlines(), start=1):
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("export "):
-            line = line[len("export ") :].strip()
-        if "=" not in line:
-            raise CliError(f"Env file '{env_file}' has an invalid line {line_number}: '{raw_line}'.")
-        key, value = line.split("=", maxsplit=1)
-        values[key.strip()] = value.strip().strip("\"'")
-    return values
+def _apply_env_layer(
+    env: dict[str, str],
+    layer: dict[str, str | None],
+) -> None:
+    for key, value in layer.items():
+        if value is not None:
+            env[key] = value
+
+
+def _read_env_layer(
+    path: Path,
+    *,
+    inherited: dict[str, str],
+) -> dict[str, str | None]:
+    try:
+        return parse_dotenv_file(path, ambient=inherited)
+    except DotenvFileError as exc:
+        raise CliError(str(exc)) from exc
 
 
 def _resolve_path_from_config(path_text: str, *, config_path: Path) -> Path:
@@ -277,42 +323,99 @@ def build_runtime_env(
     cwd: Path,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    env = dict(os.environ if base_env is None else base_env)
-    config: CliConfig | None = _load_cli_config(config_path) if config_path is not None else None
+    inherited = dict(os.environ if base_env is None else base_env)
+    env: dict[str, str] = {}
+    config = _load_cli_config(config_path) if config_path is not None else None
+
     if config is not None:
         if config.env_file is not None:
-            env.update(_parse_env_file(config.env_file))
+            _apply_env_layer(
+                env,
+                _read_env_layer(config.env_file, inherited=inherited),
+            )
         env.update(config.env_mapping)
         if config.auth_path:
             env["AUTH_MODULE_PATH"] = config.auth_path
+
     if env_file:
         resolved_env_file = _resolve_path(env_file, cwd=cwd)
-        if not resolved_env_file.exists():
-            raise CliError(f"Env file '{resolved_env_file}' does not exist.")
-        env.update(_parse_env_file(resolved_env_file))
+        _apply_env_layer(
+            env,
+            _read_env_layer(resolved_env_file, inherited=inherited),
+        )
+
+    env.update(inherited)
+    env.pop("AGENTSEEK_GRAPHS", None)
     if config_path is not None:
         env["AGENTSEEK_GRAPHS"] = str(config_path)
     return env
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
-    command = [sys.executable, "-m", "uvicorn", "agentseek_api.main:app", "--host", host, "--port", str(port)]
+    command = [
+        sys.executable,
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
     if reload_enabled:
         command.append("--reload")
     return command
 
 
 def build_worker_command() -> list[str]:
-    return [sys.executable, "-m", "agentseek_api.worker"]
+    return [
+        sys.executable,
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "worker",
+    ]
 
 
 def build_scheduler_command() -> list[str]:
-    return [sys.executable, "-m", "agentseek_api.scheduler"]
+    return [
+        sys.executable,
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "scheduler",
+    ]
 
 
 def _default_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
-    completed = subprocess.run(command, env=env, cwd=cwd, check=False)
-    return completed.returncode
+    try:
+        with ForwardingSignalGuard() as signals:
+            child = ForegroundChildSupervisor.start(command, env=env, cwd=cwd)
+            try:
+                signals.attach(child)
+                exit_code = child.wait()
+                child.close_remaining_tree(timeout=5.0)
+                return exit_code
+            except KeyboardInterrupt:
+                signals.begin_cleanup()
+                child.forward_and_reap(signal.SIGINT, timeout=5.0)
+                return 130
+            except _ForwardedSignal as exc:
+                signals.begin_cleanup()
+                child.forward_and_reap(exc.signum, timeout=5.0)
+                return 128 + exc.signum
+            except BaseException:
+                signals.begin_cleanup()
+                child.terminate_and_reap(timeout=5.0)
+                raise
+            finally:
+                signals.begin_cleanup()
+                try:
+                    child.ensure_closed(timeout=5.0)
+                finally:
+                    child.close()
+    except ProcessSupervisionError as exc:
+        raise CliError("Could not supervise the runtime child safely.") from exc
 
 
 def _format_http_host(host: str) -> str:
@@ -343,6 +446,15 @@ def _render_dev_ready_banner(urls: DevServerUrls) -> str:
         f"- \U0001f680 API: {urls.api_url}\n"
         f"- \U0001f4da Docs: {urls.docs_url}\n"
         f"- \U0001f3a8 Studio UI: {urls.studio_url}\n"
+        "\n\n"
+    )
+
+
+def _render_ascii_dev_ready_banner(urls: DevServerUrls) -> str:
+    return (
+        f"- API: {urls.api_url}\n"
+        f"- Docs: {urls.docs_url}\n"
+        f"- Studio UI: {urls.studio_url}\n"
         "\n\n"
     )
 
@@ -403,8 +515,11 @@ def _run_managed_dev_server(
             continue
 
     try:
-        stdout.write(_render_dev_ready_banner(urls))
-        stdout.flush()
+        _write_banner(
+            stdout,
+            unicode_text=_render_dev_ready_banner(urls),
+            ascii_text=_render_ascii_dev_ready_banner(urls),
+        )
         wait_for_ready(urls.api_url, process=process, sleep=sleep)
         if open_browser:
             if browser_opener is None:
@@ -413,6 +528,10 @@ def _run_managed_dev_server(
                 browser_opener = webbrowser.open
             browser_opener(urls.studio_url)
         return process.wait()
+    except CliError:
+        if process.poll() is not None:
+            return process.returncode
+        raise
     except KeyboardInterrupt:
         if process.poll() is None:
             process.terminate()
@@ -446,8 +565,7 @@ def _execute_dev_command(
     cwd: Path,
     stdout: TextIO,
 ) -> int:
-    stdout.write(AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n")
-    stdout.flush()
+    _write_onboard_banner(stdout)
     args.reload = not args.no_reload
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
@@ -473,40 +591,12 @@ def _execute_dev_command(
 def _execute_worker_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    if runner is _default_runner:
-        from agentseek_api import worker as worker_module
-
-        previous_env = os.environ.copy()
-        previous_cwd = Path.cwd()
-        try:
-            os.environ.clear()
-            os.environ.update(env)
-            os.chdir(cwd)
-            return worker_module.main()
-        finally:
-            os.chdir(previous_cwd)
-            os.environ.clear()
-            os.environ.update(previous_env)
     return runner(build_worker_command(), env=env, cwd=str(cwd))
 
 
 def _execute_scheduler_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    if runner is _default_runner:
-        from agentseek_api import scheduler as scheduler_module
-
-        previous_env = os.environ.copy()
-        previous_cwd = Path.cwd()
-        try:
-            os.environ.clear()
-            os.environ.update(env)
-            os.chdir(cwd)
-            return scheduler_module.main()
-        finally:
-            os.chdir(previous_cwd)
-            os.environ.clear()
-            os.environ.update(previous_env)
     return runner(build_scheduler_command(), env=env, cwd=str(cwd))
 
 
@@ -978,8 +1068,7 @@ def run_namespace(
             )
             return _execute_dev_command(args, runner=run, cwd=workdir, stdout=out)
         if command == "serve":
-            out.write(AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n")
-            out.flush()
+            _write_onboard_banner(out)
             args.reload = False
             return _execute_runtime_command(args, runner=run, cwd=workdir)
         if command == "worker":

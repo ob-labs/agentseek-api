@@ -1,6 +1,6 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-DEFAULT_API_PORT = 2024
+from agentseek_api.constants import DEFAULT_API_PORT
 
 
 class Settings(BaseSettings):

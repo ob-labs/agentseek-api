@@ -3,13 +3,22 @@ from __future__ import annotations
 import argparse
 import importlib
 import io
+import signal
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
+from agentseek_api import __version__
 from agentseek_api.services.langgraph_service import LangGraphService
+
+
+def test_python_dotenv_dependency_is_available() -> None:
+    from dotenv import dotenv_values
+
+    assert callable(dotenv_values)
 
 
 @dataclass
@@ -29,6 +38,291 @@ class _RunCapture:
         if command[:3] == ["docker", "container", "inspect"]:
             return 1
         return 0
+
+
+class _EncodingTextStream:
+    def __init__(self, encoding: str) -> None:
+        self.encoding = encoding
+        self.writes: list[str] = []
+        self.flush_count = 0
+
+    def write(self, value: str) -> int:
+        value.encode(self.encoding, errors="strict")
+        self.writes.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _RecordingTextStream:
+    def __init__(self, encoding: str) -> None:
+        self.encoding = encoding
+        self.writes: list[str] = []
+        self.flush_count = 0
+
+    def write(self, value: str) -> int:
+        self.writes.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _PartialWriteFailureStream:
+    encoding = "utf-8"
+
+    def __init__(self) -> None:
+        self.write_calls = 0
+        self.value = ""
+        self.flush_count = 0
+
+    def write(self, value: str) -> int:
+        self.write_calls += 1
+        self.value += value[:8]
+        raise UnicodeEncodeError("utf-8", value, 8, 9, "write-canary")
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _FakeForegroundSupervisor:
+    def __init__(
+        self,
+        *,
+        wait_result: int | BaseException,
+        escalates: bool = False,
+    ) -> None:
+        self.wait_result = wait_result
+        self.escalates = escalates
+        self.terminated = False
+        self.killed = False
+        self.wait_calls = 0
+        self.close_remaining_tree_calls: list[float] = []
+        self.forward_and_reap_calls: list[tuple[int, float]] = []
+        self.terminate_and_reap_calls: list[float] = []
+        self.ensure_closed_calls: list[float] = []
+        self.close_calls = 0
+
+    def wait(self) -> int:
+        self.wait_calls += 1
+        if isinstance(self.wait_result, BaseException):
+            raise self.wait_result
+        return self.wait_result
+
+    def close_remaining_tree(self, *, timeout: float) -> None:
+        self.close_remaining_tree_calls.append(timeout)
+
+    def forward_signal(self, signum: int) -> None:
+        self.forward_and_reap_calls.append((signum, 0.0))
+
+    def forward_and_reap(self, signum: int, *, timeout: float) -> None:
+        self.forward_and_reap_calls.append((signum, timeout))
+        self.terminated = True
+        self.killed = self.escalates
+
+    def terminate_and_reap(self, *, timeout: float) -> None:
+        self.terminate_and_reap_calls.append(timeout)
+        self.terminated = True
+
+    def ensure_closed(self, *, timeout: float) -> None:
+        self.ensure_closed_calls.append(timeout)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def test_default_runner_propagates_child_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    child = _FakeForegroundSupervisor(wait_result=23)
+    observed: dict[str, object] = {}
+
+    def fake_start(command, *, env, cwd):
+        observed.update(command=command, env=env, cwd=cwd)
+        return child
+
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        fake_start,
+    )
+
+    exit_code = cli_module._default_runner(
+        ["python", "-m", "agentseek_api.worker"],
+        env={"TOKEN": "value"},
+        cwd="/runtime",
+    )
+
+    assert exit_code == 23
+    assert child.terminated is False
+    assert child.close_remaining_tree_calls == [5.0]
+    assert child.ensure_closed_calls == [5.0]
+    assert child.close_calls == 1
+    assert observed == {
+        "command": ["python", "-m", "agentseek_api.worker"],
+        "env": {"TOKEN": "value"},
+        "cwd": "/runtime",
+    }
+
+
+def test_default_runner_terminates_and_reaps_child_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    child = _FakeForegroundSupervisor(wait_result=KeyboardInterrupt())
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        lambda command, *, env, cwd: child,
+    )
+
+    exit_code = cli_module._default_runner(
+        ["python", "-m", "agentseek_api.scheduler"],
+        env={},
+        cwd="/runtime",
+    )
+
+    assert exit_code == 130
+    assert child.terminated is True
+    assert child.killed is False
+    assert child.wait_calls == 1
+    assert child.forward_and_reap_calls == [(signal.SIGINT, 5.0)]
+    assert child.ensure_closed_calls == [5.0]
+    assert child.close_calls == 1
+
+
+def test_default_runner_delegates_bounded_escalation_for_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    child = _FakeForegroundSupervisor(
+        wait_result=KeyboardInterrupt(),
+        escalates=True,
+    )
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        lambda command, *, env, cwd: child,
+    )
+
+    assert cli_module._default_runner(["child"], env={}, cwd=None) == 130
+    assert child.terminated is True
+    assert child.killed is True
+    assert child.forward_and_reap_calls == [(signal.SIGINT, 5.0)]
+    assert child.ensure_closed_calls == [5.0]
+    assert child.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ["guard-entry", "child-start", "guard-attach", "native-cleanup"],
+)
+def test_public_worker_redacts_process_supervision_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    from agentseek_api import cli as cli_module
+    from agentseek_api.process_supervisor import ProcessSupervisionError
+
+    setup_canary = "setup-canary"
+    command_canary = "command-canary"
+    environment_canary = "environment-canary"
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},'
+        f'"env":{{"SUPERVISION_SECRET":"{environment_canary}"}}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SUPERVISION_SECRET", raising=False)
+
+    child = _FakeForegroundSupervisor(wait_result=0)
+    child.live = True
+
+    def fail_native_cleanup(*, timeout: float) -> None:
+        raise ProcessSupervisionError(setup_canary)
+
+    if failure_point == "native-cleanup":
+        child.close_remaining_tree = fail_native_cleanup  # type: ignore[method-assign]
+
+    original_terminate_and_reap = child.terminate_and_reap
+
+    def terminate_and_reap(*, timeout: float) -> None:
+        original_terminate_and_reap(timeout=timeout)
+        child.live = False
+
+    child.terminate_and_reap = terminate_and_reap  # type: ignore[method-assign]
+
+    original_close = child.close
+
+    def close() -> None:
+        original_close()
+        child.live = False
+
+    child.close = close  # type: ignore[method-assign]
+
+    class _FakeGuard:
+        def __enter__(self):
+            if failure_point == "guard-entry":
+                raise ProcessSupervisionError(setup_canary)
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+        def attach(self, attached_child) -> None:
+            assert attached_child is child
+            if failure_point == "guard-attach":
+                raise ProcessSupervisionError(setup_canary)
+
+        def begin_cleanup(self) -> None:
+            return None
+
+    def start(command, *, env, cwd):
+        assert command == [command_canary]
+        assert env["SUPERVISION_SECRET"] == environment_canary
+        assert cwd == str(tmp_path)
+        if failure_point == "child-start":
+            raise ProcessSupervisionError(setup_canary)
+        return child
+
+    monkeypatch.setattr(cli_module, "ForwardingSignalGuard", _FakeGuard)
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        start,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_worker_command",
+        lambda: [command_canary],
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = cli_module.main(
+        ["worker", "--config", str(config_path)],
+        cwd=tmp_path,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    combined_output = stdout.getvalue() + stderr.getvalue()
+    assert exit_code == 2
+    assert stderr.getvalue() == "Could not supervise the runtime child safely.\n"
+    assert "Traceback" not in combined_output
+    assert setup_canary not in combined_output
+    assert command_canary not in combined_output
+    assert environment_canary not in combined_output
+    if failure_point in {"guard-attach", "native-cleanup"}:
+        assert child.live is False
+        assert child.ensure_closed_calls == [5.0]
+        assert child.close_calls == 1
 
 
 def _docker_env_from_run_command(command: list[str]) -> dict[str, str]:
@@ -81,6 +375,137 @@ def _write_basic_manifest_config(root: Path) -> Path:
     return manifest_path
 
 
+def test_onboard_banner_preserves_unicode_for_stringio(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = io.StringIO()
+
+    exit_code = main(
+        ["serve"],
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == (
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "╔═╗┌─┐┌─┐┌┐┌┌┬┐╔═╗┌─┐┌─┐┬┌─\n"
+        "╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐\n"
+        "╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴\n"
+        "\n"
+        f"     AgentSeek v{__version__}\n"
+        "\n"
+    )
+
+
+def test_onboard_banner_uses_one_write_and_flush_for_utf8_stream(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = _EncodingTextStream("utf-8")
+
+    exit_code = main(
+        ["serve"],
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.writes == [
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "╔═╗┌─┐┌─┐┌┐┌┌┬┐╔═╗┌─┐┌─┐┬┌─\n"
+        "╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐\n"
+        "╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴\n"
+        "\n"
+        f"     AgentSeek v{__version__}\n"
+        "\n"
+    ]
+    assert stdout.flush_count == 1
+
+
+@pytest.mark.parametrize("role", ["dev", "serve"])
+def test_onboard_banner_falls_back_before_writing_to_cp1252_stream(
+    tmp_path: Path,
+    role: str,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = _EncodingTextStream("cp1252")
+    arguments = [role]
+    if role == "dev":
+        arguments.append("--no-reload")
+
+    exit_code = main(
+        arguments,
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.writes == [
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "========================\n"
+        f"     AgentSeek v{__version__}\n"
+        "========================\n"
+        "\n"
+    ]
+    assert stdout.flush_count == 1
+
+
+def test_onboard_banner_uses_ascii_fallback_for_unknown_named_encoding(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = _RecordingTextStream("unknown-codec-canary")
+
+    exit_code = main(
+        ["serve"],
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.writes == [
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "========================\n"
+        f"     AgentSeek v{__version__}\n"
+        "========================\n"
+        "\n"
+    ]
+    assert stdout.flush_count == 1
+
+
+def test_onboard_banner_does_not_retry_or_flush_after_partial_write() -> None:
+    from agentseek_api import cli as cli_module
+
+    stdout = _PartialWriteFailureStream()
+
+    with pytest.raises(UnicodeEncodeError, match="write-canary"):
+        cli_module._write_onboard_banner(stdout)
+
+    assert stdout.write_calls == 1
+    assert stdout.value == "\n       "
+    assert stdout.flush_count == 0
+
+
 def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -92,7 +517,17 @@ def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) 
     exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "2024",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -106,7 +541,17 @@ def test_serve_command_falls_back_to_langgraph_json_and_runs_graph(tmp_path: Pat
     exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "3030",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -128,7 +573,17 @@ def test_serve_command_uses_agentseek_graphs_env_for_manifest_named_config(
     exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "3030",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -143,39 +598,13 @@ def test_worker_command_uses_runtime_env_and_worker_module(tmp_path: Path) -> No
 
     assert exit_code == 0
     assert capture.command is not None
-    assert capture.command[1:] == ["-m", "agentseek_api.worker"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "worker",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
-
-
-def test_worker_command_runs_in_process_with_default_runner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agentseek_api import cli as cli_module
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    observed: dict[str, object] = {}
-    previous_cwd = Path.cwd()
-    sentinel_key = "AGENTSEEK_WORKER_TEST_SENTINEL"
-
-    def fake_worker_main() -> int:
-        observed["graphs"] = cli_module.os.environ["AGENTSEEK_GRAPHS"]
-        observed["cwd"] = str(Path.cwd())
-        return 7
-
-    monkeypatch.setattr("agentseek_api.worker.main", fake_worker_main)
-    monkeypatch.setenv(sentinel_key, "before")
-
-    exit_code = cli_module.main(["worker", "--config", str(config_path)], cwd=tmp_path)
-
-    assert exit_code == 7
-    assert observed == {
-        "graphs": str(config_path.resolve()),
-        "cwd": str(tmp_path.resolve()),
-    }
-    assert Path.cwd() == previous_cwd
-    assert cli_module.os.environ.get(sentinel_key) == "before"
 
 
 def test_scheduler_command_uses_runtime_env_and_scheduler_module(tmp_path: Path) -> None:
@@ -188,44 +617,36 @@ def test_scheduler_command_uses_runtime_env_and_scheduler_module(tmp_path: Path)
 
     assert exit_code == 0
     assert capture.command is not None
-    assert capture.command[1:] == ["-m", "agentseek_api.scheduler"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "scheduler",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
-def test_scheduler_command_runs_in_process_with_default_runner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_settings_validation_formatter_omits_input_values() -> None:
+    from agentseek_api.runtime_entrypoint import (
+        _format_settings_validation_error,
+    )
+    from agentseek_api.settings import Settings
+
+    with pytest.raises(ValidationError) as captured:
+        Settings.model_validate({"PORT": "invalid-port-canary"})
+
+    message = _format_settings_validation_error(captured.value)
+
+    assert message == "Invalid runtime setting(s): PORT (int_parsing)."
+    assert "invalid-port-canary" not in message
+
+
+def test_dev_command_accepts_langgraph_cli_flags_and_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agentseek_api import cli as cli_module
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    observed: dict[str, object] = {}
-    previous_cwd = Path.cwd()
-    sentinel_key = "AGENTSEEK_SCHEDULER_TEST_SENTINEL"
-
-    def fake_scheduler_main() -> int:
-        observed["graphs"] = cli_module.os.environ["AGENTSEEK_GRAPHS"]
-        observed["cwd"] = str(Path.cwd())
-        return 11
-
-    monkeypatch.setattr("agentseek_api.scheduler.main", fake_scheduler_main)
-    monkeypatch.setenv(sentinel_key, "before")
-
-    exit_code = cli_module.main(["scheduler", "--config", str(config_path)], cwd=tmp_path)
-
-    assert exit_code == 11
-    assert observed == {
-        "graphs": str(config_path.resolve()),
-        "cwd": str(tmp_path.resolve()),
-    }
-    assert Path.cwd() == previous_cwd
-    assert cli_module.os.environ.get(sentinel_key) == "before"
-
-
-def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
+    monkeypatch.delenv("AUTH_MODULE_PATH", raising=False)
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / ".env"
     env_file.write_text("AUTH_MODULE_PATH=test.module:backend\n", encoding="utf-8")
@@ -249,15 +670,29 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(tmp_path: Path) ->
     )
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "9999"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9999",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
     assert capture.env["AUTH_MODULE_PATH"] == "test.module:backend"
 
 
-def test_dev_command_loads_config_env_mapping_and_auth_path(tmp_path: Path) -> None:
+def test_dev_command_loads_config_env_mapping_and_auth_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from agentseek_api.cli import main
 
+    for key in ("OPENAI_API_KEY", "FEATURE_FLAG", "AUTH_MODULE_PATH"):
+        monkeypatch.delenv(key, raising=False)
     package_dir = tmp_path / "chat"
     package_dir.mkdir()
     (package_dir / "__init__.py").write_text("", encoding="utf-8")
@@ -292,9 +727,13 @@ def test_dev_command_loads_config_env_mapping_and_auth_path(tmp_path: Path) -> N
     assert capture.env["AUTH_MODULE_PATH"] == f"{(tmp_path / 'auth.py').resolve()}:auth"
 
 
-def test_dev_command_merges_config_env_file_before_cli_env_file(tmp_path: Path) -> None:
+def test_dev_command_merges_config_env_file_before_cli_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from agentseek_api.cli import main
 
+    for key in ("TOKEN", "SHARED"):
+        monkeypatch.delenv(key, raising=False)
     config_path = _write_basic_langgraph_config(tmp_path)
     config_env = tmp_path / "config.env"
     config_env.write_text("TOKEN=from-config\nSHARED=config\n", encoding="utf-8")
@@ -327,6 +766,33 @@ def test_dev_command_merges_config_env_file_before_cli_env_file(tmp_path: Path) 
     assert capture.env["SHARED"] == "override"
 
 
+def test_dev_command_preserves_dotenv_default_and_bare_variable_syntax(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    monkeypatch.delenv("API_ORIGIN", raising=False)
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "defaults.env"
+    env_file.write_text(
+        "OPENAI_BASE_URL=${API_ORIGIN:-https://default.example.test}/v1\n"
+        "BARE_REFERENCE=$API_ORIGIN\n",
+        encoding="utf-8",
+    )
+    capture = _RunCapture()
+
+    exit_code = main(
+        ["dev", "--config", str(config_path), "--env-file", str(env_file), "--no-reload"],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.env is not None
+    assert capture.env["OPENAI_BASE_URL"] == "https://default.example.test/v1"
+    assert capture.env["BARE_REFERENCE"] == "$API_ORIGIN"
+
+
 def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None:
     from agentseek_api.cli import main
 
@@ -340,10 +806,14 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
     assert "Use 'langgraph dev' for mocked or tunneled local workflows." in stderr.getvalue()
 
 
-def test_dev_command_marks_runtime_as_local_dev_for_studio_auth(tmp_path: Path) -> None:
+def test_dev_command_forces_local_studio_auth_after_inherited_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("STUDIO_AUTH_LOCAL_DEV", "false")
     capture = _RunCapture()
 
     exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
@@ -351,6 +821,29 @@ def test_dev_command_marks_runtime_as_local_dev_for_studio_auth(tmp_path: Path) 
     assert exit_code == 0
     assert capture.env is not None
     assert capture.env["STUDIO_AUTH_LOCAL_DEV"] == "true"
+
+
+def test_serve_port_flag_does_not_rewrite_inherited_port_env(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("PORT", "7777")
+    capture = _RunCapture()
+
+    exit_code = main(
+        ["serve", "--port", "3030"],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.command is not None
+    assert capture.command[-2:] == ["--port", "3030"]
+    assert capture.env is not None
+    assert capture.env["PORT"] == "7777"
 
 
 def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
@@ -414,6 +907,60 @@ def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) 
     assert "Docs: http://localhost:2024/docs" in output
     assert "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024" in output
     assert opened == ["https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"]
+
+
+def test_managed_dev_ascii_fallback_normalizes_non_ascii_urls_before_write(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.wait_calls = 0
+            self.terminate_calls = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            self.returncode = 23
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.returncode = -1
+
+    process = FakeProcess()
+    stdout = _EncodingTextStream("cp1252")
+
+    exit_code = cli_module._run_managed_dev_server(
+        command=["uvicorn", "agentseek_api.main:app"],
+        env={},
+        cwd=tmp_path,
+        urls=cli_module._resolve_dev_urls(
+            host="例子",
+            port=2024,
+            studio_url="https://例子.test",
+        ),
+        stdout=stdout,
+        process_factory=lambda command, *, env, cwd: process,
+        wait_for_ready=lambda *_args, **_kwargs: None,
+        open_browser=False,
+        sleep=lambda _seconds: None,
+    )
+
+    assert exit_code == 23
+    assert process.wait_calls == 1
+    assert process.terminate_calls == 0
+    assert stdout.writes == [
+        "- API: http://??:2024\n"
+        "- Docs: http://??:2024/docs\n"
+        "- Studio UI: https://??.test/studio/?baseUrl=http://??:2024\n"
+        "\n\n"
+    ]
+    assert stdout.flush_count == 1
 
 
 def test_run_managed_dev_server_honors_no_browser(tmp_path: Path) -> None:
@@ -556,7 +1103,17 @@ def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
     exit_code = cli_module.run_namespace(parsed, runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "3030",
+    ]
 
 
 def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: Path) -> None:
@@ -836,31 +1393,81 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Pa
     assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]' in generated
 
 
-def test_build_runtime_env_rejects_invalid_env_lines(tmp_path: Path) -> None:
-    from agentseek_api.cli import build_runtime_env
-
-    env_file = tmp_path / ".env"
-    env_file.write_text("BROKEN_LINE\n", encoding="utf-8")
-
-    with pytest.raises(RuntimeError, match="invalid line 1"):
-        build_runtime_env(config_path=None, env_file=str(env_file), cwd=tmp_path, base_env={})
-
-
 def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
     from agentseek_api.cli import build_runtime_env
 
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / ".env"
     env_file.write_text(
-        "# comment\nexport TOKEN='quoted-value'\nPLAIN=value\n",
+        '# comment\nexport TOKEN="quoted # value\nnext"\nPLAIN=value # inline comment\n',
         encoding="utf-8",
     )
 
     env = build_runtime_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={})
 
-    assert env["TOKEN"] == "quoted-value"
+    assert env["TOKEN"] == "quoted # value\nnext"
     assert env["PLAIN"] == "value"
     assert env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
+
+
+def test_build_runtime_env_ignores_dotenv_entries_without_values(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / ".env"
+    env_file.write_text("MALFORMED_LINE\nTOKEN=present\n", encoding="utf-8")
+
+    env = build_runtime_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={})
+
+    assert "MALFORMED_LINE" not in env
+    assert env["TOKEN"] == "present"
+
+
+def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    config_env = tmp_path / "config.env"
+    config_env.write_text("TOKEN=from-config\n", encoding="utf-8")
+    config_path.write_text(
+        """
+{
+  "graphs": {"chat": "chat.graph:graph"},
+  "env": "./config.env"
+}
+""".strip(),
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "override.env"
+    cli_env.write_text("TOKEN=from-cli-file\n", encoding="utf-8")
+
+    env = build_runtime_env(
+        config_path=config_path,
+        env_file=str(cli_env),
+        cwd=tmp_path,
+        base_env={"TOKEN": "from-shell"},
+    )
+
+    assert env["TOKEN"] == "from-shell"
+
+
+def test_higher_precedence_valueless_binding_keeps_lower_export(tmp_path: Path) -> None:
+    from agentseek_api.cli import build_runtime_env
+
+    config_env = tmp_path / "config.env"
+    config_env.write_text("TOKEN=from-config\n", encoding="utf-8")
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"env":"./config.env"}',
+        encoding="utf-8",
+    )
+    cli_env = tmp_path / "cli.env"
+    cli_env.write_text("TOKEN\nRESULT=${TOKEN:-fallback}\n", encoding="utf-8")
+
+    env = build_runtime_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path, base_env={})
+
+    assert env["TOKEN"] == "from-config"
+    assert env["RESULT"] == ""
 
 
 def test_build_runtime_env_rejects_invalid_config_env_shape(tmp_path: Path) -> None:
@@ -1071,7 +1678,10 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / "docker.env"
     env_file.write_text(
-        "METADATA_DB_URL=sqlite+aiosqlite:////tmp/agentseek.db\nOCEANBASE_HOST=host.docker.internal\n",
+        "METADATA_DB_URL=sqlite+aiosqlite:////tmp/agentseek.db\n"
+        "OCEANBASE_HOST=host.docker.internal\n"
+        "API_ORIGIN=https://api.example.test\n"
+        "OPENAI_BASE_URL=${API_ORIGIN}/v1\n",
         encoding="utf-8",
     )
     capture = _RunCapture()
@@ -1112,6 +1722,7 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["METADATA_DB_URL"] == "sqlite+aiosqlite:////tmp/agentseek.db"
     assert container_env["OCEANBASE_HOST"] == "host.docker.internal"
+    assert container_env["OPENAI_BASE_URL"] == "https://api.example.test/v1"
 
 
 def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
@@ -1336,8 +1947,6 @@ def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatc
     assert capture.calls is not None
     container_env = _docker_env_from_run_command(capture.calls[1])
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
-
-
 
 
 def test_up_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:
