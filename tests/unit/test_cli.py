@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from agentseek_api.services.langgraph_service import LangGraphService
 from scripts.dotenv_conformance import (
@@ -103,7 +104,17 @@ def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) 
     exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "2024",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -117,7 +128,17 @@ def test_serve_command_falls_back_to_langgraph_json_and_runs_graph(tmp_path: Pat
     exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "3030",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -139,7 +160,17 @@ def test_serve_command_uses_agentseek_graphs_env_for_manifest_named_config(
     exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "3030",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
@@ -154,39 +185,13 @@ def test_worker_command_uses_runtime_env_and_worker_module(tmp_path: Path) -> No
 
     assert exit_code == 0
     assert capture.command is not None
-    assert capture.command[1:] == ["-m", "agentseek_api.worker"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "worker",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
-
-
-def test_worker_command_runs_in_process_with_default_runner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agentseek_api import cli as cli_module
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    observed: dict[str, object] = {}
-    previous_cwd = Path.cwd()
-    sentinel_key = "AGENTSEEK_WORKER_TEST_SENTINEL"
-
-    def fake_worker_main() -> int:
-        observed["graphs"] = cli_module.os.environ["AGENTSEEK_GRAPHS"]
-        observed["cwd"] = str(Path.cwd())
-        return 7
-
-    monkeypatch.setattr("agentseek_api.worker.main", fake_worker_main)
-    monkeypatch.setenv(sentinel_key, "before")
-
-    exit_code = cli_module.main(["worker", "--config", str(config_path)], cwd=tmp_path)
-
-    assert exit_code == 7
-    assert observed == {
-        "graphs": str(config_path.resolve()),
-        "cwd": str(tmp_path.resolve()),
-    }
-    assert Path.cwd() == previous_cwd
-    assert cli_module.os.environ.get(sentinel_key) == "before"
 
 
 def test_scheduler_command_uses_runtime_env_and_scheduler_module(tmp_path: Path) -> None:
@@ -199,39 +204,28 @@ def test_scheduler_command_uses_runtime_env_and_scheduler_module(tmp_path: Path)
 
     assert exit_code == 0
     assert capture.command is not None
-    assert capture.command[1:] == ["-m", "agentseek_api.scheduler"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "scheduler",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
-def test_scheduler_command_runs_in_process_with_default_runner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agentseek_api import cli as cli_module
+def test_settings_validation_formatter_omits_input_values() -> None:
+    from agentseek_api.runtime_entrypoint import (
+        _format_settings_validation_error,
+    )
+    from agentseek_api.settings import Settings
 
-    config_path = _write_basic_langgraph_config(tmp_path)
-    observed: dict[str, object] = {}
-    previous_cwd = Path.cwd()
-    sentinel_key = "AGENTSEEK_SCHEDULER_TEST_SENTINEL"
+    with pytest.raises(ValidationError) as captured:
+        Settings.model_validate({"PORT": "invalid-port-canary"})
 
-    def fake_scheduler_main() -> int:
-        observed["graphs"] = cli_module.os.environ["AGENTSEEK_GRAPHS"]
-        observed["cwd"] = str(Path.cwd())
-        return 11
+    message = _format_settings_validation_error(captured.value)
 
-    monkeypatch.setattr("agentseek_api.scheduler.main", fake_scheduler_main)
-    monkeypatch.setenv(sentinel_key, "before")
-
-    exit_code = cli_module.main(["scheduler", "--config", str(config_path)], cwd=tmp_path)
-
-    assert exit_code == 11
-    assert observed == {
-        "graphs": str(config_path.resolve()),
-        "cwd": str(tmp_path.resolve()),
-    }
-    assert Path.cwd() == previous_cwd
-    assert cli_module.os.environ.get(sentinel_key) == "before"
+    assert message == "Invalid runtime setting(s): PORT (int_parsing)."
+    assert "invalid-port-canary" not in message
 
 
 def test_dev_command_accepts_langgraph_cli_flags_and_env_file(
@@ -263,7 +257,17 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(
     )
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "9999"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "9999",
+    ]
     assert capture.env is not None
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
     assert capture.env["AUTH_MODULE_PATH"] == "test.module:backend"
@@ -632,7 +636,17 @@ def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
     exit_code = cli_module.run_namespace(parsed, runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
-    assert capture.command[2:] == ["uvicorn", "agentseek_api.main:app", "--host", "0.0.0.0", "--port", "3030"]
+    assert capture.command[1:] == [
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "3030",
+    ]
 
 
 def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: Path) -> None:

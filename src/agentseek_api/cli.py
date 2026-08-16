@@ -312,18 +312,39 @@ def build_runtime_env(
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
-    command = [sys.executable, "-m", "uvicorn", "agentseek_api.main:app", "--host", host, "--port", str(port)]
+    command = [
+        sys.executable,
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "uvicorn",
+        "--",
+        "agentseek_api.main:app",
+        "--host",
+        host,
+        "--port",
+        str(port),
+    ]
     if reload_enabled:
         command.append("--reload")
     return command
 
 
 def build_worker_command() -> list[str]:
-    return [sys.executable, "-m", "agentseek_api.worker"]
+    return [
+        sys.executable,
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "worker",
+    ]
 
 
 def build_scheduler_command() -> list[str]:
-    return [sys.executable, "-m", "agentseek_api.scheduler"]
+    return [
+        sys.executable,
+        "-m",
+        "agentseek_api.runtime_entrypoint",
+        "scheduler",
+    ]
 
 
 def _default_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
@@ -429,6 +450,10 @@ def _run_managed_dev_server(
                 browser_opener = webbrowser.open
             browser_opener(urls.studio_url)
         return process.wait()
+    except CliError:
+        if process.poll() is not None:
+            return process.returncode
+        raise
     except KeyboardInterrupt:
         if process.poll() is None:
             process.terminate()
@@ -489,40 +514,12 @@ def _execute_dev_command(
 def _execute_worker_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    if runner is _default_runner:
-        from agentseek_api import worker as worker_module
-
-        previous_env = os.environ.copy()
-        previous_cwd = Path.cwd()
-        try:
-            os.environ.clear()
-            os.environ.update(env)
-            os.chdir(cwd)
-            return worker_module.main()
-        finally:
-            os.chdir(previous_cwd)
-            os.environ.clear()
-            os.environ.update(previous_env)
     return runner(build_worker_command(), env=env, cwd=str(cwd))
 
 
 def _execute_scheduler_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    if runner is _default_runner:
-        from agentseek_api import scheduler as scheduler_module
-
-        previous_env = os.environ.copy()
-        previous_cwd = Path.cwd()
-        try:
-            os.environ.clear()
-            os.environ.update(env)
-            os.chdir(cwd)
-            return scheduler_module.main()
-        finally:
-            os.chdir(previous_cwd)
-            os.environ.clear()
-            os.environ.update(previous_env)
     return runner(build_scheduler_command(), env=env, cwd=str(cwd))
 
 
