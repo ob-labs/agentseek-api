@@ -181,7 +181,7 @@ uv run agentseek-api dev --config ./langgraph.json
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-     AgentSeek v0.2.2
+     AgentSeek v0.2.3
 
 - 🚀 API: http://localhost:2024
 - 📚 Docs: http://localhost:2024/docs
@@ -623,7 +623,12 @@ parent api build --config ./langgraph.json -t my-api:dev
 - `METADATA_DB_BACKEND=auto` 会对驱动进行归一化：
   - PostgreSQL：`postgresql+asyncpg://...`
   - OceanBase / MySQL：`mysql+aiomysql://...`
-- Checkpoint 持久化默认使用 OceanBase / seekdb 配置
+  - SQLite：`sqlite+aiosqlite://...`
+- 完成态 run 快照默认使用 OceanBase / seekdb 配置。当
+  `METADATA_DB_BACKEND=sqlite` 时，快照会写入已配置的 SQLite 元数据
+  数据库，且不会构造 OceanBase saver。
+- SQLite 元数据路径仍使用内存中的 LangGraph checkpointer，不提供持久化的
+  LangGraph 图 checkpoint。
 - 鉴权：通过 `agentseek.json` 的 `"auth.path"` 或 `AUTH_MODULE_PATH` 环境变量配置。
   使用 `langgraph_sdk.Auth` 的 `@auth.authenticate` 与 `@auth.on` 处理器风格。
   未配置时所有请求以 default_user 放行（noop）。

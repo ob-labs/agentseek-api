@@ -185,7 +185,7 @@ When the server starts it prints the banner and local URLs:
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-     AgentSeek v0.2.2
+     AgentSeek v0.2.3
 
 - 🚀 API: http://localhost:2024
 - 📚 Docs: http://localhost:2024/docs
@@ -659,7 +659,12 @@ parent api build --config ./langgraph.json -t my-api:dev
 - `METADATA_DB_BACKEND=auto` normalizes drivers:
   - PostgreSQL: `postgresql+asyncpg://...`
   - OceanBase / MySQL: `mysql+aiomysql://...`
-- Checkpoint persistence defaults to OceanBase / seekdb settings
+  - SQLite: `sqlite+aiosqlite://...`
+- Completed-run snapshots default to OceanBase / seekdb settings. With
+  `METADATA_DB_BACKEND=sqlite`, they are stored in the configured SQLite
+  metadata database without constructing an OceanBase saver.
+- The SQLite metadata path still uses an in-memory LangGraph checkpointer; it
+  does not make LangGraph graph checkpoints durable.
 - Auth: configure via `agentseek.json` `"auth.path"` or `AUTH_MODULE_PATH` env var.
   Uses `langgraph_sdk.Auth` with `@auth.authenticate` and `@auth.on` handlers.
   If not set, all requests pass through as default_user (noop).
