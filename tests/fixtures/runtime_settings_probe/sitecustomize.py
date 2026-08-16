@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 
@@ -16,8 +19,29 @@ if validation_child_pid_path:
     )
 
 
+termination_probe_path = os.environ.get("AGENTSEEK_TERMINATION_PROBE_PATH")
 probe_path = os.environ.get("AGENTSEEK_SETTINGS_PROBE_PATH")
-if probe_path:
+if termination_probe_path:
+    def _block_runtime_role(awaitable) -> int:
+        awaitable.close()
+        termination_fixture = Path(__file__).resolve().parents[1] / "termination_tree.py"
+        grandchild = subprocess.Popen(
+            [sys.executable, str(termination_fixture), "--grandchild"]
+        )
+        Path(termination_probe_path).write_text(
+            json.dumps(
+                {
+                    "parent": os.getpid(),
+                    "grandchild": grandchild.pid,
+                }
+            ),
+            encoding="utf-8",
+        )
+        while True:
+            time.sleep(60)
+
+    asyncio.run = _block_runtime_role
+elif probe_path:
     probe_fields = tuple(
         field
         for field in os.environ["AGENTSEEK_SETTINGS_PROBE_FIELDS"].split(",")

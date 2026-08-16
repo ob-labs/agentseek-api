@@ -14,7 +14,11 @@ import pytest
 PROBE_SITE_DIR = (
     Path(__file__).resolve().parents[1] / "fixtures" / "runtime_settings_probe"
 )
+TERMINATION_TREE_FIXTURE = (
+    Path(__file__).resolve().parents[1] / "fixtures" / "termination_tree.py"
+)
 VALIDATION_CHILD_PID_PATH_ENV = "AGENTSEEK_VALIDATION_CHILD_PID_PATH"
+TERMINATION_PROBE_PATH_ENV = "AGENTSEEK_TERMINATION_PROBE_PATH"
 
 
 def _probe_pythonpath() -> str:
@@ -87,6 +91,51 @@ def _terminate_observed_pid(pid: int, *, timeout_seconds: float = 2.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError(f"Runtime validation child PID {pid} did not exit.")
+
+
+def _read_tree_pids(
+    path: Path,
+    *,
+    timeout_seconds: float = 5.0,
+) -> tuple[int, int]:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            return int(payload["parent"]), int(payload["grandchild"])
+        except (FileNotFoundError, KeyError, TypeError, ValueError):
+            time.sleep(0.01)
+    raise AssertionError("The supervised parent/grandchild PIDs were not observed.")
+
+
+def _wait_for_pids_gone(
+    pids: tuple[int, ...],
+    *,
+    timeout_seconds: float = 8.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not any(_pid_is_alive(pid) for pid in pids):
+            return
+        time.sleep(0.02)
+    live_pids = [pid for pid in pids if _pid_is_alive(pid)]
+    raise AssertionError(f"Supervised process IDs remained alive: {live_pids}")
+
+
+def _stop_test_process(process: subprocess.Popen[str]) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.communicate(timeout=3)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate(timeout=3)
+
+
+def _cleanup_recorded_pids(pids: tuple[int, ...]) -> None:
+    for pid in pids:
+        _terminate_observed_pid(pid, timeout_seconds=3.0)
 
 
 def _run_python(
@@ -446,3 +495,204 @@ def test_sequential_worker_invocations_do_not_reuse_settings_singleton(
         observed.append(observation["settings"]["WORKER_CONCURRENT_JOBS"])
 
     assert observed == [2, 7]
+
+
+def _start_supervisor_wrapper(
+    *,
+    command: list[str],
+    cwd: Path,
+) -> subprocess.Popen[str]:
+    wrapper = (
+        "import os, sys; "
+        "from agentseek_api.cli import _default_runner; "
+        "raise SystemExit(_default_runner(sys.argv[1:], "
+        "env=dict(os.environ), cwd=None))"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", wrapper, *command],
+        cwd=cwd,
+        env=dict(os.environ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
+def test_external_sigterm_forwards_and_leaves_no_runtime_child(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "termination-tree.json"
+    process = _start_supervisor_wrapper(
+        command=[
+            sys.executable,
+            str(TERMINATION_TREE_FIXTURE),
+            str(result_path),
+        ],
+        cwd=tmp_path,
+    )
+    recorded_pids: tuple[int, ...] = ()
+    try:
+        parent_pid, grandchild_pid = _read_tree_pids(result_path)
+        recorded_pids = (parent_pid, grandchild_pid)
+        if os.name == "nt":
+            process.terminate()
+        else:
+            os.kill(process.pid, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=15)
+
+        if os.name != "nt":
+            assert process.returncode == 128 + signal.SIGTERM
+        assert stdout == ""
+        assert stderr == ""
+        _wait_for_pids_gone(recorded_pids)
+    finally:
+        _stop_test_process(process)
+        _cleanup_recorded_pids(recorded_pids)
+
+
+def test_normal_child_return_reaps_remaining_grandchild(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "normal-return-tree.json"
+    sentinel_exit_code = 37
+    process = _start_supervisor_wrapper(
+        command=[
+            sys.executable,
+            str(TERMINATION_TREE_FIXTURE),
+            str(result_path),
+            "--parent-exit",
+            str(sentinel_exit_code),
+        ],
+        cwd=tmp_path,
+    )
+    recorded_pids: tuple[int, ...] = ()
+    try:
+        recorded_pids = _read_tree_pids(result_path)
+        stdout, stderr = process.communicate(timeout=15)
+
+        assert process.returncode == sentinel_exit_code
+        assert stdout == ""
+        assert stderr == ""
+        _wait_for_pids_gone(recorded_pids)
+    finally:
+        _stop_test_process(process)
+        _cleanup_recorded_pids(recorded_pids)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX signal masks only")
+def test_supervised_posix_child_starts_with_forwarded_signals_unblocked(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "startup-mask-tree.json"
+    process = _start_supervisor_wrapper(
+        command=[
+            sys.executable,
+            str(TERMINATION_TREE_FIXTURE),
+            str(result_path),
+            "--parent-exit",
+            "0",
+        ],
+        cwd=tmp_path,
+    )
+    recorded_pids: tuple[int, ...] = ()
+    try:
+        recorded_pids = _read_tree_pids(result_path)
+        observation = json.loads(result_path.read_text(encoding="utf-8"))
+        stdout, stderr = process.communicate(timeout=15)
+
+        assert process.returncode == 0
+        assert observation["blocked_signals"] == []
+        assert stdout == ""
+        assert stderr == ""
+        _wait_for_pids_gone(recorded_pids)
+    finally:
+        _stop_test_process(process)
+        _cleanup_recorded_pids(recorded_pids)
+
+
+def test_supervised_child_preserves_captured_stdout(
+    tmp_path: Path,
+) -> None:
+    result_path = tmp_path / "captured-output-tree.json"
+    output_marker = "captured-child-output"
+    process = _start_supervisor_wrapper(
+        command=[
+            sys.executable,
+            str(TERMINATION_TREE_FIXTURE),
+            str(result_path),
+            "--parent-exit",
+            "0",
+            "--output-marker",
+            output_marker,
+        ],
+        cwd=tmp_path,
+    )
+    recorded_pids: tuple[int, ...] = ()
+    try:
+        recorded_pids = _read_tree_pids(result_path)
+        stdout, stderr = process.communicate(timeout=15)
+
+        assert process.returncode == 0
+        assert stdout == f"{output_marker}\n"
+        assert stderr == ""
+        _wait_for_pids_gone(recorded_pids)
+    finally:
+        _stop_test_process(process)
+        _cleanup_recorded_pids(recorded_pids)
+
+
+@pytest.mark.parametrize("role", ["worker", "scheduler"])
+def test_public_runtime_role_sigterm_reaps_role_tree(
+    tmp_path: Path,
+    role: str,
+) -> None:
+    config_path = _write_runtime_config(tmp_path, f"{role}-termination", {})
+    result_path = tmp_path / f"{role}-termination-tree.json"
+    environment = dict(os.environ)
+    environment.update(
+        {
+            "PYTHONPATH": _probe_pythonpath(),
+            TERMINATION_PROBE_PATH_ENV: str(result_path),
+        }
+    )
+    for field in (
+        "AGENTSEEK_SETTINGS_PROBE_PATH",
+        "AGENTSEEK_SETTINGS_PROBE_FIELDS",
+        "AGENTSEEK_SETTINGS_PROBE_EXIT_CODE",
+        VALIDATION_CHILD_PID_PATH_ENV,
+    ):
+        environment.pop(field, None)
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "agentseek_api.cli",
+            role,
+            "--config",
+            str(config_path),
+        ],
+        cwd=tmp_path,
+        env=environment,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    recorded_pids: tuple[int, ...] = ()
+    try:
+        parent_pid, grandchild_pid = _read_tree_pids(result_path)
+        recorded_pids = (parent_pid, grandchild_pid)
+        assert parent_pid != process.pid
+        if os.name == "nt":
+            process.terminate()
+        else:
+            os.kill(process.pid, signal.SIGTERM)
+        stdout, stderr = process.communicate(timeout=15)
+
+        if os.name != "nt":
+            assert process.returncode == 128 + signal.SIGTERM
+        assert stdout == ""
+        assert stderr == ""
+        _wait_for_pids_gone(recorded_pids)
+    finally:
+        _stop_test_process(process)
+        _cleanup_recorded_pids(recorded_pids)

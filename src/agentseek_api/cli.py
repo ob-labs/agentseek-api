@@ -17,6 +17,12 @@ from typing import TextIO
 from agentseek_api import __version__
 from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
+from agentseek_api.process_supervisor import (
+    ForegroundChildSupervisor,
+    ForwardingSignalGuard,
+    ProcessSupervisionError,
+    _ForwardedSignal,
+)
 
 DEFAULT_CLI_NAME = "agentseek-api"
 
@@ -348,8 +354,34 @@ def build_scheduler_command() -> list[str]:
 
 
 def _default_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
-    completed = subprocess.run(command, env=env, cwd=cwd, check=False)
-    return completed.returncode
+    try:
+        with ForwardingSignalGuard() as signals:
+            child = ForegroundChildSupervisor.start(command, env=env, cwd=cwd)
+            try:
+                signals.attach(child)
+                exit_code = child.wait()
+                child.close_remaining_tree(timeout=5.0)
+                return exit_code
+            except KeyboardInterrupt:
+                signals.begin_cleanup()
+                child.forward_and_reap(signal.SIGINT, timeout=5.0)
+                return 130
+            except _ForwardedSignal as exc:
+                signals.begin_cleanup()
+                child.forward_and_reap(exc.signum, timeout=5.0)
+                return 128 + exc.signum
+            except BaseException:
+                signals.begin_cleanup()
+                child.terminate_and_reap(timeout=5.0)
+                raise
+            finally:
+                signals.begin_cleanup()
+                try:
+                    child.ensure_closed(timeout=5.0)
+                finally:
+                    child.close()
+    except ProcessSupervisionError as exc:
+        raise CliError("Could not supervise the runtime child safely.") from exc
 
 
 def _format_http_host(host: str) -> str:

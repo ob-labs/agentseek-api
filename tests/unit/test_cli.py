@@ -4,6 +4,7 @@ import argparse
 import importlib
 import io
 import os
+import signal
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,6 +42,245 @@ class _RunCapture:
         if command[:3] == ["docker", "container", "inspect"]:
             return 1
         return 0
+
+
+class _FakeForegroundSupervisor:
+    def __init__(
+        self,
+        *,
+        wait_result: int | BaseException,
+        escalates: bool = False,
+    ) -> None:
+        self.wait_result = wait_result
+        self.escalates = escalates
+        self.terminated = False
+        self.killed = False
+        self.wait_calls = 0
+        self.close_remaining_tree_calls: list[float] = []
+        self.forward_and_reap_calls: list[tuple[int, float]] = []
+        self.terminate_and_reap_calls: list[float] = []
+        self.ensure_closed_calls: list[float] = []
+        self.close_calls = 0
+
+    def wait(self) -> int:
+        self.wait_calls += 1
+        if isinstance(self.wait_result, BaseException):
+            raise self.wait_result
+        return self.wait_result
+
+    def close_remaining_tree(self, *, timeout: float) -> None:
+        self.close_remaining_tree_calls.append(timeout)
+
+    def forward_signal(self, signum: int) -> None:
+        self.forward_and_reap_calls.append((signum, 0.0))
+
+    def forward_and_reap(self, signum: int, *, timeout: float) -> None:
+        self.forward_and_reap_calls.append((signum, timeout))
+        self.terminated = True
+        self.killed = self.escalates
+
+    def terminate_and_reap(self, *, timeout: float) -> None:
+        self.terminate_and_reap_calls.append(timeout)
+        self.terminated = True
+
+    def ensure_closed(self, *, timeout: float) -> None:
+        self.ensure_closed_calls.append(timeout)
+
+    def close(self) -> None:
+        self.close_calls += 1
+
+
+def test_default_runner_propagates_child_exit_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    child = _FakeForegroundSupervisor(wait_result=23)
+    observed: dict[str, object] = {}
+
+    def fake_start(command, *, env, cwd):
+        observed.update(command=command, env=env, cwd=cwd)
+        return child
+
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        fake_start,
+    )
+
+    exit_code = cli_module._default_runner(
+        ["python", "-m", "agentseek_api.worker"],
+        env={"TOKEN": "value"},
+        cwd="/runtime",
+    )
+
+    assert exit_code == 23
+    assert child.terminated is False
+    assert child.close_remaining_tree_calls == [5.0]
+    assert child.ensure_closed_calls == [5.0]
+    assert child.close_calls == 1
+    assert observed == {
+        "command": ["python", "-m", "agentseek_api.worker"],
+        "env": {"TOKEN": "value"},
+        "cwd": "/runtime",
+    }
+
+
+def test_default_runner_terminates_and_reaps_child_on_keyboard_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    child = _FakeForegroundSupervisor(wait_result=KeyboardInterrupt())
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        lambda command, *, env, cwd: child,
+    )
+
+    exit_code = cli_module._default_runner(
+        ["python", "-m", "agentseek_api.scheduler"],
+        env={},
+        cwd="/runtime",
+    )
+
+    assert exit_code == 130
+    assert child.terminated is True
+    assert child.killed is False
+    assert child.wait_calls == 1
+    assert child.forward_and_reap_calls == [(signal.SIGINT, 5.0)]
+    assert child.ensure_closed_calls == [5.0]
+    assert child.close_calls == 1
+
+
+def test_default_runner_delegates_bounded_escalation_for_interrupt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    child = _FakeForegroundSupervisor(
+        wait_result=KeyboardInterrupt(),
+        escalates=True,
+    )
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        lambda command, *, env, cwd: child,
+    )
+
+    assert cli_module._default_runner(["child"], env={}, cwd=None) == 130
+    assert child.terminated is True
+    assert child.killed is True
+    assert child.forward_and_reap_calls == [(signal.SIGINT, 5.0)]
+    assert child.ensure_closed_calls == [5.0]
+    assert child.close_calls == 1
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    ["guard-entry", "child-start", "guard-attach", "native-cleanup"],
+)
+def test_public_worker_redacts_process_supervision_failures(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_point: str,
+) -> None:
+    from agentseek_api import cli as cli_module
+    from agentseek_api.process_supervisor import ProcessSupervisionError
+
+    setup_canary = "setup-canary"
+    command_canary = "command-canary"
+    environment_canary = "environment-canary"
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},'
+        f'"env":{{"SUPERVISION_SECRET":"{environment_canary}"}}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("SUPERVISION_SECRET", raising=False)
+
+    child = _FakeForegroundSupervisor(wait_result=0)
+    child.live = True
+
+    def fail_native_cleanup(*, timeout: float) -> None:
+        raise ProcessSupervisionError(setup_canary)
+
+    if failure_point == "native-cleanup":
+        child.close_remaining_tree = fail_native_cleanup  # type: ignore[method-assign]
+
+    original_terminate_and_reap = child.terminate_and_reap
+
+    def terminate_and_reap(*, timeout: float) -> None:
+        original_terminate_and_reap(timeout=timeout)
+        child.live = False
+
+    child.terminate_and_reap = terminate_and_reap  # type: ignore[method-assign]
+
+    original_close = child.close
+
+    def close() -> None:
+        original_close()
+        child.live = False
+
+    child.close = close  # type: ignore[method-assign]
+
+    class _FakeGuard:
+        def __enter__(self):
+            if failure_point == "guard-entry":
+                raise ProcessSupervisionError(setup_canary)
+            return self
+
+        def __exit__(self, exc_type, exc, traceback) -> bool:
+            return False
+
+        def attach(self, attached_child) -> None:
+            assert attached_child is child
+            if failure_point == "guard-attach":
+                raise ProcessSupervisionError(setup_canary)
+
+        def begin_cleanup(self) -> None:
+            return None
+
+    def start(command, *, env, cwd):
+        assert command == [command_canary]
+        assert env["SUPERVISION_SECRET"] == environment_canary
+        assert cwd == str(tmp_path)
+        if failure_point == "child-start":
+            raise ProcessSupervisionError(setup_canary)
+        return child
+
+    monkeypatch.setattr(cli_module, "ForwardingSignalGuard", _FakeGuard)
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        start,
+    )
+    monkeypatch.setattr(
+        cli_module,
+        "build_worker_command",
+        lambda: [command_canary],
+    )
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    exit_code = cli_module.main(
+        ["worker", "--config", str(config_path)],
+        cwd=tmp_path,
+        stdout=stdout,
+        stderr=stderr,
+    )
+
+    combined_output = stdout.getvalue() + stderr.getvalue()
+    assert exit_code == 2
+    assert stderr.getvalue() == "Could not supervise the runtime child safely.\n"
+    assert "Traceback" not in combined_output
+    assert setup_canary not in combined_output
+    assert command_canary not in combined_output
+    assert environment_canary not in combined_output
+    if failure_point in {"guard-attach", "native-cleanup"}:
+        assert child.live is False
+        assert child.ensure_closed_calls == [5.0]
+        assert child.close_calls == 1
 
 
 def _docker_env_from_run_command(command: list[str]) -> dict[str, str]:
