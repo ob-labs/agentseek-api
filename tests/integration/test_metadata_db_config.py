@@ -1,4 +1,7 @@
+import json
+import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -123,3 +126,53 @@ def test_health_uses_mysql_async_driver(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_sqlite_metadata_engine_options_keep_dialect_defaults() -> None:
     assert database_module._metadata_engine_options("sqlite") == {"pool_pre_ping": True}
+
+
+def test_sqlite_runtime_starts_and_saves_checkpoints_without_oceanbase(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "agentseek.sqlite3"
+
+    class RejectOceanBaseCheckpointSaver:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError(
+                "SQLite runtime constructed the OceanBase checkpoint saver"
+            )
+
+    monkeypatch.setattr(
+        "agentseek_api.core.database.OceanBaseCheckpointSaver",
+        RejectOceanBaseCheckpointSaver,
+    )
+    monkeypatch.setattr(
+        "agentseek_api.main.ensure_default_assistants", _noop_ensure_default_assistants
+    )
+    monkeypatch.setattr(settings, "SEEKDB_EMBED", False)
+    monkeypatch.setattr(settings, "METADATA_DB_BACKEND", "sqlite")
+    monkeypatch.setattr(
+        settings,
+        "METADATA_DB_URL",
+        f"sqlite+aiosqlite:///{database_path.as_posix()}",
+    )
+
+    manager = DatabaseManager()
+    monkeypatch.setattr("agentseek_api.main.db_manager", manager)
+
+    with TestClient(create_app()) as client:
+        response = client.get("/health")
+        assert response.status_code == 200
+
+        manager.get_checkpointer().save_checkpoint(
+            thread_id="thread-sqlite",
+            run_id="run-sqlite",
+            payload={"status": "complete"},
+        )
+
+        with sqlite3.connect(database_path) as connection:
+            row = connection.execute(
+                "SELECT thread_id, run_id, checkpoint FROM agentseek_checkpoints"
+            ).fetchone()
+
+    assert row is not None
+    assert row[:2] == ("thread-sqlite", "run-sqlite")
+    assert json.loads(row[2]) == {"status": "complete"}

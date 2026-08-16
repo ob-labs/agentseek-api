@@ -3,7 +3,7 @@ import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from langgraph.checkpoint.memory import InMemorySaver
 from langchain_oceanbase.checkpointer import OceanBaseCheckpointSaver as LangGraphOceanBaseCheckpointSaver
@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from agentseek_api.core.oceanbase_checkpointer import OceanBaseCheckpointSaver
 from agentseek_api.core.orm import Base
 from agentseek_api.core.runtime_store import SqliteStore
+from agentseek_api.core.sqlite_checkpointer import SqliteCheckpointSaver
 from agentseek_api.core.store_config import load_store_config
 from agentseek_api.settings import settings
 
@@ -56,6 +57,18 @@ def _ensure_embed_database(embed_dir: str, db_name: str) -> None:
 class NullStore:
     async def aget(self, _namespace: tuple[str, ...], _key: str) -> None:
         return None
+
+
+class RunCheckpointSaver(Protocol):
+    def setup(self) -> None: ...
+
+    def save_checkpoint(
+        self,
+        *,
+        thread_id: str,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> None: ...
 
 
 def _is_already_exists_error(exc: Exception) -> bool:
@@ -156,7 +169,7 @@ class DatabaseManager:
     def __init__(self) -> None:
         self.engine: AsyncEngine | None = None
         self.session_factory: async_sessionmaker[AsyncSession] | None = None
-        self._checkpointer: OceanBaseCheckpointSaver | None = None
+        self._checkpointer: RunCheckpointSaver | None = None
         self._langgraph_checkpointer: Any | None = None
         self._store: Any | None = None
         self._setup_lock: asyncio.Lock = asyncio.Lock()
@@ -208,11 +221,8 @@ class DatabaseManager:
             async with self.engine.begin() as conn:
                 await conn.run_sync(Base.metadata.create_all)
                 await conn.run_sync(self._apply_additive_migrations)
-            conn_args = _resolve_connection_args()
-            self._checkpointer = OceanBaseCheckpointSaver(
-                connection_args=conn_args
-            )
             if metadata_backend == "sqlite":
+                self._checkpointer = SqliteCheckpointSaver(url=metadata_db_url)
                 self._langgraph_checkpointer = InMemorySaver()
                 self._store = SqliteStore(
                     url=metadata_db_url,
@@ -220,6 +230,8 @@ class DatabaseManager:
                     ttl_config=runtime_ttl,
                 )
             else:
+                conn_args = _resolve_connection_args()
+                self._checkpointer = OceanBaseCheckpointSaver(connection_args=conn_args)
                 self._langgraph_checkpointer = LangGraphOceanBaseCheckpointSaver(
                     connection_args=conn_args
                 )
@@ -320,6 +332,14 @@ class DatabaseManager:
             self._store_setup_done = True
 
     async def close(self) -> None:
+        run_checkpointer = self._checkpointer
+        self._checkpointer = None
+        close_run_checkpointer = getattr(run_checkpointer, "close", None)
+        if callable(close_run_checkpointer):
+            try:
+                await asyncio.to_thread(close_run_checkpointer)
+            except Exception:  # noqa: BLE001
+                logger.warning("Failed to close run checkpointer", exc_info=True)
         langgraph_checkpointer = self._langgraph_checkpointer
         self._langgraph_checkpointer = None
         close_checkpointer = getattr(langgraph_checkpointer, "close", None)
@@ -336,7 +356,6 @@ class DatabaseManager:
             await asyncio.to_thread(dispose_store_engine)
         self.engine = None
         self.session_factory = None
-        self._checkpointer = None
         self._store = None
         self._checkpointer_setup_done = False
         self._langgraph_checkpointer_setup_done = False
@@ -352,7 +371,7 @@ class DatabaseManager:
             raise RuntimeError("Database not initialized")
         return self.session_factory
 
-    def get_checkpointer(self) -> OceanBaseCheckpointSaver:
+    def get_checkpointer(self) -> RunCheckpointSaver:
         if self._checkpointer is None:
             raise RuntimeError("Database not initialized")
         return self._checkpointer

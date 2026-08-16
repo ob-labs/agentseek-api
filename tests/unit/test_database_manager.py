@@ -12,30 +12,26 @@ from agentseek_api.settings import settings
 async def test_checkpointer_setup_called_once(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeCheckpointer:
         setup_calls = 0
-        latest_connection_args: dict[str, str] | None = None
+        latest_url: str | None = None
 
-        def __init__(self, connection_args: dict[str, str]) -> None:
-            FakeCheckpointer.latest_connection_args = connection_args
+        def __init__(self, *, url: str) -> None:
+            FakeCheckpointer.latest_url = url
 
         def setup(self) -> None:
             FakeCheckpointer.setup_calls += 1
 
-    monkeypatch.setattr("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer)
-    monkeypatch.setattr(settings, "SEEKDB_URL", "sqlite+aiosqlite:///:memory:")
-    monkeypatch.setattr(settings, "OCEANBASE_HOST", "127.0.0.1")
-    monkeypatch.setattr(settings, "OCEANBASE_PORT", "2881")
-    monkeypatch.setattr(settings, "OCEANBASE_USER", "root@test")
-    monkeypatch.setattr(settings, "OCEANBASE_PASSWORD", "")
-    monkeypatch.setattr(settings, "OCEANBASE_DB_NAME", "test")
+    monkeypatch.setattr(
+        "agentseek_api.core.database.SqliteCheckpointSaver", FakeCheckpointer
+    )
+    monkeypatch.setattr(settings, "METADATA_DB_URL", "sqlite+aiosqlite:///:memory:")
+    monkeypatch.setattr(settings, "METADATA_DB_BACKEND", "sqlite")
 
     manager = DatabaseManager()
     await manager.initialize()
     await manager.initialize()
 
     assert FakeCheckpointer.setup_calls == 1
-    assert FakeCheckpointer.latest_connection_args is not None
-    assert FakeCheckpointer.latest_connection_args["host"] == "127.0.0.1"
-    assert FakeCheckpointer.latest_connection_args["db_name"] == "test"
+    assert FakeCheckpointer.latest_url == "sqlite+aiosqlite:///:memory:"
     assert isinstance(manager.get_store(), SqliteStore)
 
     await manager.close()
@@ -58,6 +54,24 @@ async def test_close_cleans_up_langgraph_checkpointer() -> None:
     checkpointer.close.assert_called_once()
     assert close_thread_ids[0] != event_loop_thread_id
     engine.dispose.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_close_cleans_up_run_checkpointer() -> None:
+    manager = DatabaseManager()
+    checkpointer = Mock()
+    close_thread_ids: list[int] = []
+    checkpointer.close.side_effect = lambda: close_thread_ids.append(
+        threading.get_ident()
+    )
+    manager._checkpointer = checkpointer
+    event_loop_thread_id = threading.get_ident()
+
+    await manager.close()
+    await manager.close()
+
+    checkpointer.close.assert_called_once()
+    assert close_thread_ids[0] != event_loop_thread_id
 
 
 @pytest.mark.asyncio
