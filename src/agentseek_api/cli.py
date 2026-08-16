@@ -37,6 +37,15 @@ AGENTSEEK_ONBOARD_BANNER = (
     "     AgentSeek v{version}\n"
 )
 
+AGENTSEEK_ONBOARD_BANNER_ASCII = (
+    "\n"
+    "        Welcome to\n"
+    "\n"
+    "========================\n"
+    "     AgentSeek v{version}\n"
+    "========================\n"
+)
+
 __all__ = [
     "CliError",
     "build_container_env",
@@ -86,6 +95,31 @@ class DevServerUrls:
     api_url: str
     docs_url: str
     studio_url: str
+
+
+def _write_banner(
+    stdout: TextIO,
+    *,
+    unicode_text: str,
+    ascii_text: str,
+) -> None:
+    text = unicode_text
+    encoding = getattr(stdout, "encoding", None)
+    if isinstance(encoding, str) and encoding:
+        try:
+            unicode_text.encode(encoding, errors="strict")
+        except (UnicodeEncodeError, LookupError):
+            text = ascii_text
+    stdout.write(text)
+    stdout.flush()
+
+
+def _write_onboard_banner(stdout: TextIO) -> None:
+    _write_banner(
+        stdout,
+        unicode_text=AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n",
+        ascii_text=AGENTSEEK_ONBOARD_BANNER_ASCII.format(version=__version__) + "\n",
+    )
 
 
 def _resolve_path(path_text: str, *, cwd: Path) -> Path:
@@ -416,6 +450,15 @@ def _render_dev_ready_banner(urls: DevServerUrls) -> str:
     )
 
 
+def _render_ascii_dev_ready_banner(urls: DevServerUrls) -> str:
+    return (
+        f"- API: {urls.api_url}\n"
+        f"- Docs: {urls.docs_url}\n"
+        f"- Studio UI: {urls.studio_url}\n"
+        "\n\n"
+    )
+
+
 def _wait_for_dev_server_ready(
     api_url: str,
     *,
@@ -472,8 +515,11 @@ def _run_managed_dev_server(
             continue
 
     try:
-        stdout.write(_render_dev_ready_banner(urls))
-        stdout.flush()
+        _write_banner(
+            stdout,
+            unicode_text=_render_dev_ready_banner(urls),
+            ascii_text=_render_ascii_dev_ready_banner(urls),
+        )
         wait_for_ready(urls.api_url, process=process, sleep=sleep)
         if open_browser:
             if browser_opener is None:
@@ -519,8 +565,7 @@ def _execute_dev_command(
     cwd: Path,
     stdout: TextIO,
 ) -> int:
-    stdout.write(AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n")
-    stdout.flush()
+    _write_onboard_banner(stdout)
     args.reload = not args.no_reload
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
@@ -1023,8 +1068,7 @@ def run_namespace(
             )
             return _execute_dev_command(args, runner=run, cwd=workdir, stdout=out)
         if command == "serve":
-            out.write(AGENTSEEK_ONBOARD_BANNER.format(version=__version__) + "\n")
-            out.flush()
+            _write_onboard_banner(out)
             args.reload = False
             return _execute_runtime_command(args, runner=run, cwd=workdir)
         if command == "worker":

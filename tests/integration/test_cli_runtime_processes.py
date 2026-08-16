@@ -10,6 +10,8 @@ from pathlib import Path
 
 import pytest
 
+from agentseek_api import __version__
+
 
 PROBE_SITE_DIR = (
     Path(__file__).resolve().parents[1] / "fixtures" / "runtime_settings_probe"
@@ -349,6 +351,43 @@ def test_invalid_runtime_setting_is_redacted_and_fresh_child_exits(
     assert "ValidationError" not in result.stderr
     assert "input_value" not in result.stderr
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.parametrize("role", ["dev", "serve"])
+def test_invalid_port_reaches_runtime_child_with_cp1252_stdout(
+    tmp_path: Path,
+    role: str,
+) -> None:
+    invalid_value = "invalid-port-canary"
+    config_path = _write_runtime_config(
+        tmp_path,
+        f"invalid-cp1252-{role}",
+        {"PORT": invalid_value},
+    )
+    arguments = [
+        "-m",
+        "agentseek_api.cli",
+        role,
+        "--config",
+        str(config_path),
+    ]
+    if role == "dev":
+        arguments.append("--no-reload")
+
+    result = _run_python(
+        *arguments,
+        cwd=tmp_path,
+        extra_env={"PYTHONIOENCODING": "cp1252:strict"},
+        removed_env=("PORT", VALIDATION_CHILD_PID_PATH_ENV),
+    )
+
+    assert result.returncode == 2
+    assert result.stderr == "Invalid runtime setting(s): PORT (int_parsing).\n"
+    assert invalid_value not in result.stderr
+    assert "UnicodeEncodeError" not in result.stderr
+    assert "Traceback" not in result.stderr
+    assert f"AgentSeek v{__version__}" in result.stdout
+    result.stdout.encode("ascii", errors="strict")
 
 
 def test_invalid_uvicorn_runtime_setting_is_redacted_and_process_exits(

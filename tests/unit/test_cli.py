@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from agentseek_api import __version__
 from agentseek_api.services.langgraph_service import LangGraphService
 
 
@@ -37,6 +38,52 @@ class _RunCapture:
         if command[:3] == ["docker", "container", "inspect"]:
             return 1
         return 0
+
+
+class _EncodingTextStream:
+    def __init__(self, encoding: str) -> None:
+        self.encoding = encoding
+        self.writes: list[str] = []
+        self.flush_count = 0
+
+    def write(self, value: str) -> int:
+        value.encode(self.encoding, errors="strict")
+        self.writes.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _RecordingTextStream:
+    def __init__(self, encoding: str) -> None:
+        self.encoding = encoding
+        self.writes: list[str] = []
+        self.flush_count = 0
+
+    def write(self, value: str) -> int:
+        self.writes.append(value)
+        return len(value)
+
+    def flush(self) -> None:
+        self.flush_count += 1
+
+
+class _PartialWriteFailureStream:
+    encoding = "utf-8"
+
+    def __init__(self) -> None:
+        self.write_calls = 0
+        self.value = ""
+        self.flush_count = 0
+
+    def write(self, value: str) -> int:
+        self.write_calls += 1
+        self.value += value[:8]
+        raise UnicodeEncodeError("utf-8", value, 8, 9, "write-canary")
+
+    def flush(self) -> None:
+        self.flush_count += 1
 
 
 class _FakeForegroundSupervisor:
@@ -326,6 +373,137 @@ def _write_basic_manifest_config(root: Path) -> Path:
     manifest_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
     config_path.unlink()
     return manifest_path
+
+
+def test_onboard_banner_preserves_unicode_for_stringio(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = io.StringIO()
+
+    exit_code = main(
+        ["serve"],
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.getvalue() == (
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "╔═╗┌─┐┌─┐┌┐┌┌┬┐╔═╗┌─┐┌─┐┬┌─\n"
+        "╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐\n"
+        "╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴\n"
+        "\n"
+        f"     AgentSeek v{__version__}\n"
+        "\n"
+    )
+
+
+def test_onboard_banner_uses_one_write_and_flush_for_utf8_stream(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = _EncodingTextStream("utf-8")
+
+    exit_code = main(
+        ["serve"],
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.writes == [
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "╔═╗┌─┐┌─┐┌┐┌┌┬┐╔═╗┌─┐┌─┐┬┌─\n"
+        "╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐\n"
+        "╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴\n"
+        "\n"
+        f"     AgentSeek v{__version__}\n"
+        "\n"
+    ]
+    assert stdout.flush_count == 1
+
+
+@pytest.mark.parametrize("role", ["dev", "serve"])
+def test_onboard_banner_falls_back_before_writing_to_cp1252_stream(
+    tmp_path: Path,
+    role: str,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = _EncodingTextStream("cp1252")
+    arguments = [role]
+    if role == "dev":
+        arguments.append("--no-reload")
+
+    exit_code = main(
+        arguments,
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.writes == [
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "========================\n"
+        f"     AgentSeek v{__version__}\n"
+        "========================\n"
+        "\n"
+    ]
+    assert stdout.flush_count == 1
+
+
+def test_onboard_banner_uses_ascii_fallback_for_unknown_named_encoding(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    stdout = _RecordingTextStream("unknown-codec-canary")
+
+    exit_code = main(
+        ["serve"],
+        runner=_RunCapture(),
+        stdout=stdout,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert stdout.writes == [
+        "\n"
+        "        Welcome to\n"
+        "\n"
+        "========================\n"
+        f"     AgentSeek v{__version__}\n"
+        "========================\n"
+        "\n"
+    ]
+    assert stdout.flush_count == 1
+
+
+def test_onboard_banner_does_not_retry_or_flush_after_partial_write() -> None:
+    from agentseek_api import cli as cli_module
+
+    stdout = _PartialWriteFailureStream()
+
+    with pytest.raises(UnicodeEncodeError, match="write-canary"):
+        cli_module._write_onboard_banner(stdout)
+
+    assert stdout.write_calls == 1
+    assert stdout.value == "\n       "
+    assert stdout.flush_count == 0
 
 
 def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) -> None:
