@@ -1,4 +1,4 @@
-"""Shared dotenv interpolation cases for supported-version and handoff tests."""
+"""Shared dotenv interpolation cases for supported-version runtime tests."""
 
 from __future__ import annotations
 
@@ -15,10 +15,8 @@ from dotenv.variables import Variable, parse_variables
 DOTENV_CONFORMANCE_CASES = (
     {
         "name": "missing",
-        "contents": "CONF_MISSING=prefix-${PR69_MISSING}-suffix\n",
+        "contents": "CONF_MISSING=prefix-${CONF_UNSET_REFERENCE}-suffix\n",
         "ambient": {},
-        "container_expected": {"CONF_MISSING": "prefix-${PR69_MISSING}-suffix"},
-        "container_absent": (),
     },
     {
         "name": "duplicate-order",
@@ -28,35 +26,21 @@ DOTENV_CONFORMANCE_CASES = (
             "CONF_ORIGIN=https://second.example\n"
         ),
         "ambient": {},
-        "container_expected": {
-            "CONF_ORIGIN": "https://second.example",
-            "CONF_ORDERED": "https://first.example/v1",
-        },
-        "container_absent": (),
     },
     {
         "name": "broad-names",
         "contents": "A.B=dotted\n1LEADING=digit\nCONF_BROAD=${A.B}-${1LEADING}\n",
         "ambient": {},
-        "container_expected": {"CONF_BROAD": "dotted-digit"},
-        "container_absent": (),
     },
     {
         "name": "multiline-default",
-        "contents": 'CONF_MULTILINE="${PR69_MISSING:-first line\nsecond line}"\n',
+        "contents": 'CONF_MULTILINE="${CONF_UNSET_REFERENCE:-first line\nsecond line}"\n',
         "ambient": {},
-        "container_expected": {"CONF_MULTILINE": "first line\nsecond line"},
-        "container_absent": (),
     },
     {
         "name": "bare-default",
-        "contents": "CONF_BARE=$PR69_MISSING\nCONF_DEFAULT=${PR69_MISSING:-fallback}\n",
+        "contents": "CONF_BARE=$CONF_UNSET_REFERENCE\nCONF_DEFAULT=${CONF_UNSET_REFERENCE:-fallback}\n",
         "ambient": {},
-        "container_expected": {
-            "CONF_BARE": "$PR69_MISSING",
-            "CONF_DEFAULT": "fallback",
-        },
-        "container_absent": (),
     },
     {
         "name": "empty-valueless",
@@ -67,28 +51,17 @@ DOTENV_CONFORMANCE_CASES = (
             "CONF_FROM_VALUELESS=${CONF_VALUELESS:-fallback}\n"
         ),
         "ambient": {},
-        "container_expected": {
-            "CONF_EMPTY": "",
-            "CONF_FROM_EMPTY": "",
-            "CONF_FROM_VALUELESS": "",
-        },
-        "container_absent": ("CONF_VALUELESS",),
     },
     {
-        "name": "allowed-disallowed-ambient",
+        "name": "ambient-references",
         "contents": (
             "CONF_ALLOWED=${OPENAI_ALLOWED_SOURCE}\n"
-            "CONF_DISALLOWED=${PR69_DISALLOWED_SECRET}\n"
+            "CONF_AMBIENT=${CONF_AMBIENT_SOURCE}\n"
         ),
         "ambient": {
             "OPENAI_ALLOWED_SOURCE": "allowlisted-source",
-            "PR69_DISALLOWED_SECRET": "host-sensitive-value",
+            "CONF_AMBIENT_SOURCE": "ambient-source",
         },
-        "container_expected": {
-            "CONF_ALLOWED": "allowlisted-source",
-            "CONF_DISALLOWED": "${PR69_DISALLOWED_SECRET}",
-        },
-        "container_absent": ("PR69_DISALLOWED_SECRET",),
     },
 )
 
@@ -174,8 +147,8 @@ CONFORMANCE_AMBIENT_MODES = (
         {
             "OPENAI_API_KEY": "ambient-provider-key",
             "OPENAI_ALLOWED_SOURCE": "ambient-allowed-source",
-            "PR69_MISSING": "ambient-missing-value",
-            "PR69_DISALLOWED_SECRET": "host-sensitive-value",
+            "CONF_UNSET_REFERENCE": "ambient-missing-value",
+            "CONF_AMBIENT_SOURCE": "ambient-source",
             "A.B": "ambient-dotted-value",
             "1LEADING": "ambient-digit-value",
         },
@@ -198,8 +171,6 @@ def _conformance_env_keys() -> frozenset[str]:
     for case in DOTENV_CONFORMANCE_CASES:
         keys.update(_dotenv_keys(case["contents"]))
         keys.update(case["ambient"])
-        keys.update(case["container_expected"])
-        keys.update(case["container_absent"])
     for case in CROSS_LAYER_CONFORMANCE_CASES:
         config_env = case["config_env"]
         if isinstance(config_env, dict):

@@ -138,9 +138,6 @@ jobs:
       - name: CLI Docker smoke
         run: make test-cli-docker
 
-      - name: Container environment boundary smoke
-        run: uv run python scripts/test_container_env_boundary.py
-
   sample-graphs:
     name: Sample Graphs
     runs-on: ubuntu-latest

@@ -16,7 +16,7 @@ from typing import TextIO
 
 from dotenv.main import with_warn_for_invalid_lines
 from dotenv.parser import parse_stream
-from dotenv.variables import Literal, Variable, parse_variables
+from dotenv.variables import parse_variables
 
 from agentseek_api import __version__
 from agentseek_api.settings import DEFAULT_API_PORT
@@ -154,34 +154,15 @@ def _resolve_env_value(
     value: str,
     *,
     context: dict[str, str | None],
-    preserve_unresolved: bool,
 ) -> str:
     """Resolve a value with python-dotenv's grammar and missing-value rules."""
-    atoms = list(parse_variables(value))
-    if not preserve_unresolved:
-        return "".join(atom.resolve(context) for atom in atoms)
-
-    parts: list[str] = []
-    for atom in atoms:
-        if isinstance(atom, Literal):
-            parts.append(atom.value)
-            continue
-        if not isinstance(atom, Variable):
-            raise TypeError(f"Unsupported python-dotenv interpolation atom: {type(atom).__name__}")
-        if atom.name in context:
-            parts.append(context[atom.name] or "")
-        elif atom.default is not None:
-            parts.append(atom.default)
-        else:
-            parts.append(f"${{{atom.name}}}")
-    return "".join(parts)
+    return "".join(atom.resolve(context) for atom in parse_variables(value))
 
 
 def _parse_env_file(
     env_file: Path,
     *,
     context: dict[str, str | None],
-    preserve_unresolved: bool,
 ) -> dict[str, str | None]:
     """Parse and interpolate dotenv bindings in physical source order."""
     local_context = dict(context)
@@ -200,7 +181,6 @@ def _parse_env_file(
             resolved = _resolve_env_value(
                 binding.value,
                 context=local_context,
-                preserve_unresolved=preserve_unresolved,
             )
             values[binding.key] = resolved
             local_context[binding.key] = resolved
@@ -220,7 +200,6 @@ def _build_env(
     env_file: str | None,
     cwd: Path,
     shell_env: dict[str, str],
-    preserve_unresolved: bool,
 ) -> dict[str, str]:
     env: dict[str, str] = {}
     interpolation_context: dict[str, str | None] = dict(shell_env)
@@ -232,7 +211,6 @@ def _build_env(
                 _parse_env_file(
                     config.env_file,
                     context=interpolation_context,
-                    preserve_unresolved=preserve_unresolved,
                 ),
             )
         # JSON env mappings are literal values. They form the next precedence
@@ -251,7 +229,6 @@ def _build_env(
             _parse_env_file(
                 resolved_env_file,
                 context=interpolation_context,
-                preserve_unresolved=preserve_unresolved,
             ),
         )
     # The launching shell is both the initial interpolation context and the
@@ -384,7 +361,6 @@ def build_runtime_env(
         env_file=env_file,
         cwd=cwd,
         shell_env=shell_env,
-        preserve_unresolved=False,
     )
 
 
@@ -716,12 +692,11 @@ def _ambient_container_env() -> dict[str, str]:
 
 
 def build_container_env(*, config_path: Path, env_file: str | None, cwd: Path) -> dict[str, str]:
-    env = _build_env(
+    env = build_runtime_env(
         config_path=config_path,
         env_file=env_file,
         cwd=cwd,
-        shell_env=_ambient_container_env(),
-        preserve_unresolved=True,
+        base_env=_ambient_container_env(),
     )
     env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
     auth_module_path = env.get("AUTH_MODULE_PATH")

@@ -11,21 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from agentseek_api.cli import _CONTAINER_ENV_PREFIXES
 from agentseek_api.services.langgraph_service import LangGraphService
 from scripts.dotenv_conformance import (
     CROSS_LAYER_CONFORMANCE_CASES,
     DOTENV_CONFORMANCE_CASES,
     DOTENV_CONFORMANCE_ENV_KEYS,
 )
-
-
-@pytest.fixture(autouse=True)
-def _clean_ambient_container_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep allowlisted host variables out of tests unless a test opts in."""
-    for key in tuple(os.environ):
-        if key.startswith(_CONTAINER_ENV_PREFIXES):
-            monkeypatch.delenv(key)
 
 
 def test_python_dotenv_dependency_is_available() -> None:
@@ -1087,108 +1078,6 @@ def test_higher_precedence_valueless_binding_keeps_lower_export(tmp_path: Path) 
     assert env["RESULT"] == ""
 
 
-def test_container_dotenv_uses_full_grammar_but_preserves_unavailable_references(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from agentseek_api.cli import build_container_env
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "A.B=dotted\n"
-        "1LEADING=digit\n"
-        "OPENAI_BASE_URL=${A.B}-${1LEADING}-${PR69_DISALLOWED_SECRET}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
-
-    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
-
-    assert env["OPENAI_BASE_URL"] == "dotted-digit-${PR69_DISALLOWED_SECRET}"
-    assert "PR69_DISALLOWED_SECRET" not in env
-
-
-def test_container_dotenv_preserves_physical_duplicate_order(tmp_path: Path) -> None:
-    from agentseek_api.cli import build_container_env
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "API_ORIGIN=https://first.example\n"
-        "OPENAI_BASE_URL=${API_ORIGIN}/v1\n"
-        "API_ORIGIN=https://second.example\n",
-        encoding="utf-8",
-    )
-
-    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
-
-    assert env["OPENAI_BASE_URL"] == "https://first.example/v1"
-
-
-@pytest.mark.parametrize("config_env", ["./config.env", {"API_ORIGIN": "https://mapping.example"}])
-def test_container_dotenv_sees_selected_config_layer(
-    tmp_path: Path,
-    config_env: str | dict[str, str],
-) -> None:
-    from agentseek_api.cli import build_container_env
-
-    if isinstance(config_env, str):
-        (tmp_path / "config.env").write_text("API_ORIGIN=https://dotenv.example\n", encoding="utf-8")
-        expected_origin = "https://dotenv.example"
-    else:
-        expected_origin = "https://mapping.example"
-    config_path = tmp_path / "langgraph.json"
-    config_path.write_text(
-        json.dumps({"graphs": {"chat": "chat.graph:graph"}, "env": config_env}),
-        encoding="utf-8",
-    )
-    cli_env = tmp_path / "cli.env"
-    cli_env.write_text("OPENAI_BASE_URL=${API_ORIGIN}/v1\n", encoding="utf-8")
-
-    env = build_container_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path)
-
-    assert env["OPENAI_BASE_URL"] == f"{expected_origin}/v1"
-
-
-def test_container_dotenv_resolves_allowlisted_but_not_disallowed_ambient_reference(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from agentseek_api.cli import build_container_env
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    env_file = tmp_path / ".env"
-    env_file.write_text(
-        "ALLOWED_COPY=${OPENAI_API_KEY}\n"
-        "DISALLOWED_COPY=${PR69_DISALLOWED_SECRET}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("OPENAI_API_KEY", "allowlisted-value")
-    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
-
-    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
-
-    assert env["ALLOWED_COPY"] == "allowlisted-value"
-    assert env["DISALLOWED_COPY"] == "${PR69_DISALLOWED_SECRET}"
-    assert "PR69_DISALLOWED_SECRET" not in env
-
-
-def test_build_container_env_does_not_interpolate_disallowed_host_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from agentseek_api.cli import build_container_env
-
-    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
-    config_path = _write_basic_langgraph_config(tmp_path)
-    env_file = tmp_path / ".env"
-    env_file.write_text("OPENAI_API_KEY=${PR69_DISALLOWED_SECRET}\n", encoding="utf-8")
-
-    env = build_container_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path)
-
-    assert env["OPENAI_API_KEY"] == "${PR69_DISALLOWED_SECRET}"
-    assert "PR69_DISALLOWED_SECRET" not in env
-
-
 def test_build_runtime_env_rejects_invalid_config_env_shape(tmp_path: Path) -> None:
     from agentseek_api.cli import build_runtime_env
 
@@ -1666,71 +1555,6 @@ def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatc
     assert capture.calls is not None
     container_env = _docker_env_from_run_command(capture.calls[1])
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
-
-
-def test_up_command_resolves_same_file_references_without_expanding_disallowed_host_values(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from agentseek_api.cli import main
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    env_file = tmp_path / "docker.env"
-    env_file.write_text(
-        "API_ORIGIN=https://api.example.test\n"
-        "OPENAI_BASE_URL=${API_ORIGIN}/v1\n"
-        "OPENAI_API_KEY=${PR69_DISALLOWED_SECRET}\n",
-        encoding="utf-8",
-    )
-    monkeypatch.setenv("PR69_DISALLOWED_SECRET", "host-sensitive-value")
-    capture = _RunCapture()
-
-    exit_code = main(
-        [
-            "up",
-            "--config",
-            str(config_path),
-            "--image",
-            "agentseek:test",
-            "--env-file",
-            str(env_file),
-        ],
-        runner=capture,
-        cwd=tmp_path,
-    )
-
-    assert exit_code == 0
-    assert capture.calls is not None
-    container_env = _docker_env_from_run_command(capture.calls[1])
-    assert container_env["OPENAI_BASE_URL"] == "https://api.example.test/v1"
-    assert container_env["OPENAI_API_KEY"] == "${PR69_DISALLOWED_SECRET}"
-    assert "PR69_DISALLOWED_SECRET" not in container_env
-
-
-def test_up_command_preserves_dotenv_default_and_bare_variable_syntax(tmp_path: Path) -> None:
-    from agentseek_api.cli import main
-
-    config_path = _write_basic_langgraph_config(tmp_path)
-    env_file = tmp_path / "docker.env"
-    env_file.write_text(
-        "OPENAI_BASE_URL=${MISSING_API_ORIGIN:-https://default.example.test}/v1\n"
-        "BARE_REFERENCE=$MISSING_API_ORIGIN\n",
-        encoding="utf-8",
-    )
-    capture = _RunCapture()
-
-    exit_code = main(
-        ["up", "--config", str(config_path), "--image", "agentseek:test", "--env-file", str(env_file)],
-        runner=capture,
-        cwd=tmp_path,
-    )
-
-    assert exit_code == 0
-    assert capture.calls is not None
-    container_env = _docker_env_from_run_command(capture.calls[1])
-    assert container_env["OPENAI_BASE_URL"] == "https://default.example.test/v1"
-    assert container_env["BARE_REFERENCE"] == "$MISSING_API_ORIGIN"
-
-
 
 
 def test_up_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:

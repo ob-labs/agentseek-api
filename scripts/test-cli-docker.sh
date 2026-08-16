@@ -8,14 +8,12 @@ IMAGE_TAG="${IMAGE_TAG:-agentseek-api-cli-smoke:latest}"
 DB_CONTAINER="${DB_CONTAINER:-agentseek-cli-mysql}"
 APP_CONTAINER="${APP_CONTAINER:-agentseek-up-8123}"
 APP_CONTAINER_AUTOBUILD="${APP_CONTAINER_AUTOBUILD:-agentseek-up-8124}"
-APP_CONTAINER_SECURITY="${APP_CONTAINER_SECURITY:-agentseek-up-8125}"
 PG_CONTAINER="${PG_CONTAINER:-agentseek-cli-postgres}"
 TMP_DIR="${TMP_DIR:-$ROOT_DIR/.tmp/cli-docker}"
 
 cleanup() {
   docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$APP_CONTAINER_AUTOBUILD" >/dev/null 2>&1 || true
-  docker rm -f "$APP_CONTAINER_SECURITY" >/dev/null 2>&1 || true
   docker rm -f "$DB_CONTAINER" >/dev/null 2>&1 || true
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
 }
@@ -23,7 +21,6 @@ cleanup() {
 print_logs() {
   docker logs "$APP_CONTAINER" || true
   docker logs "$APP_CONTAINER_AUTOBUILD" || true
-  docker logs "$APP_CONTAINER_SECURITY" || true
   docker logs "$DB_CONTAINER" || true
   docker logs "$PG_CONTAINER" || true
 }
@@ -116,34 +113,6 @@ fi
 
 if ! uv run python scripts/verify_docker_api.py --base-url http://127.0.0.1:8123 --mode full; then
   print_logs
-  exit 1
-fi
-
-cat >"$TMP_DIR/disallowed.env" <<'EOF'
-OPENAI_API_KEY=${PR69_DISALLOWED_SECRET}
-EOF
-
-if ! env -u OPENAI_API_KEY PR69_DISALLOWED_SECRET=host-sensitive-value uv run agentseek-api up \
-  --config "$CONFIG_PATH" \
-  --image "$IMAGE_TAG" \
-  --port 8125 \
-  --env-file "$TMP_DIR/disallowed.env" \
-  --recreate; then
-  print_logs
-  exit 1
-fi
-
-for _ in $(seq 1 60); do
-  if docker inspect "$APP_CONTAINER_SECURITY" --format '{{.State.Running}}' 2>/dev/null | grep -q true; then
-    break
-  fi
-  sleep 1
-done
-
-CONTAINER_SECRET="$(docker exec "$APP_CONTAINER_SECURITY" python -c 'import os; print(os.environ["OPENAI_API_KEY"])')"
-if [[ "$CONTAINER_SECRET" != '${PR69_DISALLOWED_SECRET}' || "$CONTAINER_SECRET" == 'host-sensitive-value' ]]; then
-  print_logs
-  echo "Container environment expanded a host-only secret." >&2
   exit 1
 fi
 
