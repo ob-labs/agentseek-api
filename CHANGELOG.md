@@ -28,9 +28,10 @@ Notable changes to AgentSeek API are documented in this file.
   authoritative over config and CLI dotenv sources.
 - Parsed each dotenv source independently with strict malformed-file handling,
   and distinguished valueless `KEY` from explicit empty `KEY=`.
-- Ran host runtime roles in supervised child processes so settings are built
-  after the resolved environment is installed, signals are forwarded, and
-  descendant processes are cleaned up on exit across supported platforms.
+- Started `worker` and `scheduler` in fresh child processes so their settings
+  are built after the resolved environment is installed.
+- Added bounded signal forwarding and descendant-process cleanup for `serve`,
+  `worker`, and `scheduler` across supported platforms.
 - Kept version, help, and Dockerfile rendering independent of runtime settings
   validation.
 - Fell back to an ASCII CLI banner when a legacy Windows console cannot encode
@@ -43,11 +44,11 @@ Notable changes to AgentSeek API are documented in this file.
 - Clients must not send both non-empty `config.configurable` and `context` in
   one assistant or run request; such requests now return HTTP 400. Prefer
   `context` for new integrations.
-- Dotenv values no longer interpolate from config mappings or other dotenv
-  files. Put dependent bindings in one physical file or pass the final literal
-  value.
-- Malformed dotenv syntax now exits with status 2 instead of warning and
-  continuing with a partial runtime configuration.
+- For `dev`, `serve`, `worker`, and `scheduler`, dotenv values no longer
+  interpolate from config mappings or other dotenv files. Put dependent
+  bindings in one physical file or pass the final literal value.
+- For those host runtime commands, malformed dotenv syntax now exits with
+  status 2 instead of warning and continuing with a partial configuration.
 - Dependency resolution now requires SQLAlchemy 2.0.12 or newer, LangGraph
   1.0.6 or newer, LangChain Core 1.2.5 or newer, and MCP 1.27.1 through the 1.x
   series. `python-dotenv` 1.0 through 1.2 is now a direct dependency.
