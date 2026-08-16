@@ -108,7 +108,7 @@ dev = [
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "langgraph-cli", extras = ["inmem"] },
     { name = "pytest", specifier = ">=8.0.0" },
-    { name = "pytest-asyncio", specifier = ">=0.23.0" },
+    { name = "pytest-asyncio", specifier = ">=0.23.5" },
     { name = "pytest-cov", specifier = ">=5.0.0" },
     { name = "ruff", specifier = ">=0.6.0" },
 ]

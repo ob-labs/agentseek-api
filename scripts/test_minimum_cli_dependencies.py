@@ -15,6 +15,7 @@ def main() -> None:
     project = tomllib.loads((repository / "pyproject.toml").read_text(encoding="utf-8"))
     requirements = list(project["project"]["dependencies"])
     requirements.append("pytest>=8.0.0")
+    requirements.append("pytest-asyncio>=0.23.5")
 
     with tempfile.TemporaryDirectory(prefix="agentseek-minimum-") as directory:
         environment = Path(directory) / ".venv"
