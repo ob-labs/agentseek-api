@@ -1,4 +1,4 @@
-"""Test-only probe loaded by runtime-role child interpreters."""
+"""Test-only probe loaded by runtime child interpreters."""
 
 from __future__ import annotations
 
@@ -6,6 +6,14 @@ import asyncio
 import json
 import os
 from pathlib import Path
+
+
+validation_child_pid_path = os.environ.get("AGENTSEEK_VALIDATION_CHILD_PID_PATH")
+if validation_child_pid_path:
+    Path(validation_child_pid_path).write_text(
+        str(os.getpid()),
+        encoding="utf-8",
+    )
 
 
 probe_path = os.environ.get("AGENTSEEK_SETTINGS_PROBE_PATH")

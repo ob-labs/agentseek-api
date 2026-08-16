@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -12,15 +14,91 @@ import pytest
 PROBE_SITE_DIR = (
     Path(__file__).resolve().parents[1] / "fixtures" / "runtime_settings_probe"
 )
+VALIDATION_CHILD_PID_PATH_ENV = "AGENTSEEK_VALIDATION_CHILD_PID_PATH"
+
+
+def _probe_pythonpath() -> str:
+    existing_pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath = str(PROBE_SITE_DIR)
+    if existing_pythonpath:
+        pythonpath = os.pathsep.join((pythonpath, existing_pythonpath))
+    return pythonpath
+
+
+def _pid_is_alive(pid: int) -> bool:
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        open_process = kernel32.OpenProcess
+        open_process.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        open_process.restype = wintypes.HANDLE
+        get_exit_code = kernel32.GetExitCodeProcess
+        get_exit_code.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        get_exit_code.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        handle = open_process(0x1000, False, pid)
+        if not handle:
+            return False
+        try:
+            exit_code = wintypes.DWORD()
+            if not get_exit_code(handle, ctypes.byref(exit_code)):
+                return False
+            return exit_code.value == 259
+        finally:
+            close_handle(handle)
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _read_observed_pid(path: Path, *, timeout_seconds: float = 2.0) -> int:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        try:
+            return int(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            time.sleep(0.01)
+    raise AssertionError("Runtime validation child PID was not observed.")
+
+
+def _terminate_observed_pid(pid: int, *, timeout_seconds: float = 2.0) -> None:
+    if not _pid_is_alive(pid):
+        return
+    os.kill(pid, signal.SIGTERM)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not _pid_is_alive(pid):
+            return
+        time.sleep(0.01)
+    kill_signal = getattr(signal, "SIGKILL", signal.SIGTERM)
+    os.kill(pid, kill_signal)
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if not _pid_is_alive(pid):
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"Runtime validation child PID {pid} did not exit.")
 
 
 def _run_python(
     *arguments: str,
     cwd: Path,
     extra_env: dict[str, str] | None = None,
+    removed_env: tuple[str, ...] = (),
 ) -> subprocess.CompletedProcess[str]:
     env = dict(os.environ)
     env.update(extra_env or {})
+    for field in removed_env:
+        env.pop(field, None)
     return subprocess.run(
         [sys.executable, *arguments],
         cwd=cwd,
@@ -57,13 +135,9 @@ def _settings_probe_environment(
     exit_code: int,
 ) -> dict[str, str]:
     environment = os.environ.copy()
-    existing_pythonpath = environment.get("PYTHONPATH")
-    pythonpath = str(PROBE_SITE_DIR)
-    if existing_pythonpath:
-        pythonpath = os.pathsep.join((pythonpath, existing_pythonpath))
     environment.update(
         {
-            "PYTHONPATH": pythonpath,
+            "PYTHONPATH": _probe_pythonpath(),
             "AGENTSEEK_SETTINGS_PROBE_PATH": str(output_path),
             "AGENTSEEK_SETTINGS_PROBE_FIELDS": ",".join(fields),
             "AGENTSEEK_SETTINGS_PROBE_EXIT_CODE": str(exit_code),
@@ -190,17 +264,26 @@ def test_dockerfile_rendering_ignores_invalid_runtime_settings(
         ),
     ],
 )
-def test_invalid_runtime_setting_is_redacted_by_fresh_child(
+def test_invalid_runtime_setting_is_redacted_and_fresh_child_exits(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     role: str,
     invalid_field: str,
     invalid_value: str,
     error_type: str,
 ) -> None:
+    monkeypatch.setenv(
+        invalid_field,
+        "2024" if invalid_field == "PORT" else "10",
+    )
+    validation_child_pid_path = tmp_path / f"{role}-validation-child.pid"
     config_path = _write_runtime_config(
         tmp_path,
         f"invalid-{role}",
-        {invalid_field: invalid_value},
+        {
+            invalid_field: invalid_value,
+            VALIDATION_CHILD_PID_PATH_ENV: str(validation_child_pid_path),
+        },
     )
     arguments = [
         "-m",
@@ -212,7 +295,22 @@ def test_invalid_runtime_setting_is_redacted_by_fresh_child(
     if role == "dev":
         arguments.append("--no-reload")
 
-    result = _run_python(*arguments, cwd=tmp_path)
+    observed_pid: int | None = None
+    child_alive_after_cli: bool | None = None
+    try:
+        result = _run_python(
+            *arguments,
+            cwd=tmp_path,
+            extra_env={"PYTHONPATH": _probe_pythonpath()},
+            removed_env=(invalid_field, VALIDATION_CHILD_PID_PATH_ENV),
+        )
+        observed_pid = _read_observed_pid(validation_child_pid_path)
+        child_alive_after_cli = _pid_is_alive(observed_pid)
+    finally:
+        if observed_pid is None and validation_child_pid_path.exists():
+            observed_pid = int(validation_child_pid_path.read_text(encoding="utf-8"))
+        if observed_pid is not None:
+            _terminate_observed_pid(observed_pid)
 
     assert result.returncode == 2
     assert result.stderr == (
@@ -222,6 +320,7 @@ def test_invalid_runtime_setting_is_redacted_by_fresh_child(
     assert "ValidationError" not in result.stderr
     assert "input_value" not in result.stderr
     assert "Traceback" not in result.stderr
+    assert child_alive_after_cli is False
 
 
 def test_invalid_internal_runtime_target_returns_fixed_error(
