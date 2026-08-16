@@ -109,7 +109,7 @@ def _write_banner(
         try:
             unicode_text.encode(encoding, errors="strict")
         except (UnicodeEncodeError, LookupError):
-            text = ascii_text
+            text = ascii_text.encode("ascii", errors="replace").decode("ascii")
     stdout.write(text)
     stdout.flush()
 

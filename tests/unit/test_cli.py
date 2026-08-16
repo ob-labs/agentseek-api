@@ -909,6 +909,60 @@ def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) 
     assert opened == ["https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"]
 
 
+def test_managed_dev_ascii_fallback_normalizes_non_ascii_urls_before_write(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.wait_calls = 0
+            self.terminate_calls = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.wait_calls += 1
+            self.returncode = 23
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.returncode = -1
+
+    process = FakeProcess()
+    stdout = _EncodingTextStream("cp1252")
+
+    exit_code = cli_module._run_managed_dev_server(
+        command=["uvicorn", "agentseek_api.main:app"],
+        env={},
+        cwd=tmp_path,
+        urls=cli_module._resolve_dev_urls(
+            host="例子",
+            port=2024,
+            studio_url="https://例子.test",
+        ),
+        stdout=stdout,
+        process_factory=lambda command, *, env, cwd: process,
+        wait_for_ready=lambda *_args, **_kwargs: None,
+        open_browser=False,
+        sleep=lambda _seconds: None,
+    )
+
+    assert exit_code == 23
+    assert process.wait_calls == 1
+    assert process.terminate_calls == 0
+    assert stdout.writes == [
+        "- API: http://??:2024\n"
+        "- Docs: http://??:2024/docs\n"
+        "- Studio UI: https://??.test/studio/?baseUrl=http://??:2024\n"
+        "\n\n"
+    ]
+    assert stdout.flush_count == 1
+
+
 def test_run_managed_dev_server_honors_no_browser(tmp_path: Path) -> None:
     from agentseek_api import cli as cli_module
 
