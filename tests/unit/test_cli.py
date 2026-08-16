@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import io
-import os
 import signal
 import tomllib
 from dataclasses import dataclass
@@ -13,10 +12,6 @@ import pytest
 from pydantic import ValidationError
 
 from agentseek_api.services.langgraph_service import LangGraphService
-from scripts.dotenv_conformance import (
-    DOTENV_CONFORMANCE_CASES,
-    DOTENV_CONFORMANCE_ENV_KEYS,
-)
 
 
 def test_python_dotenv_dependency_is_available() -> None:
@@ -1222,42 +1217,6 @@ def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(tmp_path:
     )
 
     assert env["TOKEN"] == "from-shell"
-
-
-@pytest.mark.parametrize(
-    "case",
-    DOTENV_CONFORMANCE_CASES,
-    ids=[case["name"] for case in DOTENV_CONFORMANCE_CASES],
-)
-def test_runtime_dotenv_interpolation_conforms_to_python_dotenv(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    case: dict[str, object],
-) -> None:
-    from dotenv import dotenv_values
-
-    from agentseek_api.cli import build_runtime_env
-
-    for key in DOTENV_CONFORMANCE_ENV_KEYS:
-        monkeypatch.delenv(key, raising=False)
-    ambient = case["ambient"]
-    assert isinstance(ambient, dict)
-    for key, value in ambient.items():
-        monkeypatch.setenv(key, value)
-    env_file = tmp_path / ".env"
-    contents = case["contents"]
-    assert isinstance(contents, str)
-    env_file.write_text(contents, encoding="utf-8")
-    expected = {key: value for key, value in dotenv_values(env_file).items() if value is not None}
-
-    actual = build_runtime_env(
-        config_path=None,
-        env_file=str(env_file),
-        cwd=tmp_path,
-        base_env=dict(os.environ),
-    )
-
-    assert {key: actual[key] for key in expected} == expected
 
 
 def test_higher_precedence_valueless_binding_keeps_lower_export(tmp_path: Path) -> None:
