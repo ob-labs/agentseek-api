@@ -240,6 +240,65 @@ def test_guard_rejects_unverified_handler_installation_and_restores_state(
     assert harness.handlers == harness.previous
 
 
+def test_guard_rejects_unknown_native_handler_before_any_installation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    harness = _SignalHarness()
+    harness.previous[signal.SIGTERM] = None
+    harness.handlers = dict(harness.previous)
+    supervisor_module = _install_signal_harness(monkeypatch, harness)
+    guard = supervisor_module.ForwardingSignalGuard()
+    entered = False
+
+    try:
+        with pytest.raises(supervisor_module.ProcessSupervisionError) as captured:
+            guard.__enter__()
+            entered = True
+    finally:
+        if entered:
+            guard.__exit__(None, None, None)
+
+    assert str(captured.value) == "Runtime child supervision failed."
+    assert harness.handlers == harness.previous
+    assert [event for event in harness.events if event[0] == "handler"] == []
+    assert harness.current_mask == harness.old_mask
+
+
+def test_default_runner_redacts_unknown_native_handler_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    harness = _SignalHarness()
+    harness.previous[signal.SIGTERM] = None
+    harness.handlers = dict(harness.previous)
+    _install_signal_harness(monkeypatch, harness)
+    child_started = False
+
+    def start_child(command, *, env, cwd):
+        nonlocal child_started
+        child_started = True
+        raise AssertionError(f"{command!r} {env!r} {cwd!r}")
+
+    monkeypatch.setattr(
+        cli_module.ForegroundChildSupervisor,
+        "start",
+        start_child,
+    )
+
+    with pytest.raises(cli_module.CliError) as captured:
+        cli_module._default_runner(
+            ["command-canary"],
+            env={"SECRET": "environment-canary"},
+            cwd="cwd-canary",
+        )
+
+    assert str(captured.value) == "Could not supervise the runtime child safely."
+    assert child_started is False
+    assert "canary" not in str(captured.value)
+    assert [event for event in harness.events if event[0] == "handler"] == []
+
+
 def test_guard_fails_closed_when_callers_mask_blocks_forwarded_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -640,6 +699,217 @@ def test_darwin_group_enumeration_wraps_native_callable_failure(
 
 
 @_POSIX_ONLY
+def test_linux_group_enumeration_reads_only_live_numeric_processes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    class _ProcEntries:
+        def __init__(self) -> None:
+            self.entries = [
+                SimpleNamespace(name="self"),
+                SimpleNamespace(name="100"),
+                SimpleNamespace(name="101"),
+                SimpleNamespace(name="102"),
+                SimpleNamespace(name="103"),
+            ]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def __iter__(self):
+            return iter(self.entries)
+
+    class _StatFile:
+        def __init__(self, text: str) -> None:
+            self.text = text
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> str:
+            return self.text
+
+    stat_text = {
+        "100": "100 (leader process) S 1 4312 0",
+        "102": "102 (worker with ) character) S 100 4312 0",
+        "103": "103 (other group) S 1 9000 0",
+    }
+
+    def open_stat(path: str, *, encoding: str):
+        assert encoding == "utf-8"
+        pid = path.split("/")[2]
+        if pid == "101":
+            raise FileNotFoundError(path)
+        return _StatFile(stat_text[pid])
+
+    monkeypatch.setattr(
+        supervisor_module.os,
+        "scandir",
+        lambda path: _ProcEntries() if path == "/proc" else None,
+    )
+    monkeypatch.setattr(supervisor_module, "open", open_stat, raising=False)
+
+    assert supervisor_module._linux_process_group_members(4312) == {100, 102}
+
+
+@pytest.mark.parametrize(
+    ("stat_result", "failure"),
+    [
+        ("malformed", None),
+        ("123 (process) S parent invalid-pgid 0", None),
+        (None, OSError("stat-read-canary")),
+    ],
+)
+@_POSIX_ONLY
+def test_linux_group_enumeration_fails_closed_on_untrusted_proc_data(
+    monkeypatch: pytest.MonkeyPatch,
+    stat_result: str | None,
+    failure: OSError | None,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    class _ProcEntries:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def __iter__(self):
+            return iter([SimpleNamespace(name="123")])
+
+    class _StatFile:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            return None
+
+        def read(self) -> str:
+            if failure is not None:
+                raise failure
+            assert stat_result is not None
+            return stat_result
+
+    monkeypatch.setattr(supervisor_module.os, "scandir", lambda _path: _ProcEntries())
+    monkeypatch.setattr(
+        supervisor_module,
+        "open",
+        lambda *_args, **_kwargs: _StatFile(),
+        raising=False,
+    )
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError) as captured:
+        supervisor_module._linux_process_group_members(4312)
+
+    assert "canary" not in str(captured.value)
+
+
+@_POSIX_ONLY
+def test_linux_group_enumeration_wraps_proc_scan_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    monkeypatch.setattr(
+        supervisor_module.os,
+        "scandir",
+        lambda _path: (_ for _ in ()).throw(OSError("proc-scan-canary")),
+    )
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError) as captured:
+        supervisor_module._linux_process_group_members(4312)
+
+    assert "proc-scan-canary" not in str(captured.value)
+
+
+@_POSIX_ONLY
+def test_darwin_group_enumeration_accepts_zero_capacity_as_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    class _EmptyGroup:
+        def __call__(self, _pgid: int, _buffer, _size: int) -> int:
+            supervisor_module.ctypes.set_errno(0)
+            return 0
+
+    monkeypatch.setattr(
+        supervisor_module.ctypes,
+        "CDLL",
+        lambda *_args, **_kwargs: SimpleNamespace(proc_listpgrppids=_EmptyGroup()),
+    )
+
+    assert supervisor_module._darwin_process_group_members(4312) == set()
+
+
+@_POSIX_ONLY
+def test_darwin_group_enumeration_fails_closed_when_members_keep_growing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    class _GrowingGroup:
+        def __call__(self, _pgid: int, _buffer, size: int) -> int:
+            supervisor_module.ctypes.set_errno(0)
+            if size == 0:
+                return 16
+            return size // supervisor_module.ctypes.sizeof(
+                supervisor_module.ctypes.c_int
+            )
+
+    monkeypatch.setattr(
+        supervisor_module.ctypes,
+        "CDLL",
+        lambda *_args, **_kwargs: SimpleNamespace(proc_listpgrppids=_GrowingGroup()),
+    )
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError):
+        supervisor_module._darwin_process_group_members(4312)
+
+
+@pytest.mark.parametrize(
+    "failure", [OSError("libproc-load-canary"), KeyboardInterrupt()]
+)
+@_POSIX_ONLY
+def test_darwin_group_enumeration_preserves_control_flow_and_redacts_native_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    failure: BaseException,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    if isinstance(failure, KeyboardInterrupt):
+
+        class _InterruptedGroup:
+            def __call__(self, _pgid: int, _buffer, _size: int) -> int:
+                raise failure
+
+        def loader(*_args, **_kwargs):
+            return SimpleNamespace(proc_listpgrppids=_InterruptedGroup())
+
+        expected = KeyboardInterrupt
+    else:
+
+        def loader(*_args, **_kwargs):
+            raise failure
+
+        expected = supervisor_module.ProcessSupervisionError
+    monkeypatch.setattr(supervisor_module.ctypes, "CDLL", loader)
+
+    with pytest.raises(expected) as captured:
+        supervisor_module._darwin_process_group_members(4312)
+
+    assert "canary" not in str(captured.value)
+
+
+@_POSIX_ONLY
 def test_posix_waitid_preserves_forwarded_signal(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -668,6 +938,170 @@ def test_posix_waitid_preserves_forwarded_signal(
         supervisor_module._waitid_no_reap(4312, nohang=False)
 
     assert captured.value is forwarded
+
+
+@pytest.mark.parametrize(
+    ("wait_result", "expected"),
+    [
+        (SimpleNamespace(si_pid=4312, si_code=1, si_status=27), 27),
+        (SimpleNamespace(si_pid=4312, si_code=2, si_status=9), -9),
+        (SimpleNamespace(si_pid=4312, si_code=3, si_status=6), -6),
+    ],
+)
+def test_waitid_exit_decoder_preserves_direct_child_status(
+    wait_result: SimpleNamespace,
+    expected: int,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    assert (
+        supervisor_module._decode_waitid_exit(wait_result, expected_pid=4312)
+        == expected
+    )
+
+
+@pytest.mark.parametrize(
+    "wait_result",
+    [
+        None,
+        SimpleNamespace(si_pid=9999, si_code=1, si_status=0),
+        SimpleNamespace(si_pid=4312, si_code=99, si_status=0),
+    ],
+)
+def test_waitid_exit_decoder_rejects_ambiguous_child_status(
+    wait_result: SimpleNamespace | None,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError):
+        supervisor_module._decode_waitid_exit(wait_result, expected_pid=4312)
+
+
+@_POSIX_ONLY
+def test_generic_waitid_adapter_supports_polling_and_signal_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    constants = {
+        "P_PID": 1,
+        "WEXITED": 4,
+        "WNOWAIT": 0x01000000,
+        "WNOHANG": 1,
+        "CLD_EXITED": 1,
+        "CLD_KILLED": 2,
+        "CLD_DUMPED": 3,
+    }
+    calls: list[tuple[int, int, int]] = []
+    results = iter(
+        [
+            None,
+            SimpleNamespace(si_pid=4312, si_code=2, si_status=signal.SIGTERM),
+        ]
+    )
+    monkeypatch.setattr(supervisor_module.sys, "platform", "linux")
+    for name, value in constants.items():
+        monkeypatch.setattr(supervisor_module.os, name, value, raising=False)
+
+    def waitid(id_type: int, pid: int, options: int):
+        calls.append((id_type, pid, options))
+        return next(results)
+
+    monkeypatch.setattr(supervisor_module.os, "waitid", waitid, raising=False)
+
+    assert supervisor_module._waitid_no_reap(4312, nohang=True) is None
+    assert supervisor_module._waitid_no_reap(4312, nohang=False) == -signal.SIGTERM
+    assert calls == [
+        (1, 4312, 0x01000005),
+        (1, 4312, 0x01000004),
+    ]
+
+
+@_POSIX_ONLY
+def test_generic_waitid_adapter_redacts_native_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    monkeypatch.setattr(supervisor_module.sys, "platform", "linux")
+    for name, value in {
+        "P_PID": 1,
+        "WEXITED": 4,
+        "WNOWAIT": 0x01000000,
+        "WNOHANG": 1,
+        "CLD_EXITED": 1,
+        "CLD_KILLED": 2,
+        "CLD_DUMPED": 3,
+    }.items():
+        monkeypatch.setattr(supervisor_module.os, name, value, raising=False)
+    monkeypatch.setattr(
+        supervisor_module.os,
+        "waitid",
+        lambda *_args: (_ for _ in ()).throw(OSError("waitid-canary")),
+        raising=False,
+    )
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError) as captured:
+        supervisor_module._waitid_no_reap(4312, nohang=False)
+
+    assert "waitid-canary" not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    ("platform", "members", "expected"),
+    [
+        ("darwin", {4312, 4313}, True),
+        ("linux", {4312}, False),
+    ],
+)
+@_POSIX_ONLY
+def test_process_group_member_routing_uses_platform_enumerator(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    members: set[int],
+    expected: bool,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    calls: list[tuple[str, int]] = []
+    monkeypatch.setattr(supervisor_module.sys, "platform", platform)
+    monkeypatch.setattr(
+        supervisor_module,
+        "_darwin_process_group_members",
+        lambda pgid: calls.append(("darwin", pgid)) or members,
+    )
+    monkeypatch.setattr(
+        supervisor_module,
+        "_linux_process_group_members",
+        lambda pgid: calls.append(("linux", pgid)) or members,
+    )
+
+    assert supervisor_module._process_group_has_other_members(4312, 4312) is expected
+    assert calls == [(platform, 4312)]
+
+
+@pytest.mark.parametrize(
+    ("pgid", "leader_pid", "platform"),
+    [
+        (0, 4312, "linux"),
+        (4312, 0, "linux"),
+        (4312, 9999, "linux"),
+        (4312, 4312, "aix"),
+    ],
+)
+@_POSIX_ONLY
+def test_process_group_member_routing_rejects_unsafe_identity_or_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    pgid: int,
+    leader_pid: int,
+    platform: str,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    monkeypatch.setattr(supervisor_module.sys, "platform", platform)
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError):
+        supervisor_module._process_group_has_other_members(pgid, leader_pid)
 
 
 @_POSIX_ONLY
@@ -1305,8 +1739,16 @@ class _FakeWindowsLaunchNative:
 
 
 class _FakeAttributeKernel32:
-    def __init__(self, *, fail_attribute: int | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_attribute: int | None = None,
+        zero_size: bool = False,
+        fail_initialize: bool = False,
+    ) -> None:
         self.fail_attribute = fail_attribute
+        self.zero_size = zero_size
+        self.fail_initialize = fail_initialize
         self.initialize_counts: list[int] = []
         self.updated_attributes: list[tuple[int, int]] = []
         self.deleted: list[object] = []
@@ -1321,9 +1763,9 @@ class _FakeAttributeKernel32:
         self.initialize_counts.append(count)
         assert flags == 0
         if pointer is None:
-            size._obj.value = 128
+            size._obj.value = 0 if self.zero_size else 128
             return False
-        return True
+        return not self.fail_initialize
 
     def UpdateProcThreadAttribute(
         self,
@@ -1345,6 +1787,51 @@ class _FakeAttributeKernel32:
 
     def DeleteProcThreadAttributeList(self, pointer) -> None:
         self.deleted.append(pointer)
+
+
+class _ConfiguredWin32Function:
+    def __init__(self, name: str, kernel) -> None:
+        self.name = name
+        self.kernel = kernel
+        self.argtypes: object = "unset"
+        self.restype: object = "unset"
+
+    def __call__(self, *args):
+        self.kernel.calls.append((self.name, args))
+        result = self.kernel.results.get(self.name, True)
+        if isinstance(result, list):
+            result = result.pop(0)
+        return result(*args) if callable(result) else result
+
+
+class _ConfiguredWin32Kernel:
+    def __init__(self) -> None:
+        self.functions: dict[str, _ConfiguredWin32Function] = {}
+        self.results: dict[str, object] = {}
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def __getattr__(self, name: str) -> _ConfiguredWin32Function:
+        if name in self.functions:
+            return self.functions[name]
+        function = _ConfiguredWin32Function(name, self)
+        self.functions[name] = function
+        return function
+
+
+def _make_configured_win32_api(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from agentseek_api import process_supervisor as supervisor_module
+
+    kernel32 = _ConfiguredWin32Kernel()
+    monkeypatch.setattr(
+        supervisor_module.ctypes,
+        "WinDLL",
+        lambda name, *, use_last_error: kernel32,
+        raising=False,
+    )
+    api = supervisor_module._Win32Api()
+    return supervisor_module, kernel32, api
 
 
 def test_windows_native_attribute_list_includes_stdio_and_atomic_job() -> None:
@@ -1382,6 +1869,423 @@ def test_windows_native_job_attribute_failure_deletes_attribute_list() -> None:
         0x0002000D,
     ]
     assert len(kernel32.deleted) == 1
+
+
+@pytest.mark.parametrize(
+    ("kernel_options", "deleted_count"),
+    [
+        ({"zero_size": True}, 0),
+        ({"fail_initialize": True}, 0),
+        ({"fail_attribute": 0x00020002}, 1),
+    ],
+)
+def test_windows_native_attribute_setup_failures_stop_before_process_creation(
+    kernel_options: dict[str, object],
+    deleted_count: int,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    kernel32 = _FakeAttributeKernel32(**kernel_options)
+    native = supervisor_module._CtypesWindowsLaunchNative(kernel32)
+
+    with pytest.raises(OSError):
+        native.create_attribute_list((11, 12, 13), (99,))
+
+    assert len(kernel32.deleted) == deleted_count
+
+
+def test_win32_api_configures_native_ownership_functions_and_key_signatures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor_module, kernel32, api = _make_configured_win32_api(monkeypatch)
+
+    expected_functions = {
+        "CloseHandle",
+        "CreateFileW",
+        "CreateJobObjectW",
+        "CreateProcessW",
+        "DeleteProcThreadAttributeList",
+        "DuplicateHandle",
+        "GenerateConsoleCtrlEvent",
+        "GetCurrentProcess",
+        "GetExitCodeProcess",
+        "GetStdHandle",
+        "InitializeProcThreadAttributeList",
+        "QueryInformationJobObject",
+        "ResumeThread",
+        "SetInformationJobObject",
+        "TerminateJobObject",
+        "TerminateProcess",
+        "UpdateProcThreadAttribute",
+        "WaitForSingleObject",
+    }
+
+    assert set(kernel32.functions) == expected_functions
+    assert all(
+        function.argtypes != "unset" and function.restype != "unset"
+        for function in kernel32.functions.values()
+    )
+    expected_signatures = {
+        "CreateProcessW": (
+            [
+                supervisor_module.wintypes.LPCWSTR,
+                supervisor_module.wintypes.LPWSTR,
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.wintypes.BOOL,
+                supervisor_module.wintypes.DWORD,
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.wintypes.LPCWSTR,
+                supervisor_module.ctypes.POINTER(supervisor_module._STARTUPINFOW),
+                supervisor_module.ctypes.POINTER(
+                    supervisor_module._PROCESS_INFORMATION
+                ),
+            ],
+            supervisor_module.wintypes.BOOL,
+        ),
+        "InitializeProcThreadAttributeList": (
+            [
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.wintypes.DWORD,
+                supervisor_module.wintypes.DWORD,
+                supervisor_module.ctypes.POINTER(supervisor_module.ctypes.c_size_t),
+            ],
+            supervisor_module.wintypes.BOOL,
+        ),
+        "UpdateProcThreadAttribute": (
+            [
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.wintypes.DWORD,
+                supervisor_module.ctypes.c_size_t,
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.ctypes.c_size_t,
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.ctypes.c_void_p,
+            ],
+            supervisor_module.wintypes.BOOL,
+        ),
+        "QueryInformationJobObject": (
+            [
+                supervisor_module.wintypes.HANDLE,
+                supervisor_module.ctypes.c_int,
+                supervisor_module.ctypes.c_void_p,
+                supervisor_module.wintypes.DWORD,
+                supervisor_module.ctypes.POINTER(supervisor_module.wintypes.DWORD),
+            ],
+            supervisor_module.wintypes.BOOL,
+        ),
+    }
+    for name, (argtypes, restype) in expected_signatures.items():
+        assert kernel32.functions[name].argtypes == argtypes
+        assert kernel32.functions[name].restype is restype
+    assert api._process_launcher._native._kernel32 is kernel32
+
+
+def test_win32_api_performs_job_wait_and_exit_operations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supervisor_module, kernel32, api = _make_configured_win32_api(monkeypatch)
+    observed_limit_flags: list[int] = []
+    query_results = [1, 0]
+
+    kernel32.results.update(
+        {
+            "CreateJobObjectW": 41,
+            "SetInformationJobObject": lambda _job, _kind, information, _size: (
+                observed_limit_flags.append(
+                    information._obj.BasicLimitInformation.LimitFlags
+                )
+                or True
+            ),
+            "ResumeThread": 1,
+            "TerminateJobObject": True,
+            "WaitForSingleObject": [
+                supervisor_module._Win32Api._WAIT_TIMEOUT,
+                supervisor_module._Win32Api._WAIT_OBJECT_0,
+            ],
+            "GetExitCodeProcess": lambda _process, result: (
+                setattr(result._obj, "value", 73) or True
+            ),
+            "QueryInformationJobObject": lambda _job, _kind, information, _size, _used: (
+                setattr(information._obj, "ActiveProcesses", query_results.pop(0))
+                or True
+            ),
+            "GenerateConsoleCtrlEvent": True,
+            "CloseHandle": True,
+        }
+    )
+    launcher_calls: list[tuple[object, ...]] = []
+    api._process_launcher = SimpleNamespace(
+        create=lambda command, *, env, cwd, job: (
+            launcher_calls.append((command, env, cwd, job)) or ("process", "thread", 55)
+        )
+    )
+
+    job = api.create_job()
+    api.set_kill_on_close(job)
+    assert api.create_suspended_process(
+        ["python", "child.py"],
+        env={"A": "1"},
+        cwd="C:\\runtime",
+        job=job,
+    ) == ("process", "thread", 55)
+    api.resume_thread("thread")
+    api.terminate_job(job)
+    assert api.wait_process("process", 0.0001) is False
+    assert api.wait_process("process", None) is True
+    assert api.process_exit_code("process") == 73
+    assert api.wait_for_job_empty(job, 0.0) is False
+    assert api.wait_for_job_empty(job, 0.0) is True
+    api.send_ctrl_break(55)
+    api.close_handle("process")
+    api.close_handle(None)
+
+    assert observed_limit_flags == [0x00002000]
+    assert launcher_calls == [(["python", "child.py"], {"A": "1"}, "C:\\runtime", 41)]
+    wait_calls = [
+        args for name, args in kernel32.calls if name == "WaitForSingleObject"
+    ]
+    assert [args[1] for args in wait_calls] == [1, 0xFFFFFFFF]
+    assert [
+        args for name, args in kernel32.calls if name == "GenerateConsoleCtrlEvent"
+    ] == [(1, 55)]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    [
+        "create-job",
+        "set-kill-on-close",
+        "resume-thread",
+        "terminate-job",
+        "wait-process",
+        "exit-code",
+        "query-job",
+        "ctrl-break",
+        "close-handle",
+    ],
+)
+def test_win32_api_native_failures_raise_os_error(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    supervisor_module, kernel32, api = _make_configured_win32_api(monkeypatch)
+    monkeypatch.setattr(
+        supervisor_module.ctypes,
+        "get_last_error",
+        lambda: 5,
+        raising=False,
+    )
+    actions = {
+        "create-job": ("CreateJobObjectW", 0, lambda: api.create_job()),
+        "set-kill-on-close": (
+            "SetInformationJobObject",
+            False,
+            lambda: api.set_kill_on_close(41),
+        ),
+        "resume-thread": ("ResumeThread", 2, lambda: api.resume_thread(42)),
+        "terminate-job": (
+            "TerminateJobObject",
+            False,
+            lambda: api.terminate_job(41),
+        ),
+        "wait-process": (
+            "WaitForSingleObject",
+            0xFFFFFFFF,
+            lambda: api.wait_process(43, 0.0),
+        ),
+        "exit-code": (
+            "GetExitCodeProcess",
+            False,
+            lambda: api.process_exit_code(43),
+        ),
+        "query-job": (
+            "QueryInformationJobObject",
+            False,
+            lambda: api.wait_for_job_empty(41, 0.0),
+        ),
+        "ctrl-break": (
+            "GenerateConsoleCtrlEvent",
+            False,
+            lambda: api.send_ctrl_break(55),
+        ),
+        "close-handle": ("CloseHandle", False, lambda: api.close_handle(43)),
+    }
+    function_name, result, action = actions[operation]
+    kernel32.results[function_name] = result
+
+    with pytest.raises(OSError):
+        action()
+
+
+def test_windows_native_stdio_and_process_creation_preserve_explicit_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    kernel32 = _ConfiguredWin32Kernel()
+    create_file_calls: list[tuple[object, ...]] = []
+    duplicate_calls: list[tuple[object, ...]] = []
+    process_call: dict[str, object] = {}
+    standard_handles = iter([0, 77])
+
+    def create_file(*args):
+        create_file_calls.append(args)
+        return 88
+
+    def duplicate_handle(*args):
+        duplicate_calls.append(args)
+        args[3]._obj.value = 99
+        return True
+
+    def create_process(
+        _application,
+        command_line,
+        _process_attributes,
+        _thread_attributes,
+        inherit_handles,
+        creation_flags,
+        environment,
+        cwd,
+        startup_pointer,
+        process_information,
+    ) -> bool:
+        startup = supervisor_module.ctypes.cast(
+            startup_pointer,
+            supervisor_module.ctypes.POINTER(supervisor_module._STARTUPINFOEXW),
+        ).contents
+        environment_text = environment[:]
+        process_call.update(
+            command=command_line.value,
+            environment_entries=environment_text.rstrip("\0").split("\0"),
+            environment_terminated=environment_text.endswith("\0\0"),
+            cwd=cwd,
+            inherit_handles=inherit_handles,
+            creation_flags=creation_flags,
+            stdio=(
+                startup.StartupInfo.hStdInput,
+                startup.StartupInfo.hStdOutput,
+                startup.StartupInfo.hStdError,
+            ),
+            attribute_pointer=startup.lpAttributeList,
+        )
+        process_information._obj.hProcess = 501
+        process_information._obj.hThread = 502
+        process_information._obj.dwProcessId = 503
+        return True
+
+    kernel32.results.update(
+        {
+            "GetStdHandle": lambda _stream: next(standard_handles),
+            "CreateFileW": create_file,
+            "GetCurrentProcess": 17,
+            "DuplicateHandle": duplicate_handle,
+            "CreateProcessW": create_process,
+            "CloseHandle": True,
+            "DeleteProcThreadAttributeList": None,
+        }
+    )
+    native = supervisor_module._CtypesWindowsLaunchNative(kernel32)
+
+    assert native.get_standard_handle(-10) is None
+    assert native.get_standard_handle(-11) == 77
+    assert native.open_null_handle(-10) == 88
+    assert native.open_null_handle(-11) == 88
+    assert native.duplicate_inheritable_handle(88) == 99
+    attribute_list = supervisor_module._Win32AttributeList(
+        buffer=object(),
+        pointer=1234,
+        handle_array=(11, 12, 13),
+        job_array=(41,),
+    )
+
+    assert native.create_suspended_process(
+        ["python", "child canary.py"],
+        env={"z": "last", "A": "first"},
+        cwd="C:\\runtime",
+        standard_handles=(11, 12, 13),
+        attribute_list=attribute_list,
+    ) == (501, 502, 503)
+    native.delete_handle_list(attribute_list)
+    native.close_handle(501)
+    native.close_handle(None)
+
+    assert create_file_calls[0][1] == 0x80000000
+    assert create_file_calls[1][1] == 0x40000000
+    assert duplicate_calls[0][0:3] == (17, 88, 17)
+    assert process_call == {
+        "command": 'python "child canary.py"',
+        "environment_entries": ["A=first", "z=last"],
+        "environment_terminated": True,
+        "cwd": "C:\\runtime",
+        "inherit_handles": True,
+        "creation_flags": 0x00080604,
+        "stdio": (11, 12, 13),
+        "attribute_pointer": 1234,
+    }
+
+
+@pytest.mark.parametrize(
+    ("function_name", "native_call"),
+    [
+        ("CreateFileW", "open-null"),
+        ("DuplicateHandle", "duplicate"),
+        ("CreateProcessW", "create-process"),
+        ("CloseHandle", "close"),
+    ],
+)
+def test_windows_native_launch_failures_remain_internal_os_errors(
+    monkeypatch: pytest.MonkeyPatch,
+    function_name: str,
+    native_call: str,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    kernel32 = _ConfiguredWin32Kernel()
+    kernel32.results.update(
+        {
+            "CreateFileW": supervisor_module.ctypes.c_void_p(-1).value,
+            "GetCurrentProcess": 17,
+            "DuplicateHandle": False,
+            "CreateProcessW": False,
+            "CloseHandle": False,
+        }
+    )
+    monkeypatch.setattr(
+        supervisor_module.ctypes,
+        "get_last_error",
+        lambda: 5,
+        raising=False,
+    )
+    native = supervisor_module._CtypesWindowsLaunchNative(kernel32)
+    attribute_list = supervisor_module._Win32AttributeList(
+        buffer=object(),
+        pointer=1234,
+        handle_array=(11, 12, 13),
+        job_array=(41,),
+    )
+    calls = {
+        "open-null": lambda: native.open_null_handle(-10),
+        "duplicate": lambda: native.duplicate_inheritable_handle(88),
+        "create-process": lambda: native.create_suspended_process(
+            ["child"],
+            env={},
+            cwd=None,
+            standard_handles=(11, 12, 13),
+            attribute_list=attribute_list,
+        ),
+        "close": lambda: native.close_handle(501),
+    }
+
+    with pytest.raises(OSError):
+        calls[native_call]()
+
+    expected_calls = (
+        ["GetCurrentProcess", "DuplicateHandle"]
+        if native_call == "duplicate"
+        else [function_name]
+    )
+    assert [name for name, _args in kernel32.calls] == expected_calls
 
 
 def test_windows_child_has_no_unassigned_post_creation_window() -> None:
@@ -1796,4 +2700,123 @@ def test_windows_native_cleanup_failure_still_closes_every_handle() -> None:
             child.close()
 
     names = [name for name, _value in api.events]
+    assert names[-2:] == ["close-process-handle", "close-job-handle"]
+
+
+def test_windows_sigterm_and_forced_cleanup_wait_for_job_and_direct_process() -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    api = _FakeWin32Api(
+        job_empty_results=[True, True],
+        wait_process_results=[True, True],
+    )
+    child = supervisor_module._WindowsChild.start(
+        ["child"],
+        env={},
+        cwd=None,
+        api=api,
+    )
+
+    child.forward_signal(signal.SIGTERM)
+    child.forward_and_reap(signal.SIGTERM, timeout=5.0)
+    child.terminate_and_reap(timeout=5.0)
+    child.close()
+
+    names = [name for name, _value in api.events]
+    assert names.count("terminate-job") == 3
+    assert names.count("wait-job-empty") == 2
+    assert names.count("wait-process") == 2
+    assert names[-2:] == ["close-process-handle", "close-job-handle"]
+
+
+@pytest.mark.parametrize(
+    "failure_point",
+    [
+        "forward-job-timeout",
+        "forward-process-timeout",
+        "terminate-job-timeout",
+        "terminate-process-timeout",
+        "remaining-tree-timeout",
+    ],
+)
+def test_windows_cleanup_timeouts_fail_closed_after_bounded_wait(
+    failure_point: str,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    if failure_point == "remaining-tree-timeout":
+        job_empty_results = [False, False]
+    else:
+        job_empty_results = [failure_point.endswith("process-timeout")]
+    wait_process_results = [False]
+    api = _FakeWin32Api(
+        job_empty_results=job_empty_results,
+        wait_process_results=wait_process_results,
+    )
+    child = supervisor_module._WindowsChild.start(
+        ["child"],
+        env={},
+        cwd=None,
+        api=api,
+    )
+    operations = {
+        "forward-job-timeout": lambda: child.forward_and_reap(
+            signal.SIGTERM,
+            timeout=0.0,
+        ),
+        "forward-process-timeout": lambda: child.forward_and_reap(
+            signal.SIGTERM,
+            timeout=0.0,
+        ),
+        "terminate-job-timeout": lambda: child.terminate_and_reap(timeout=0.0),
+        "terminate-process-timeout": lambda: child.terminate_and_reap(timeout=0.0),
+        "remaining-tree-timeout": lambda: child.close_remaining_tree(timeout=0.0),
+    }
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError):
+        operations[failure_point]()
+
+    child.close()
+    job_waits = [value for name, value in api.events if name == "wait-job-empty"]
+    wait_timeouts = [value[1] for name, value in api.events if name == "wait-process"]
+    assert len(job_waits) == (2 if failure_point == "remaining-tree-timeout" else 1)
+    if failure_point.endswith("process-timeout"):
+        assert wait_timeouts == [0.0]
+    else:
+        assert wait_timeouts == []
+
+
+@pytest.mark.parametrize("failure_point", ["wait", "forward", "close"])
+def test_windows_child_native_failures_are_value_free_and_attempt_handle_cleanup(
+    failure_point: str,
+) -> None:
+    from agentseek_api import process_supervisor as supervisor_module
+
+    api = _FakeWin32Api(
+        fail_at={
+            "wait": "wait-process",
+            "forward": "terminate-job",
+            "close": "close-process-handle",
+        }[failure_point],
+        wait_process_results=[True],
+    )
+    child = supervisor_module._WindowsChild.start(
+        ["child"],
+        env={},
+        cwd=None,
+        api=api,
+    )
+    actions = {
+        "wait": child.wait,
+        "forward": lambda: child.forward_signal(signal.SIGTERM),
+        "close": child.close,
+    }
+
+    with pytest.raises(supervisor_module.ProcessSupervisionError) as captured:
+        actions[failure_point]()
+
+    if failure_point != "close":
+        child.close()
+    names = [name for name, _value in api.events]
+    assert "setup-canary" not in str(captured.value)
     assert names[-2:] == ["close-process-handle", "close-job-handle"]

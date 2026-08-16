@@ -97,6 +97,7 @@ jobs:
           tests/unit/test_graph_manifest.py
           tests/unit/test_dotenv_adapter.py
           tests/unit/test_runtime_environment.py
+          tests/unit/test_runtime_entrypoint.py
           tests/unit/test_process_supervisor.py
           tests/integration/test_cli_runtime_processes.py
           -q

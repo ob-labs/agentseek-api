@@ -70,7 +70,10 @@ class ForwardingSignalGuard:
             ):
                 raise ProcessSupervisionError()
             for signum in _MANAGED_SIGNALS:
-                self._previous_handlers[signum] = signal.getsignal(signum)
+                previous_handler = signal.getsignal(signum)
+                if previous_handler is None:
+                    raise ProcessSupervisionError()
+                self._previous_handlers[signum] = previous_handler
             for signum in _MANAGED_SIGNALS:
                 signal.signal(signum, self._installed_handler)
                 self._installed_signals.append(signum)
