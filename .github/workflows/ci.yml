@@ -82,14 +82,6 @@ jobs:
           uv run python -c
           "from pathlib import Path; import subprocess; out = Path('.tmp/agentseek.Dockerfile'); out.parent.mkdir(exist_ok=True); subprocess.run(['uv', 'run', 'agentseek-api', 'dockerfile', '--config', 'examples/external_graph/manifest.json', str(out)], check=True); text = out.read_text(encoding='utf-8'); assert 'ENV PYTHONPATH=/deps/agent' in text; assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/examples/external_graph/manifest.json' in text"
 
-      - name: Sync embedded SeekDB extra for serve smoke
-        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
-        run: uv sync --dev --extra embedded
-
-      - name: CLI serve smoke boots a live API
-        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
-        run: uv run python scripts/test_cli_serve_smoke.py
-
       - name: CLI config, host environment, and process tests
         run: >-
           uv run pytest
@@ -101,6 +93,14 @@ jobs:
           tests/unit/test_process_supervisor.py
           tests/integration/test_cli_runtime_processes.py
           -q
+
+      - name: Sync embedded SeekDB extra for serve smoke
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
+        run: uv sync --dev --extra embedded
+
+      - name: CLI serve smoke boots a live API
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
+        run: uv run python scripts/test_cli_serve_smoke.py
 
       - name: Minimum direct dependency compatibility
         if: runner.os == 'Linux'
