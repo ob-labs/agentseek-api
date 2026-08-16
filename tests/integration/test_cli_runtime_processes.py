@@ -518,6 +518,59 @@ def _start_supervisor_wrapper(
     )
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Object acquisition only")
+def test_windows_hard_termination_during_creation_leaves_no_unassigned_child(
+    tmp_path: Path,
+) -> None:
+    child_pid_path = tmp_path / "atomic-job-child.pid"
+    helper = """
+import os
+import sys
+import time
+from pathlib import Path
+from agentseek_api import process_supervisor as supervisor
+
+api = supervisor._Win32Api()
+native = api._process_launcher._native
+create_suspended_process = native.create_suspended_process
+
+def pause_after_create(*args, **kwargs):
+    result = create_suspended_process(*args, **kwargs)
+    Path(sys.argv[1]).write_text(str(result[2]), encoding="utf-8")
+    time.sleep(60)
+    return result
+
+native.create_suspended_process = pause_after_create
+supervisor._WindowsChild.start(
+    [sys.executable, "-c", "import time; time.sleep(60)"],
+    env=dict(os.environ),
+    cwd=None,
+    api=api,
+)
+"""
+    process = subprocess.Popen(
+        [sys.executable, "-c", helper, str(child_pid_path)],
+        cwd=tmp_path,
+        env=dict(os.environ),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    child_pid = 0
+    try:
+        child_pid = _read_observed_pid(child_pid_path, timeout_seconds=10.0)
+        assert _pid_is_alive(child_pid)
+
+        process.kill()
+        process.communicate(timeout=5)
+
+        _wait_for_pids_gone((child_pid,), timeout_seconds=8.0)
+    finally:
+        _stop_test_process(process)
+        if child_pid:
+            _cleanup_recorded_pids((child_pid,))
+
+
 def test_external_sigterm_forwards_and_leaves_no_runtime_child(
     tmp_path: Path,
 ) -> None:

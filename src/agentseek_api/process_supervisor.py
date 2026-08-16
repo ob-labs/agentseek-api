@@ -109,9 +109,11 @@ class ForwardingSignalGuard:
         self._child = child
         self._state = "waiting"
         pending_signal = self._pending_signal
+        if pending_signal is None:
+            return
+        self._state = "delivering"
         self._pending_signal = None
-        if pending_signal is not None:
-            raise _ForwardedSignal(pending_signal)
+        raise _ForwardedSignal(pending_signal)
 
     def begin_cleanup(self) -> None:
         if self._state != "closed":
@@ -127,11 +129,12 @@ class ForwardingSignalGuard:
                 self._pending_signal = signum
             return
         if self._state == "waiting":
+            self._state = "delivering"
             if self._pending_signal is not None:
                 signum = self._pending_signal
                 self._pending_signal = None
             raise _ForwardedSignal(signum)
-        if self._state == "cleanup":
+        if self._state in {"delivering", "cleanup"}:
             if self._child is None:
                 return
             try:
@@ -151,8 +154,8 @@ class ForwardingSignalGuard:
     def _restore_entry_mask(self) -> None:
         if not self._mask_is_blocked or self._original_mask is None:
             return
-        self._mask_is_blocked = False
         signal.pthread_sigmask(signal.SIG_SETMASK, self._original_mask)
+        self._mask_is_blocked = False
 
     def _restore_after_failed_entry(self) -> None:
         failed = False
@@ -361,24 +364,37 @@ def _darwin_process_group_members(pgid: int) -> set[int]:
             ctypes.c_int,
         ]
         list_group_pids.restype = ctypes.c_int
-        capacity = list_group_pids(pgid, None, 0)
     except BaseException as exc:
         raise ProcessSupervisionError() from exc
-    if capacity < 0:
-        raise ProcessSupervisionError()
-    capacity = max(16, capacity)
-    for _attempt in range(3):
-        buffer = (ctypes.c_int * capacity)()
-        count = list_group_pids(
-            pgid,
-            ctypes.cast(buffer, ctypes.c_void_p),
-            ctypes.sizeof(buffer),
-        )
-        if count < 0:
+
+    def list_pids(buffer, size: int) -> int:
+        ctypes.set_errno(0)
+        count = list_group_pids(pgid, buffer, size)
+        call_errno = ctypes.get_errno()
+        if count < 0 or (count == 0 and call_errno != 0):
             raise ProcessSupervisionError()
-        if count < capacity:
-            return {int(pid) for pid in buffer[:count] if pid > 0}
-        capacity *= 2
+        return count
+
+    try:
+        capacity = list_pids(None, 0)
+        if capacity == 0:
+            return set()
+        capacity = max(16, capacity)
+        for _attempt in range(3):
+            buffer = (ctypes.c_int * capacity)()
+            count = list_pids(
+                ctypes.cast(buffer, ctypes.c_void_p),
+                ctypes.sizeof(buffer),
+            )
+            if count < capacity:
+                return {int(pid) for pid in buffer[:count] if pid > 0}
+            capacity *= 2
+    except (KeyboardInterrupt, _ForwardedSignal):
+        raise
+    except ProcessSupervisionError:
+        raise
+    except BaseException as exc:
+        raise ProcessSupervisionError() from exc
     raise ProcessSupervisionError()
 
 
@@ -400,6 +416,7 @@ class _PosixChild:
         self._pgid = process.pid
         self._observed_exit_code: int | None = None
         self._direct_reaped = False
+        self._group_signal_allowed = True
         self._cleanup_error = False
 
     @classmethod
@@ -498,6 +515,8 @@ class _PosixChild:
             raise ProcessSupervisionError()
 
     def _signal_group(self, signum: int) -> None:
+        if not self._group_signal_allowed or self._direct_reaped:
+            return
         self._validate_process_group()
         try:
             os.killpg(self._pgid, signum)
@@ -547,12 +566,26 @@ class _PosixChild:
             raise ProcessSupervisionError()
         expected_exit_code = self._observed_exit_code
         try:
-            observed_exit_code = self._process.wait(timeout=0.0)
+            observed_exit_code = self._wait_and_mark_direct_reaped()
+        except (KeyboardInterrupt, _ForwardedSignal):
+            raise
         except BaseException as exc:
             raise ProcessSupervisionError() from exc
-        self._direct_reaped = True
         if observed_exit_code != expected_exit_code:
             raise ProcessSupervisionError()
+
+    def _wait_and_mark_direct_reaped(self) -> int:
+        previous_mask = signal.pthread_sigmask(
+            signal.SIG_BLOCK,
+            set(_MANAGED_SIGNALS),
+        )
+        self._group_signal_allowed = False
+        try:
+            observed_exit_code = self._process.wait(timeout=0.0)
+            self._direct_reaped = True
+            return observed_exit_code
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
 
     def _clean_and_reap(
         self,
@@ -618,13 +651,14 @@ class _PosixChild:
                 failure = True
         else:
             try:
-                self._process.wait(timeout=0.0)
+                self._wait_and_mark_direct_reaped()
             except subprocess.TimeoutExpired:
                 pass
+            except (KeyboardInterrupt, _ForwardedSignal):
+                raise
             except BaseException:
                 failure = True
             else:
-                self._direct_reaped = True
                 failure = True
 
         if failure or not complete or not self._direct_reaped:
@@ -644,13 +678,10 @@ class _Win32ApiProtocol(Protocol):
         *,
         env: dict[str, str],
         cwd: str | None,
+        job,
     ): ...
 
-    def assign_process_to_job(self, job, process) -> None: ...
-
     def resume_thread(self, thread) -> None: ...
-
-    def terminate_process(self, process) -> None: ...
 
     def terminate_job(self, job) -> None: ...
 
@@ -754,10 +785,11 @@ class _PROCESS_INFORMATION(ctypes.Structure):
 
 
 class _Win32AttributeList:
-    def __init__(self, *, buffer, pointer, handle_array) -> None:
+    def __init__(self, *, buffer, pointer, handle_array, job_array) -> None:
         self.buffer = buffer
         self.pointer = pointer
         self.handle_array = handle_array
+        self.job_array = job_array
 
 
 class _WindowsLaunchNativeProtocol(Protocol):
@@ -767,7 +799,7 @@ class _WindowsLaunchNativeProtocol(Protocol):
 
     def duplicate_inheritable_handle(self, handle): ...
 
-    def create_handle_list(self, handles): ...
+    def create_attribute_list(self, handles, jobs): ...
 
     def create_suspended_process(
         self,
@@ -796,6 +828,7 @@ class _WindowsProcessLauncher:
         *,
         env: dict[str, str],
         cwd: str | None,
+        job,
     ):
         duplicates: list[object] = []
         owned_sources: list[object] = []
@@ -812,7 +845,10 @@ class _WindowsProcessLauncher:
                 standard_handles.append(handle)
             for handle in standard_handles:
                 duplicates.append(self._native.duplicate_inheritable_handle(handle))
-            attribute_list = self._native.create_handle_list(duplicates)
+            attribute_list = self._native.create_attribute_list(
+                duplicates,
+                (job,),
+            )
             result = self._native.create_suspended_process(
                 command,
                 env=env,
@@ -860,6 +896,7 @@ class _CtypesWindowsLaunchNative:
     _EXTENDED_STARTUPINFO_PRESENT = 0x00080000
     _STARTF_USESTDHANDLES = 0x00000100
     _PROC_THREAD_ATTRIBUTE_HANDLE_LIST = 0x00020002
+    _PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D
     _DUPLICATE_SAME_ACCESS = 0x00000002
     _WAIT_OBJECT_0 = 0x00000000
     _GENERIC_READ = 0x80000000
@@ -908,11 +945,11 @@ class _CtypesWindowsLaunchNative:
             self._raise_error()
         return duplicate.value
 
-    def create_handle_list(self, handles):
+    def create_attribute_list(self, handles, jobs):
         size = ctypes.c_size_t()
         self._kernel32.InitializeProcThreadAttributeList(
             None,
-            1,
+            2,
             0,
             ctypes.byref(size),
         )
@@ -922,7 +959,7 @@ class _CtypesWindowsLaunchNative:
         pointer = ctypes.cast(buffer, ctypes.c_void_p)
         if not self._kernel32.InitializeProcThreadAttributeList(
             pointer,
-            1,
+            2,
             0,
             ctypes.byref(size),
         ):
@@ -939,10 +976,23 @@ class _CtypesWindowsLaunchNative:
         ):
             self._kernel32.DeleteProcThreadAttributeList(pointer)
             self._raise_error()
+        job_array = (wintypes.HANDLE * len(jobs))(*jobs)
+        if not self._kernel32.UpdateProcThreadAttribute(
+            pointer,
+            0,
+            self._PROC_THREAD_ATTRIBUTE_JOB_LIST,
+            ctypes.cast(job_array, ctypes.c_void_p),
+            ctypes.sizeof(job_array),
+            None,
+            None,
+        ):
+            self._kernel32.DeleteProcThreadAttributeList(pointer)
+            self._raise_error()
         return _Win32AttributeList(
             buffer=buffer,
             pointer=pointer,
             handle_array=handle_array,
+            job_array=job_array,
         )
 
     def create_suspended_process(
@@ -1069,8 +1119,6 @@ class _Win32Api:
             ctypes.POINTER(_PROCESS_INFORMATION),
         ]
         kernel32.CreateProcessW.restype = wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
         kernel32.ResumeThread.argtypes = [wintypes.HANDLE]
         kernel32.ResumeThread.restype = wintypes.DWORD
         kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
@@ -1168,20 +1216,18 @@ class _Win32Api:
         *,
         env: dict[str, str],
         cwd: str | None,
+        job,
     ):
-        return self._process_launcher.create(command, env=env, cwd=cwd)
-
-    def assign_process_to_job(self, job, process) -> None:
-        if not self._kernel32.AssignProcessToJobObject(job, process):
-            self._raise_error()
+        return self._process_launcher.create(
+            command,
+            env=env,
+            cwd=cwd,
+            job=job,
+        )
 
     def resume_thread(self, thread) -> None:
         previous_count = self._kernel32.ResumeThread(thread)
         if previous_count != 1:
-            self._raise_error()
-
-    def terminate_process(self, process) -> None:
-        if not self._kernel32.TerminateProcess(process, 1):
             self._raise_error()
 
     def terminate_job(self, job) -> None:
@@ -1269,7 +1315,6 @@ class _WindowsChild:
         job = None
         process = None
         thread = None
-        assigned = False
         try:
             job = native.create_job()
             native.set_kill_on_close(job)
@@ -1277,9 +1322,8 @@ class _WindowsChild:
                 command,
                 env=env,
                 cwd=cwd,
+                job=job,
             )
-            native.assign_process_to_job(job, process)
-            assigned = True
             native.resume_thread(thread)
             native.close_handle(thread)
             thread = None
@@ -1295,7 +1339,6 @@ class _WindowsChild:
                 job=job,
                 process=process,
                 thread=thread,
-                assigned=assigned,
             )
             raise ProcessSupervisionError() from exc
 
@@ -1306,25 +1349,15 @@ class _WindowsChild:
         job,
         process,
         thread,
-        assigned: bool,
     ) -> None:
         if process is not None:
-            if assigned and job is not None:
+            if job is not None:
                 try:
                     api.terminate_job(job)
                 except BaseException:
                     pass
                 try:
                     api.wait_for_job_empty(job, 5.0)
-                except BaseException:
-                    pass
-            else:
-                try:
-                    api.terminate_process(process)
-                except BaseException:
-                    pass
-                try:
-                    api.wait_process(process, 5.0)
                 except BaseException:
                     pass
         for handle in (thread, process, job):
