@@ -44,11 +44,11 @@ Notable changes to AgentSeek API are documented in this file.
 - Clients must not send both non-empty `config.configurable` and `context` in
   one assistant or run request; such requests now return HTTP 400. Prefer
   `context` for new integrations.
-- For `dev`, `serve`, `worker`, and `scheduler`, dotenv values no longer
-  interpolate from config mappings or other dotenv files. Put dependent
-  bindings in one physical file or pass the final literal value.
-- For those host runtime commands, malformed dotenv syntax now exits with
-  status 2 instead of warning and continuing with a partial configuration.
+- For `dev`, `serve`, `worker`, and `scheduler`, dotenv interpolation is
+  supported only against the inherited environment and earlier bindings in the
+  same physical file.
+- For those host runtime commands, missing, malformed, and non-UTF-8 dotenv
+  sources fail closed with status 2 before a runtime child starts.
 - Dependency resolution now requires SQLAlchemy 2.0.12 or newer, LangGraph
   1.0.6 or newer, LangChain Core 1.2.5 or newer, and MCP 1.27.1 through the 1.x
   series. `python-dotenv` 1.0 through 1.2 is now a direct dependency.
