@@ -260,7 +260,35 @@ When running from this repository, use `uv run agentseek-api ...`.
 
 - `-c, --config PATH`: explicit `agentseek.json`, `langgraph.json`, or manifest
   path
-- `--env-file PATH`: dotenv-style file loaded into the runtime environment
+- `--env-file PATH`: host-runtime dotenv source
+
+### Host runtime environment
+
+For `dev`, `serve`, `worker`, and `scheduler`, direct assignments are applied in
+this order:
+
+1. the dotenv path named by config `env`;
+2. the literal config `env` mapping and `auth.path`;
+3. the CLI `--env-file`;
+4. the environment inherited by `agentseek-api`.
+
+The inherited environment is authoritative by key presence. This includes an
+explicit empty value. A lower source can fill an absent key, but cannot replace
+an inherited `KEY=`.
+
+Each dotenv file is evaluated independently. It can reference the inherited
+environment and earlier bindings in the same physical file; it cannot reference
+a config mapping or another dotenv file. Later assignment does not recompute an
+earlier interpolated value.
+
+In dotenv syntax, a bare `KEY` is valid but contributes no assignment, while
+`KEY=` contributes an explicit empty string. Missing files, invalid UTF-8, and
+malformed syntax stop the command before a runtime child starts.
+
+The CLI applies command-owned values after this merge: the selected config path
+becomes `AGENTSEEK_GRAPHS`, and `dev` forces `STUDIO_AUTH_LOCAL_DEV=true`.
+Host and port options are passed as child argv and do not rewrite environment
+keys with similar names.
 
 ### Common usage
 

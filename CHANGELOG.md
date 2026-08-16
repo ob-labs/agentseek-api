@@ -2,6 +2,27 @@
 
 Notable changes to AgentSeek API are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- Made inherited host environment keys, including explicit empty strings,
+  authoritative over config and CLI dotenv sources.
+- Parse each dotenv source independently with strict malformed-file handling,
+  and distinguish valueless `KEY` from explicit empty `KEY=`.
+- Start worker and scheduler roles in fresh child processes so their settings
+  are constructed after the resolved environment is installed.
+- Kept version, help, and Dockerfile rendering independent of runtime settings
+  validation.
+
+### Upgrade notes
+
+- Dotenv values no longer interpolate from config mappings or other dotenv
+  files. Put dependent bindings in one physical file or pass the final literal
+  value.
+- Malformed dotenv syntax now exits with status 2 instead of warning and
+  continuing with a partial runtime configuration.
+
 ## 0.2.1 - 2026-07-14
 
 ### Fixed
