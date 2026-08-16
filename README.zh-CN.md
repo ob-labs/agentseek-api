@@ -181,7 +181,7 @@ uv run agentseek-api dev --config ./langgraph.json
 ╠═╣│ ┬├┤ │││ │ ╚═╗├┤ ├┤ ├┴┐
 ╩ ╩└─┘└─┘┘└┘ ┴ ╚═╝└─┘└─┘┴ ┴
 
-     AgentSeek v0.2.1
+     AgentSeek v0.2.2
 
 - 🚀 API: http://localhost:2024
 - 📚 Docs: http://localhost:2024/docs
