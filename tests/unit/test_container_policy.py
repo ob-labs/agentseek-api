@@ -310,6 +310,27 @@ def test_cli_builders_construct_target_scoped_command_assignments(
     explicit = build_container_command_assignments(
         config_path=config_path, cwd=tmp_path, postgres_uri="postgresql://db"
     )
+    dev_preloaded = build_container_command_assignments(
+        config_path=config_path,
+        cwd=tmp_path,
+        postgres_uri=None,
+        role="dev",
+        environment_mode="preloaded-v1",
+    )
+    dev_without_mode = build_container_command_assignments(
+        config_path=config_path,
+        cwd=tmp_path,
+        postgres_uri=None,
+        role="dev",
+        environment_mode=None,
+    )
+    non_dev_preloaded = build_container_command_assignments(
+        config_path=config_path,
+        cwd=tmp_path,
+        postgres_uri=None,
+        role="serve",
+        environment_mode="preloaded-v1",
+    )
 
     assert host.values["AGENTSEEK_GRAPHS"] == str(config_path)
     assert host.values["STUDIO_AUTH_LOCAL_DEV"] == "true"
@@ -322,6 +343,16 @@ def test_cli_builders_construct_target_scoped_command_assignments(
             "METADATA_DB_URL": "postgresql://db",
             "METADATA_DB_BACKEND": "postgresql",
         },
+    ]
+    assert [dict(item.values) for item in dev_preloaded] == [
+        {"AGENTSEEK_GRAPHS": "/deps/agent/langgraph.json"},
+        {"STUDIO_AUTH_LOCAL_DEV": "true"},
+    ]
+    assert [dict(item.values) for item in dev_without_mode] == [
+        {"AGENTSEEK_GRAPHS": "/deps/agent/langgraph.json"}
+    ]
+    assert [dict(item.values) for item in non_dev_preloaded] == [
+        {"AGENTSEEK_GRAPHS": "/deps/agent/langgraph.json"}
     ]
 
 

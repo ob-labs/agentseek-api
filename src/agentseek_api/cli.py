@@ -471,7 +471,12 @@ def _resolve_host_environment_plan(plan: EnvironmentPlan) -> dict[str, str]:
 
 
 def build_container_command_assignments(
-    *, config_path: Path, cwd: Path, postgres_uri: str | None
+    *,
+    config_path: Path,
+    cwd: Path,
+    postgres_uri: str | None,
+    role: str | None = None,
+    environment_mode: str | None = None,
 ) -> tuple[CommandDerivedAssignment, ...]:
     assignments = [
         CommandDerivedAssignment(
@@ -493,6 +498,14 @@ def build_container_command_assignments(
                     "METADATA_DB_BACKEND": "postgresql",
                 },
                 reason="postgres uri override",
+            )
+        )
+    if role == "dev" and environment_mode == "preloaded-v1":
+        assignments.append(
+            CommandDerivedAssignment(
+                targets=frozenset({EnvironmentTarget.APP_CONTAINER}),
+                values={"STUDIO_AUTH_LOCAL_DEV": "true"},
+                reason="development role safety in preloaded runtime",
             )
         )
     return tuple(assignments)
