@@ -344,6 +344,149 @@ def test_stale_sweep_never_deletes_regular_replacement(
     )
 
 
+@pytest.mark.parametrize(
+    ("control", "entries"),
+    [
+        (
+            0x0004 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10, 0x001F01FF, "system"),
+            ),
+        ),
+        (
+            0x0004 | 0x0100 | 0x0400,
+            (
+                (0, 0x01 | 0x02 | 0x10, 0x001F01FF, "user"),
+                (0, 0x01 | 0x02 | 0x10, 0x001F01FF, "system"),
+            ),
+        ),
+    ],
+    ids=["inherited-file", "auto-inherited-directory"],
+)
+def test_windows_descendant_dacl_accepts_effective_inherited_user_and_system_aces(
+    control: int,
+    entries: tuple[tuple[int, int, int, str], ...],
+) -> None:
+    secure_temp._validate_windows_descendant_dacl(
+        control=control,
+        entries=entries,
+    )
+
+
+@pytest.mark.parametrize(
+    ("control", "entries"),
+    [
+        (
+            0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10, 0x001F01FF, "system"),
+            ),
+        ),
+        (
+            0x0004 | 0x0008 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10, 0x001F01FF, "system"),
+            ),
+        ),
+        (
+            0x0004 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10, 0x001F01FF, "other"),
+            ),
+        ),
+        (
+            0x0004 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (1, 0x10, 0x001F01FF, "system"),
+            ),
+        ),
+        (
+            0x0004 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10 | 0x08, 0x001F01FF, "system"),
+            ),
+        ),
+        (
+            0x0004 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10 | 0x04, 0x001F01FF, "system"),
+            ),
+        ),
+        (
+            0x0004 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10, 0x00120089, "system"),
+            ),
+        ),
+        (
+            0x0004 | 0x0400,
+            (
+                (0, 0x10, 0x001F01FF, "user"),
+                (0, 0x10, 0x001F01FF, "system"),
+                (0, 0x10, 0x001F01FF, "other"),
+            ),
+        ),
+    ],
+    ids=[
+        "missing-dacl",
+        "defaulted-dacl",
+        "unexpected-sid",
+        "deny-ace",
+        "inherit-only-ace",
+        "unexpected-inheritance-flag",
+        "partial-control-mask",
+        "extra-ace",
+    ],
+)
+def test_windows_descendant_dacl_rejects_unsafe_or_ineffective_aces(
+    control: int,
+    entries: tuple[tuple[int, int, int, str], ...],
+) -> None:
+    with pytest.raises(SecureArtifactError, match="exclusive Windows access"):
+        secure_temp._validate_windows_descendant_dacl(
+            control=control,
+            entries=entries,
+        )
+
+
+@pytest.mark.parametrize(
+    ("directory", "ace_flags"),
+    [(False, 0x00), (True, 0x01 | 0x02)],
+    ids=["file", "directory"],
+)
+def test_windows_private_dacl_keeps_strict_explicit_root_contract(
+    directory: bool,
+    ace_flags: int,
+) -> None:
+    secure_temp._validate_windows_private_dacl(
+        control=0x0004 | 0x1000,
+        entries=(
+            (0, ace_flags, 0x001F01FF, "user"),
+            (0, ace_flags, 0x001F01FF, "system"),
+        ),
+        directory=directory,
+    )
+
+    for control in (0x0004, 0x0004 | 0x1000 | 0x0400):
+        with pytest.raises(SecureArtifactError, match="exclusive Windows access"):
+            secure_temp._validate_windows_private_dacl(
+                control=control,
+                entries=(
+                    (0, ace_flags, 0x001F01FF, "user"),
+                    (0, ace_flags, 0x001F01FF, "system"),
+                ),
+                directory=directory,
+            )
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows security APIs")
 def test_windows_private_artifact_dacl_round_trips_by_security_api(
     tmp_path: Path,
@@ -355,3 +498,30 @@ def test_windows_private_artifact_dacl_round_trips_by_security_api(
     ) as path:
         secure_temp._verify_private_dacl(path, directory=False)
         secure_temp._verify_private_dacl(path.parent, directory=True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows security APIs")
+def test_windows_sweep_removes_private_directory_with_inherited_descendants(
+    tmp_path: Path,
+) -> None:
+    manager = private_directory(tmp_root=tmp_path, prefix="agentseek-build-")
+    path = manager.__enter__()
+    try:
+        nested = path / "nested"
+        nested.mkdir()
+        (nested / "ordinary.txt").write_text("ordinary", encoding="utf-8")
+        now = time.time()
+        old = now - 48 * 60 * 60
+        os.utime(path, (old, old))
+
+        removed = sweep_expired_artifacts(
+            tmp_root=tmp_path,
+            prefix="agentseek-build-",
+            older_than_seconds=24 * 60 * 60,
+            now=now,
+        )
+
+        assert removed == (path,)
+        assert not path.exists()
+    finally:
+        manager.__exit__(None, None, None)

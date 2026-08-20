@@ -22,6 +22,17 @@ class SecureArtifactError(RuntimeError):
 _PRIVATE_FILE_MODE = 0o600
 _PRIVATE_DIRECTORY_MODE = 0o700
 _MAX_CREATE_ATTEMPTS = 128
+_WINDOWS_DACL_PRESENT = 0x0004
+_WINDOWS_DACL_DEFAULTED = 0x0008
+_WINDOWS_DACL_AUTO_INHERIT_REQ = 0x0100
+_WINDOWS_DACL_AUTO_INHERITED = 0x0400
+_WINDOWS_DACL_PROTECTED = 0x1000
+_WINDOWS_OBJECT_INHERIT_ACE = 0x01
+_WINDOWS_CONTAINER_INHERIT_ACE = 0x02
+_WINDOWS_NO_PROPAGATE_INHERIT_ACE = 0x04
+_WINDOWS_INHERIT_ONLY_ACE = 0x08
+_WINDOWS_INHERITED_ACE = 0x10
+_WINDOWS_FULL_CONTROL = 0x001F01FF
 
 
 def _current_uid() -> int:
@@ -420,10 +431,80 @@ def _sid_matches(  # pragma: no cover - native Windows only
     return bool(advapi32.EqualSid(left, right))
 
 
-def _verify_private_dacl(  # pragma: no cover - native Windows only
+def _validate_windows_dacl_entries(
+    *,
+    entries: tuple[tuple[int, int, int, str], ...],
+    expected_flags: int | None,
+) -> None:
+    if len(entries) != 2:
+        raise _win32_error("Could not prove exclusive Windows access.")
+    principals: set[str] = set()
+    allowed_descendant_flags = (
+        _WINDOWS_OBJECT_INHERIT_ACE
+        | _WINDOWS_CONTAINER_INHERIT_ACE
+        | _WINDOWS_INHERITED_ACE
+    )
+    for ace_type, ace_flags, mask, principal in entries:
+        if (
+            ace_type != 0
+            or mask != _WINDOWS_FULL_CONTROL
+            or (expected_flags is not None and ace_flags != expected_flags)
+            or (
+                expected_flags is None
+                and (
+                    ace_flags & ~allowed_descendant_flags
+                    or ace_flags & _WINDOWS_NO_PROPAGATE_INHERIT_ACE
+                    or ace_flags & _WINDOWS_INHERIT_ONLY_ACE
+                )
+            )
+        ):
+            raise _win32_error("Could not prove exclusive Windows access.")
+        principals.add(principal)
+    if principals != {"user", "system"}:
+        raise _win32_error("Could not prove exclusive Windows access.")
+
+
+def _validate_windows_private_dacl(
+    *,
+    control: int,
+    entries: tuple[tuple[int, int, int, str], ...],
+    directory: bool,
+) -> None:
+    required_control = _WINDOWS_DACL_PRESENT | _WINDOWS_DACL_PROTECTED
+    forbidden_control = (
+        _WINDOWS_DACL_DEFAULTED
+        | _WINDOWS_DACL_AUTO_INHERIT_REQ
+        | _WINDOWS_DACL_AUTO_INHERITED
+    )
+    if control & required_control != required_control or control & forbidden_control:
+        raise _win32_error("Could not prove exclusive Windows access.")
+    expected_flags = (
+        _WINDOWS_OBJECT_INHERIT_ACE | _WINDOWS_CONTAINER_INHERIT_ACE if directory else 0
+    )
+    _validate_windows_dacl_entries(
+        entries=entries,
+        expected_flags=expected_flags,
+    )
+
+
+def _validate_windows_descendant_dacl(
+    *,
+    control: int,
+    entries: tuple[tuple[int, int, int, str], ...],
+) -> None:
+    if (
+        control & _WINDOWS_DACL_PRESENT != _WINDOWS_DACL_PRESENT
+        or control & _WINDOWS_DACL_DEFAULTED
+    ):
+        raise _win32_error("Could not prove exclusive Windows access.")
+    _validate_windows_dacl_entries(entries=entries, expected_flags=None)
+
+
+def _verify_windows_dacl(  # pragma: no cover - native Windows only
     path: Path,
     *,
     directory: bool,
+    descendant: bool,
 ) -> None:
     """Read owner and effective ACEs back without localized command output."""
 
@@ -457,14 +538,8 @@ def _verify_private_dacl(  # pragma: no cover - native Windows only
 
         control = wintypes.WORD()
         revision = wintypes.DWORD()
-        required_control = 0x0004 | 0x1000
-        forbidden_control = 0x0008 | 0x0100 | 0x0400
-        if (
-            not advapi32.GetSecurityDescriptorControl(
-                descriptor, ctypes.byref(control), ctypes.byref(revision)
-            )
-            or control.value & required_control != required_control
-            or control.value & forbidden_control
+        if not advapi32.GetSecurityDescriptorControl(
+            descriptor, ctypes.byref(control), ctypes.byref(revision)
         ):
             raise _win32_error("Could not prove exclusive Windows access.")
 
@@ -480,12 +555,7 @@ def _verify_private_dacl(  # pragma: no cover - native Windows only
             dacl, ctypes.byref(info), ctypes.sizeof(info), 2
         ):
             raise _win32_error("Could not prove exclusive Windows access.")
-        seen_user = False
-        seen_system = False
-        if info.AceCount != 2:
-            raise _win32_error("Could not prove exclusive Windows access.")
-        expected_flags = 0x03 if directory else 0x00
-        full_control = 0x001F01FF
+        entries: list[tuple[int, int, int, str]] = []
         for index in range(info.AceCount):
             ace = ctypes.c_void_p()
             if not advapi32.GetAce(dacl, index, ctypes.byref(ace)) or not ace.value:
@@ -495,18 +565,43 @@ def _verify_private_dacl(  # pragma: no cover - native Windows only
             ace_flags = header[1]
             mask = int.from_bytes(header[4:8], byteorder="little")
             ace_sid = ctypes.c_void_p(ace.value + 8)
-            if ace_type != 0 or ace_flags != expected_flags or mask != full_control:
-                raise _win32_error("Could not prove exclusive Windows access.")
             if _sid_matches(ace_sid, user_sid):
-                seen_user = True
+                principal = "user"
             elif _sid_matches(ace_sid, system_sid):
-                seen_system = True
+                principal = "system"
             else:
-                raise _win32_error("Could not prove exclusive Windows access.")
-        if not seen_user or not seen_system:
-            raise _win32_error("Could not prove exclusive Windows access.")
+                principal = "other"
+            entries.append((ace_type, ace_flags, mask, principal))
+        normalized_entries = tuple(entries)
+        if descendant:
+            _validate_windows_descendant_dacl(
+                control=control.value,
+                entries=normalized_entries,
+            )
+        else:
+            _validate_windows_private_dacl(
+                control=control.value,
+                entries=normalized_entries,
+                directory=directory,
+            )
     finally:
         kernel32.LocalFree(descriptor)
+
+
+def _verify_private_dacl(  # pragma: no cover - native Windows only
+    path: Path,
+    *,
+    directory: bool,
+) -> None:
+    _verify_windows_dacl(path, directory=directory, descendant=False)
+
+
+def _verify_descendant_dacl(  # pragma: no cover - native Windows only
+    path: Path,
+    *,
+    directory: bool,
+) -> None:
+    _verify_windows_dacl(path, directory=directory, descendant=True)
 
 
 def _move_to_quarantine(path: Path) -> Path | None:
@@ -596,10 +691,10 @@ def _verify_windows_private_tree(  # pragma: no cover - native Windows only
                 return False
             try:
                 if stat.S_ISDIR(metadata.st_mode):
-                    _verify_private_dacl(path, directory=True)
+                    _verify_descendant_dacl(path, directory=True)
                     pending.append(path)
                 elif stat.S_ISREG(metadata.st_mode):
-                    _verify_private_dacl(path, directory=False)
+                    _verify_descendant_dacl(path, directory=False)
                 else:
                     return False
             except SecureArtifactError:
