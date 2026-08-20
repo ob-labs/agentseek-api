@@ -1197,6 +1197,7 @@ def test_release_versions_are_consistent() -> None:
         and package.get("source") == {"editable": "."}
     )
 
+    assert __version__ == "0.3.0"
     assert project_config["version"] == __version__
     assert root_package["version"] == __version__
 

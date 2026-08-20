@@ -4,6 +4,30 @@ Notable changes to AgentSeek API are documented in this file.
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-20
+
+### Highlights
+
+- Added the explicit `preloaded-v1` container environment contract so the host
+  remains the single owner of application environment resolution.
+- Generated containers install and attest the exact
+  `agentseek-api[embedded]==0.3.0` runtime independently of project
+  dependencies.
+- Hardened Docker, Compose, and build-context boundaries so application values
+  are carried only to the declared runtime target and credential-bearing source
+  files are excluded from image inputs.
+- Defined compatible custom-image labels and runtime-manifest checks for
+  `preloaded-v1` launches.
+
+### Upgrade notes
+
+- Container projects that pin `agentseek-api==0.2.2`, or otherwise exclude
+  `0.3.0`, must update their dependency constraint before using generated
+  images.
+- Custom images must publish the `preloaded-v1` environment-contract, runtime
+  manifest, distribution, and version labels; older images must keep using the
+  older launcher until migrated.
+
 ## 0.2.3 - 2026-08-17
 
 ### Fixed
