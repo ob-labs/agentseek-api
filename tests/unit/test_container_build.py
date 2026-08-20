@@ -5,6 +5,7 @@ import io
 import json
 import os
 import tarfile
+import tempfile
 import zipfile
 from pathlib import Path
 
@@ -1250,6 +1251,128 @@ def test_invocation_cwd_must_be_an_existing_directory(
         )
 
 
+@pytest.mark.skipif(
+    Path(tempfile.gettempdir()).absolute() == Path(tempfile.gettempdir()).resolve(),
+    reason="platform temporary directory has no lexical/canonical alias",
+)
+def test_planner_normalizes_macos_temporary_directory_alias() -> None:
+    with tempfile.TemporaryDirectory(prefix="agentseek-container-plan-") as directory:
+        lexical_root = Path(directory)
+        project = make_graph_project(lexical_root)
+
+        plan = plan_container_image(config_path=project / "agentseek.json")
+
+        assert plan.config_path == (project / "agentseek.json").resolve()
+        assert plan.project_root == project.resolve()
+
+
+def test_planner_alias_normalization_does_not_accept_project_symlink(
+    tmp_path: Path,
+) -> None:
+    project = make_graph_project(tmp_path)
+    alias = project / "config-alias.json"
+    alias.symlink_to(project / "agentseek.json")
+
+    with pytest.raises(Exception, match="project root|unsafe intermediate"):
+        plan_container_image(config_path=alias)
+
+
+def test_planner_rejects_missing_config(tmp_path: Path) -> None:
+    with pytest.raises(Exception, match="config source is missing"):
+        plan_container_image(config_path=tmp_path / "missing.json")
+
+
+def test_planner_rejects_vcs_metadata_config(tmp_path: Path) -> None:
+    project = make_graph_project(tmp_path)
+    vcs_config = project / ".git" / "agentseek.json"
+    vcs_config.parent.mkdir()
+    vcs_config.write_text("{}", encoding="utf-8")
+    with pytest.raises(Exception, match="excluded VCS metadata"):
+        plan_container_image(config_path=vcs_config)
+
+
+def test_output_writer_rejects_regular_file_ancestor(tmp_path: Path) -> None:
+    ancestor = tmp_path / "not-a-directory"
+    ancestor.write_text("must-survive", encoding="utf-8")
+
+    with pytest.raises(Exception, match="output ancestor.*unsafe"):
+        container_build._write_file(ancestor / "artifact", b"blocked")  # noqa: SLF001
+
+    assert ancestor.read_text(encoding="utf-8") == "must-survive"
+
+
+def test_materialization_rejects_nested_output_ancestor_swap_without_external_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    output = tmp_path / "bundle"
+    captured = tmp_path / "captured-app"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    original_write = container_build._write_file  # noqa: SLF001
+    calls = 0
+
+    def swap_nested_parent_after_first_write(path: Path, data: bytes) -> None:
+        nonlocal calls
+        original_write(path, data)
+        calls += 1
+        if calls == 1:
+            app = output / "context" / "app"
+            app.rename(captured)
+            app.symlink_to(outside, target_is_directory=True)
+
+    monkeypatch.setattr(
+        container_build, "_write_file", swap_nested_parent_after_first_write
+    )
+
+    with pytest.raises(Exception, match="output.*(ancestor|directory|symlink|changed)"):
+        materialize_build_bundle(
+            plan_container_image(config_path=project / "agentseek.json"),
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=output,
+        )
+
+    assert calls == 1
+    assert not output.exists()
+    assert list(outside.iterdir()) == []
+    assert (captured / "chat" / "__init__.py").is_file()
+
+
+def test_materialization_rejects_nested_output_ancestor_inode_swap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    output = tmp_path / "bundle"
+    captured = tmp_path / "captured-app"
+    original_write = container_build._write_file  # noqa: SLF001
+    calls = 0
+
+    def swap_nested_parent_after_first_write(path: Path, data: bytes) -> None:
+        nonlocal calls
+        original_write(path, data)
+        calls += 1
+        if calls == 1:
+            app = output / "context" / "app"
+            app.rename(captured)
+            app.mkdir(mode=0o700)
+            (app / "chat").mkdir(mode=0o700)
+
+    monkeypatch.setattr(
+        container_build, "_write_file", swap_nested_parent_after_first_write
+    )
+
+    with pytest.raises(Exception, match="output.*ancestor.*identity"):
+        materialize_build_bundle(
+            plan_container_image(config_path=project / "agentseek.json"),
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=output,
+        )
+
+    assert calls == 1
+    assert not output.exists()
+    assert (captured / "chat" / "__init__.py").is_file()
+
+
 def test_materialization_rejects_output_context_swap_without_deleting_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1368,6 +1491,48 @@ def test_materialization_fails_closed_when_private_output_creation_fails(
             dockerfile_bytes=b"FROM scratch\n",
             output_root=tmp_path / "bundle",
         )
+
+
+def test_materialization_fails_closed_when_output_root_cannot_be_inspected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    plan = plan_container_image(config_path=project / "agentseek.json")
+    output = tmp_path / "bundle"
+    original_lstat = Path.lstat
+
+    def unreadable_output(path: Path) -> os.stat_result:
+        if path == output:
+            raise PermissionError("blocked")
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", unreadable_output)
+
+    with pytest.raises(Exception, match="output root could not be verified"):
+        materialize_build_bundle(
+            plan,
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=output,
+        )
+
+    assert not output.exists()
+
+
+def test_materialization_fails_closed_when_os_write_makes_no_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    output = tmp_path / "bundle"
+    monkeypatch.setattr(container_build.os, "write", lambda _fd, _data: 0)
+
+    with pytest.raises(Exception, match="Could not write the build bundle"):
+        materialize_build_bundle(
+            plan_container_image(config_path=project / "agentseek.json"),
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=output,
+        )
+
+    assert not output.exists()
 
 
 def test_materialization_writes_every_byte_when_os_write_is_partial(

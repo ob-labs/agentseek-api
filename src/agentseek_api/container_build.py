@@ -13,7 +13,8 @@ import stat
 import tarfile
 import tomllib
 import zipfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
@@ -483,9 +484,22 @@ def _auth_json(auth: AuthPolicyManifestV1) -> dict[str, object]:
 
 def _safe_regular(path: Path, *, project_root: Path, purpose: str) -> Path:
     try:
-        raw = path.absolute()
-        relative_raw = raw.relative_to(project_root)
-        current = project_root
+        supplied = path.absolute()
+        raw = Path(os.path.normpath(supplied))
+        resolved = supplied.resolve(strict=True)
+        relative_resolved = resolved.relative_to(project_root)
+        lexical_root = raw
+        for _ in relative_resolved.parts:
+            lexical_root = lexical_root.parent
+        relative_raw = raw.relative_to(lexical_root)
+        if (
+            lexical_root.resolve(strict=True) != project_root
+            or relative_raw.parts != relative_resolved.parts
+        ):
+            raise ContainerBuildError(
+                f"The {purpose} source has an unsafe intermediate directory."
+            )
+        current = lexical_root
         for part in relative_raw.parts[:-1]:
             current = current / part
             parent_status = current.lstat()
@@ -504,13 +518,6 @@ def _safe_regular(path: Path, *, project_root: Path, purpose: str) -> Path:
         raise ContainerBuildError(f"The {purpose} source is missing.") from exc
     if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
         raise ContainerBuildError(f"The {purpose} source must be a regular file.")
-    resolved = raw.resolve()
-    try:
-        resolved.relative_to(project_root)
-    except ValueError as exc:
-        raise ContainerBuildError(
-            f"The {purpose} source must remain inside the project root."
-        ) from exc
     if _VCS_METADATA_NAMES.intersection(resolved.relative_to(project_root).parts):
         raise ContainerBuildError(
             f"The {purpose} source selects excluded VCS metadata."
@@ -1765,11 +1772,132 @@ def plan_generated_up_auth(
 
 
 def _write_file(path: Path, data: bytes) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    target = path.absolute()
+    if os.name == "nt":  # pragma: no cover - native Windows only
+        current = Path(target.anchor)
+        for part in target.parts[1:-1]:
+            current /= part
+            try:
+                status = current.lstat()
+            except FileNotFoundError:
+                current.mkdir(mode=0o700)
+                status = current.lstat()
+            expected = _directory_identity(status)
+            if not _directory_identity_matches(current, expected):
+                raise ContainerBuildError(
+                    "An output ancestor changed or became unsafe."
+                )
+        _write_file_descriptor(os.open(target, _output_file_flags(), 0o600), data)
+        return
+
+    with _opened_output_parent(target, anchor=Path(target.anchor), create=False) as (
+        directory_fd,
+        _,
+    ):
+        file_fd = os.open(
+            target.name,
+            _output_file_flags(),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        _write_file_descriptor(file_fd, data)
+
+
+def _prepare_output_ancestors(
+    path: Path, *, anchor: Path
+) -> dict[Path, tuple[int, int]]:
+    target = path.absolute()
+    root = anchor.absolute()
+    try:
+        relative_parent = target.parent.relative_to(root)
+    except ValueError as exc:
+        raise ContainerBuildError("A build output escaped its verified root.") from exc
+
+    identities: dict[Path, tuple[int, int]] = {}
+    if os.name == "nt":  # pragma: no cover - native Windows only
+        current = root
+        for part in ("", *relative_parent.parts):
+            if part:
+                current /= part
+            try:
+                status = current.lstat()
+            except FileNotFoundError:
+                current.mkdir(mode=0o700)
+                status = current.lstat()
+            identity = _directory_identity(status)
+            if not _directory_identity_matches(current, identity):
+                raise ContainerBuildError(
+                    "A build output ancestor changed or became unsafe."
+                )
+            identities[current] = identity
+        return identities
+
+    with _opened_output_parent(target, anchor=root, create=True) as (
+        _,
+        identities,
+    ):
+        return identities
+
+
+@contextmanager
+def _opened_output_parent(
+    target: Path, *, anchor: Path, create: bool
+) -> Iterator[tuple[int, dict[Path, tuple[int, int]]]]:
+    try:
+        relative_parent = target.parent.relative_to(anchor)
+    except ValueError as exc:
+        raise ContainerBuildError("A build output escaped its verified root.") from exc
+
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+    descriptors: list[int] = []
+    identities: dict[Path, tuple[int, int]] = {}
+    try:
+        directory_fd = os.open(anchor, directory_flags)
+        descriptors.append(directory_fd)
+        root_status = os.fstat(directory_fd)
+        identities[anchor] = _directory_identity(root_status)
+        current = anchor
+        for part in relative_parent.parts:
+            try:
+                child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                os.mkdir(part, 0o700, dir_fd=directory_fd)
+                child_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            child_status = os.fstat(child_fd)
+            if not stat.S_ISDIR(child_status.st_mode):
+                os.close(child_fd)
+                raise ContainerBuildError(
+                    "A build output ancestor changed or became unsafe."
+                )
+            current /= part
+            identities[current] = _directory_identity(child_status)
+            descriptors.append(child_fd)
+            directory_fd = child_fd
+        yield directory_fd, identities
+    except ContainerBuildError:
+        raise
+    except OSError as exc:
+        raise ContainerBuildError(
+            "A build output ancestor changed or became unsafe."
+        ) from exc
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
+def _output_file_flags() -> int:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o600)
+    return flags
+
+
+def _write_file_descriptor(fd: int, data: bytes) -> None:
     try:
         remaining = memoryview(data)
         while remaining:
@@ -1837,9 +1965,9 @@ def materialize_build_bundle(
         raise ContainerBuildError(
             "The project root changed before materialization."
         ) from exc
-    root = Path(output_root).absolute()
+    requested_root = Path(output_root).absolute()
     try:
-        root_status = root.lstat()
+        root_status = requested_root.lstat()
     except FileNotFoundError:
         root_status = None
     except OSError as exc:
@@ -1851,12 +1979,14 @@ def materialize_build_bundle(
         if (
             stat.S_ISLNK(root_status.st_mode)
             or not stat.S_ISDIR(root_status.st_mode)
-            or any(root.iterdir())
+            or any(requested_root.iterdir())
         ):
             raise ContainerBuildError(
                 "The build output root must be a new empty directory."
             )
+        root = requested_root.resolve(strict=True)
     else:
+        root = requested_root.parent.resolve() / requested_root.name
         try:
             root.parent.mkdir(parents=True, exist_ok=True)
             create_private_directory(root)
@@ -1871,22 +2001,58 @@ def materialize_build_bundle(
     context_identity = _directory_identity(context.lstat())
     created: list[Path] = []
     frozen_outputs: dict[Path, bytes] = {}
+    output_directory_identities = {
+        root: root_identity,
+        context: context_identity,
+    }
 
     def verify_output_directories() -> None:
-        _verify_directory_identity(
-            root,
-            expected=root_identity,
-            message="The build output root identity changed.",
-        )
-        _verify_directory_identity(
-            context,
-            expected=context_identity,
-            message="The build output context identity changed.",
-        )
+        for directory, expected in output_directory_identities.items():
+            if directory == root:
+                message = "The build output root identity changed."
+            elif directory == context:
+                message = "The build output context identity changed."
+            else:
+                message = "A build output ancestor identity changed."
+            _verify_directory_identity(
+                directory,
+                expected=expected,
+                message=message,
+            )
+
+    def freeze_output_ancestors(path: Path) -> None:
+        try:
+            relative_parent = path.parent.relative_to(root)
+        except ValueError as exc:
+            raise ContainerBuildError(
+                "A build output escaped its verified root."
+            ) from exc
+        current = root
+        for part in relative_parent.parts:
+            current /= part
+            try:
+                status = current.lstat()
+            except OSError as exc:
+                raise ContainerBuildError("A build output ancestor changed.") from exc
+            identity = _directory_identity(status)
+            if not _directory_identity_matches(current, identity):
+                raise ContainerBuildError(
+                    "A build output ancestor changed or became unsafe."
+                )
+            expected = output_directory_identities.setdefault(current, identity)
+            if identity != expected:
+                raise ContainerBuildError("A build output ancestor identity changed.")
 
     def write_output(path: Path, data: bytes) -> None:
         verify_output_directories()
+        for directory, identity in _prepare_output_ancestors(path, anchor=root).items():
+            expected = output_directory_identities.setdefault(directory, identity)
+            if identity != expected:
+                raise ContainerBuildError("A build output ancestor identity changed.")
+        verify_output_directories()
         _write_file(path, data)
+        verify_output_directories()
+        freeze_output_ancestors(path)
         verify_output_directories()
         frozen_outputs[path] = data
 
