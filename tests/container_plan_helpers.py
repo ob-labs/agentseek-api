@@ -17,7 +17,12 @@ from agentseek_api.environment import ResolvedEnvironment
 class ComposeDecodedEnvironment(Mapping[str, str]):
     substitution: Mapping[str, str] = field(repr=False)
     rendered: Mapping[str, str] = field(repr=False)
-    runtime: Mapping[str, str] = field(default_factory=dict, repr=False)
+    commands: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False
+    )
+    runtime: Mapping[str, str] = field(
+        default_factory=lambda: MappingProxyType({}), repr=False
+    )
 
     def __getitem__(self, key: str) -> str:
         return self.rendered[key]
@@ -145,7 +150,7 @@ def decode_with_supported_compose(
             "command": [
                 "sh",
                 "-c",
-                f"umask 077; printf '%s' \"${{{name}}}\" > /result/{name}",
+                f"umask 077; printf '%s' \"$${{{name}}}\" > /result/{name}",
             ],
             "volumes": [f"{result_path}:/result"],
         }
@@ -170,6 +175,7 @@ def decode_with_supported_compose(
         _run_private([*base, "config", "--format", "json"], cwd=tmp_path)
     )
     rendered: dict[str, str] = {}
+    commands: dict[str, tuple[str, ...]] = {}
     for name in names:
         service = rendered_document["services"][
             f"probe-{name.lower().replace('_', '-')}"
@@ -177,6 +183,7 @@ def decode_with_supported_compose(
         if service["environment"]["PROJECT_DOTENV_CANARY"] != "unset":
             raise RuntimeError("Compose loaded the project dotenv unexpectedly.")
         rendered[name] = service["environment"][name]
+        commands[name] = tuple(service["command"])
 
     runtime: dict[str, str] = {}
     if run_service:
@@ -203,6 +210,7 @@ def decode_with_supported_compose(
     return ComposeDecodedEnvironment(
         substitution=MappingProxyType(substitution),
         rendered=MappingProxyType(rendered),
+        commands=MappingProxyType(commands),
         runtime=MappingProxyType(runtime),
     )
 

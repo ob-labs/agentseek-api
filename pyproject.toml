@@ -60,5 +60,6 @@ packages = ["src/agentseek_api"]
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [
+    "docker: tests requiring Docker or Docker Compose",
     "e2e: end-to-end tests against a live server and real SeekDB/OceanBase backend",
 ]

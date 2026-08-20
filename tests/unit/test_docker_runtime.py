@@ -62,6 +62,7 @@ def test_compose_encoder_uses_one_literal_double_quoted_codec() -> None:
     assert "line one\nline two" not in encoded
 
 
+@pytest.mark.docker
 @pytest.mark.parametrize(("name", "value"), SPECIAL_VALUES.items())
 def test_compose_encoder_round_trips_config_oracle(
     name: str, value: str, tmp_path: Path
@@ -76,6 +77,24 @@ def test_compose_encoder_round_trips_config_oracle(
     assert decoded.rendered[name] == value.replace("$", "$$")
 
 
+@pytest.mark.docker
+def test_compose_service_probe_command_references_environment_without_baking_value(
+    tmp_path: Path,
+) -> None:
+    if not docker_compose_available(cwd=tmp_path):
+        pytest.skip("requires Docker Compose 2.24 or newer")
+    value = "must-not-be-baked-into-shell-source"
+
+    decoded = decode_with_supported_compose(
+        encode_compose_environment({"PROBE_VALUE": value}), tmp_path=tmp_path
+    )
+
+    command = " ".join(decoded.commands["PROBE_VALUE"])
+    assert value not in command
+    assert "${PROBE_VALUE}" in command
+
+
+@pytest.mark.docker
 def test_compose_encoder_round_trips_real_container_without_second_interpolation(
     tmp_path: Path,
 ) -> None:

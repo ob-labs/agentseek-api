@@ -116,6 +116,32 @@ def _verify_directory_posix(path: Path) -> os.stat_result:
     return metadata
 
 
+def _verify_open_directory_posix(fd: int, path: Path, expected: os.stat_result) -> None:
+    try:
+        opened = os.fstat(fd)
+        named = path.lstat()
+    except OSError as exc:
+        raise SecureArtifactError(
+            "Could not prove exclusive directory access."
+        ) from exc
+    if (
+        not stat.S_ISDIR(opened.st_mode)
+        or not stat.S_ISDIR(named.st_mode)
+        or not _same_object(opened, expected)
+        or not _same_object(named, expected)
+        or opened.st_uid != _current_uid()
+        or stat.S_IMODE(opened.st_mode) != _PRIVATE_DIRECTORY_MODE
+        or opened.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+    ):
+        raise SecureArtifactError("Could not prove exclusive directory access.")
+
+
+def _verify_closed_directory_posix(path: Path, expected: os.stat_result) -> None:
+    metadata = _verify_directory_posix(path)
+    if not _same_object(metadata, expected):
+        raise SecureArtifactError("Could not prove exclusive directory access.")
+
+
 def _verify_open_windows(  # pragma: no cover - native Windows only
     fd: int, path: Path
 ) -> os.stat_result:
@@ -130,20 +156,23 @@ def _verify_open_windows(  # pragma: no cover - native Windows only
         or not _same_object(opened, named)
     ):
         raise SecureArtifactError("Could not prove exclusive Windows access.")
-    _verify_private_dacl(path)
+    _verify_private_dacl(path, directory=False)
     return opened
 
 
 def _verify_closed_windows(  # pragma: no cover - native Windows only
-    path: Path, expected: os.stat_result
+    path: Path, expected: os.stat_result, *, directory: bool
 ) -> None:
     try:
         named = path.lstat()
     except OSError as exc:
         raise SecureArtifactError("Could not prove exclusive Windows access.") from exc
-    if not stat.S_ISREG(named.st_mode) or not _same_object(named, expected):
+    type_matches = (
+        stat.S_ISDIR(named.st_mode) if directory else stat.S_ISREG(named.st_mode)
+    )
+    if not type_matches or not _same_object(named, expected):
         raise SecureArtifactError("Could not prove exclusive Windows access.")
-    _verify_private_dacl(path)
+    _verify_private_dacl(path, directory=directory)
 
 
 def _win32_libraries(  # pragma: no cover - native Windows only
@@ -373,9 +402,9 @@ def _create_private_windows_directory(  # pragma: no cover - native Windows only
             if kernel32.CreateDirectoryW(str(candidate), ctypes.byref(attributes)):
                 expected = candidate.lstat()
                 try:
-                    _verify_private_dacl(candidate)
+                    _verify_private_dacl(candidate, directory=True)
                 except SecureArtifactError:
-                    _safe_remove_directory(candidate, expected)
+                    _quarantine_then_rmtree(candidate, expected)
                     raise
                 return candidate, expected
             if ctypes.get_last_error() != 183:
@@ -393,6 +422,8 @@ def _sid_matches(  # pragma: no cover - native Windows only
 
 def _verify_private_dacl(  # pragma: no cover - native Windows only
     path: Path,
+    *,
+    directory: bool,
 ) -> None:
     """Read owner and effective ACEs back without localized command output."""
 
@@ -426,11 +457,14 @@ def _verify_private_dacl(  # pragma: no cover - native Windows only
 
         control = wintypes.WORD()
         revision = wintypes.DWORD()
+        required_control = 0x0004 | 0x1000
+        forbidden_control = 0x0008 | 0x0100 | 0x0400
         if (
             not advapi32.GetSecurityDescriptorControl(
                 descriptor, ctypes.byref(control), ctypes.byref(revision)
             )
-            or not control.value & 0x1000
+            or control.value & required_control != required_control
+            or control.value & forbidden_control
         ):
             raise _win32_error("Could not prove exclusive Windows access.")
 
@@ -450,6 +484,8 @@ def _verify_private_dacl(  # pragma: no cover - native Windows only
         seen_system = False
         if info.AceCount != 2:
             raise _win32_error("Could not prove exclusive Windows access.")
+        expected_flags = 0x03 if directory else 0x00
+        full_control = 0x001F01FF
         for index in range(info.AceCount):
             ace = ctypes.c_void_p()
             if not advapi32.GetAce(dacl, index, ctypes.byref(ace)) or not ace.value:
@@ -459,7 +495,7 @@ def _verify_private_dacl(  # pragma: no cover - native Windows only
             ace_flags = header[1]
             mask = int.from_bytes(header[4:8], byteorder="little")
             ace_sid = ctypes.c_void_p(ace.value + 8)
-            if ace_type != 0 or ace_flags & 0x10 or mask & 0x1F01FF != 0x1F01FF:
+            if ace_type != 0 or ace_flags != expected_flags or mask != full_control:
                 raise _win32_error("Could not prove exclusive Windows access.")
             if _sid_matches(ace_sid, user_sid):
                 seen_user = True
@@ -473,32 +509,131 @@ def _verify_private_dacl(  # pragma: no cover - native Windows only
         kernel32.LocalFree(descriptor)
 
 
-def _safe_unlink(path: Path, expected: os.stat_result | None = None) -> None:
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return
-    except OSError:
-        return
-    if _is_link_or_junction(path, metadata):
-        return
-    if expected is not None and not _same_object(metadata, expected):
-        return
-    with contextlib.suppress(OSError):
-        path.unlink()
+def _move_to_quarantine(path: Path) -> Path | None:
+    """Atomically move a candidate to an unpredictable same-parent path."""
+
+    for _ in range(_MAX_CREATE_ATTEMPTS):
+        quarantine = path.parent / f".agentseek-quarantine-{secrets.token_hex(32)}"
+        try:
+            os.rename(path, quarantine)
+        except FileNotFoundError:
+            return None
+        except FileExistsError:
+            continue
+        except OSError:
+            return None
+        return quarantine
+    return None
 
 
-def _safe_remove_directory(path: Path, expected: os.stat_result | None) -> None:
+def _quarantined_file_matches(path: Path, expected: os.stat_result) -> bool:
     try:
         metadata = path.lstat()
     except OSError:
-        return
-    if _is_link_or_junction(path, metadata):
-        return
-    if expected is not None and not _same_object(metadata, expected):
-        return
-    with contextlib.suppress(OSError):
-        shutil.rmtree(path)
+        return False
+    if (
+        _is_link_or_junction(path, metadata)
+        or not stat.S_ISREG(metadata.st_mode)
+        or not _same_object(metadata, expected)
+    ):
+        return False
+    try:
+        if os.name == "nt":  # pragma: no cover - native Windows only
+            _verify_private_dacl(path, directory=False)
+        elif (
+            metadata.st_uid != _current_uid()
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+            or metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+        ):
+            return False
+    except SecureArtifactError:
+        return False
+    return True
+
+
+def _quarantined_directory_matches(path: Path, expected: os.stat_result) -> bool:
+    try:
+        metadata = path.lstat()
+    except OSError:
+        return False
+    if (
+        _is_link_or_junction(path, metadata)
+        or not stat.S_ISDIR(metadata.st_mode)
+        or not _same_object(metadata, expected)
+    ):
+        return False
+    try:
+        if os.name == "nt":  # pragma: no cover - native Windows only
+            _verify_private_dacl(path, directory=True)
+        elif (
+            metadata.st_uid != _current_uid()
+            or stat.S_IMODE(metadata.st_mode) != _PRIVATE_DIRECTORY_MODE
+            or metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+        ):
+            return False
+    except SecureArtifactError:
+        return False
+    return True
+
+
+def _verify_windows_private_tree(  # pragma: no cover - native Windows only
+    root: Path,
+) -> bool:
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = tuple(os.scandir(directory))
+        except OSError:
+            return False
+        for entry in entries:
+            path = Path(entry.path)
+            try:
+                metadata = path.lstat()
+            except OSError:
+                return False
+            if _is_link_or_junction(path, metadata):
+                return False
+            try:
+                if stat.S_ISDIR(metadata.st_mode):
+                    _verify_private_dacl(path, directory=True)
+                    pending.append(path)
+                elif stat.S_ISREG(metadata.st_mode):
+                    _verify_private_dacl(path, directory=False)
+                else:
+                    return False
+            except SecureArtifactError:
+                return False
+    return True
+
+
+def _quarantine_then_unlink(path: Path, expected: os.stat_result) -> bool:
+    quarantine = _move_to_quarantine(path)
+    if quarantine is None or not _quarantined_file_matches(quarantine, expected):
+        return False
+    try:
+        quarantine.unlink()
+    except OSError:
+        return False
+    return True
+
+
+def _quarantine_then_rmtree(
+    path: Path,
+    expected: os.stat_result,
+    *,
+    verify_windows_tree: bool = False,
+) -> bool:
+    quarantine = _move_to_quarantine(path)
+    if quarantine is None or not _quarantined_directory_matches(quarantine, expected):
+        return False
+    if verify_windows_tree and not _verify_windows_private_tree(quarantine):
+        return False
+    try:
+        shutil.rmtree(quarantine)
+    except OSError:
+        return False
+    return True
 
 
 @contextmanager
@@ -536,14 +671,23 @@ def private_artifact(
         except FileExistsError:
             continue
         except OSError as exc:
-            if private_parent is not None:
-                _safe_remove_directory(private_parent, private_parent_expected)
+            if private_parent is not None and private_parent_expected is not None:
+                _quarantine_then_rmtree(private_parent, private_parent_expected)
             raise SecureArtifactError("Could not create a private artifact.") from exc
         path = candidate
+        try:
+            expected = os.fstat(fd)
+        except OSError as exc:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            fd = None
+            raise SecureArtifactError(
+                "Could not capture the private artifact identity."
+            ) from exc
         break
-    if path is None or fd is None:
-        if private_parent is not None:
-            _safe_remove_directory(private_parent, private_parent_expected)
+    if path is None or fd is None or expected is None:
+        if private_parent is not None and private_parent_expected is not None:
+            _quarantine_then_rmtree(private_parent, private_parent_expected)
         raise SecureArtifactError("Could not create a private artifact.")
 
     try:
@@ -556,42 +700,47 @@ def private_artifact(
         os.fsync(fd)
         if os.name == "nt":  # pragma: no cover - native Windows only
             _apply_private_dacl(path)
-            expected = _verify_open_windows(fd, path)
+            verified = _verify_open_windows(fd, path)
         else:
             os.fchmod(fd, _PRIVATE_FILE_MODE)
-            expected = _verify_open_posix(fd, path)
+            verified = _verify_open_posix(fd, path)
+        if not _same_object(verified, expected):
+            raise SecureArtifactError("Could not prove exclusive access.")
+        os.close(fd)
+        fd = None
+        if os.name == "nt":  # pragma: no cover - native Windows only
+            _verify_closed_windows(path, expected, directory=False)
+        else:
+            _verify_closed_posix(path, expected)
     except (OSError, SecureArtifactError) as exc:
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)
             fd = None
-        _safe_unlink(path, expected)
-        if private_parent is not None:
-            _safe_remove_directory(private_parent, private_parent_expected)
+        removed = _quarantine_then_unlink(path, expected)
+        if (
+            removed
+            and private_parent is not None
+            and private_parent_expected is not None
+        ):
+            _quarantine_then_rmtree(private_parent, private_parent_expected)
         if isinstance(exc, SecureArtifactError):
             raise
         raise SecureArtifactError("Could not prepare a private artifact.") from exc
 
     try:
-        try:
-            os.close(fd)
-        except OSError as exc:
-            raise SecureArtifactError("Could not prepare a private artifact.") from exc
-        fd = None
-        if os.name == "nt":  # pragma: no cover - native Windows only
-            assert expected is not None
-            _verify_closed_windows(path, expected)
-        else:
-            assert expected is not None
-            _verify_closed_posix(path, expected)
         yield path
     finally:
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)
-        _safe_unlink(path, expected)
-        if private_parent is not None:
-            _safe_remove_directory(private_parent, private_parent_expected)
+        removed = _quarantine_then_unlink(path, expected)
+        if (
+            removed
+            and private_parent is not None
+            and private_parent_expected is not None
+        ):
+            _quarantine_then_rmtree(private_parent, private_parent_expected)
 
 
 @contextmanager
@@ -602,6 +751,7 @@ def private_directory(*, prefix: str, tmp_root: Path | None = None) -> Iterator[
     _validate_prefix(prefix)
     path: Path | None = None
     expected: os.stat_result | None = None
+    fd: int | None = None
     if os.name == "nt":  # pragma: no cover - native Windows only
         path, expected = _create_private_windows_directory(root, prefix)
     else:
@@ -616,23 +766,43 @@ def private_directory(*, prefix: str, tmp_root: Path | None = None) -> Iterator[
                     "Could not create a private directory."
                 ) from exc
             path = candidate
+            try:
+                expected = path.lstat()
+            except OSError as exc:
+                raise SecureArtifactError(
+                    "Could not capture the private directory identity."
+                ) from exc
             break
-    if path is None:
+    if path is None or expected is None:
         raise SecureArtifactError("Could not create a private directory.")
     try:
         if os.name == "nt":  # pragma: no cover - native Windows only
-            _verify_private_dacl(path)
-            assert expected is not None
+            _verify_closed_windows(path, expected, directory=True)
         else:
-            path.chmod(_PRIVATE_DIRECTORY_MODE)
-            expected = _verify_directory_posix(path)
-    except OSError as exc:
-        _safe_remove_directory(path, expected)
+            flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(path, flags)
+            os.fchmod(fd, _PRIVATE_DIRECTORY_MODE)
+            _verify_open_directory_posix(fd, path, expected)
+            os.close(fd)
+            fd = None
+            _verify_closed_directory_posix(path, expected)
+    except (OSError, SecureArtifactError) as exc:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+            fd = None
+        _quarantine_then_rmtree(path, expected)
+        if isinstance(exc, SecureArtifactError):
+            raise
         raise SecureArtifactError("Could not prepare a private directory.") from exc
     try:
         yield path
     finally:
-        _safe_remove_directory(path, expected)
+        _quarantine_then_rmtree(path, expected)
 
 
 def sweep_expired_artifacts(
@@ -666,41 +836,31 @@ def sweep_expired_artifacts(
                 or candidate.resolve(strict=True).parent != root.resolve(strict=True)
             ):
                 continue
+            if os.name != "nt" and (
+                metadata.st_uid != _current_uid()
+                or (
+                    stat.S_ISREG(metadata.st_mode)
+                    and (
+                        stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
+                        or metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+                    )
+                )
+            ):
+                continue
             if (  # pragma: no cover - native Windows only
                 os.name == "nt" and stat.S_ISDIR(metadata.st_mode)
             ):
-                _verify_private_dacl(candidate)
-                descendants = tuple(candidate.rglob("*"))
-                if any(descendant.is_symlink() for descendant in descendants):
-                    continue
-                for descendant in descendants:
-                    if descendant.is_dir():
-                        _verify_private_dacl(descendant)
-                    elif descendant.is_file():
-                        _verify_private_dacl(descendant)
-                    else:
-                        raise SecureArtifactError(
-                            "Could not prove exclusive Windows access."
-                        )
-                _safe_remove_directory(candidate, metadata)
-                if candidate.exists():
-                    continue
+                was_removed = _quarantine_then_rmtree(
+                    candidate, metadata, verify_windows_tree=True
+                )
             elif not stat.S_ISREG(metadata.st_mode):
                 continue
-            elif os.name == "nt":  # pragma: no cover - native Windows only
-                _verify_private_dacl(candidate)
-                candidate.unlink()
-            elif (
-                metadata.st_uid != _current_uid()
-                or stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
-                or metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
-            ):
-                continue
             else:
-                candidate.unlink()
+                was_removed = _quarantine_then_unlink(candidate, metadata)
         except (OSError, SecureArtifactError):
             continue
-        removed.append(candidate)
+        if was_removed:
+            removed.append(candidate)
     return tuple(sorted(removed))
 
 

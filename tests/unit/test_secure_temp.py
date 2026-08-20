@@ -69,6 +69,142 @@ def test_private_artifact_fails_closed_when_mode_cannot_be_proved(
 
 
 @POSIX_ONLY
+def test_private_artifact_prep_failure_never_deletes_regular_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured = tmp_path / "captured-original"
+
+    def substitute_then_reject(_fd: int, path: Path) -> os.stat_result:
+        path.rename(captured)
+        path.write_bytes(b"replacement-must-survive")
+        path.chmod(0o600)
+        raise SecureArtifactError("Could not prove exclusive access.")
+
+    monkeypatch.setattr(secure_temp, "_verify_open_posix", substitute_then_reject)
+
+    with pytest.raises(SecureArtifactError, match="exclusive access"):
+        with private_artifact(
+            tmp_root=tmp_path,
+            prefix="agentseek-compose-",
+            contents=b"created-object",
+        ):
+            pytest.fail("a substituted path must never be exposed")
+
+    assert captured.read_bytes() == b"created-object"
+    assert any(
+        path.is_file() and path.read_bytes() == b"replacement-must-survive"
+        for path in tmp_path.iterdir()
+    )
+
+
+@POSIX_ONLY
+@pytest.mark.parametrize("replacement_kind", ["regular", "symlink"])
+def test_quarantine_file_never_deletes_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replacement_kind: str,
+) -> None:
+    candidate = tmp_path / "agentseek-compose-race"
+    candidate.write_bytes(b"created-object")
+    candidate.chmod(0o600)
+    expected = candidate.lstat()
+    captured = tmp_path / "captured-original"
+    symlink_target = tmp_path / "replacement-target"
+    if replacement_kind == "symlink":
+        symlink_target.write_bytes(b"replacement-must-survive")
+
+    def substitute_then_move(path: Path) -> Path:
+        path.rename(captured)
+        if replacement_kind == "regular":
+            path.write_bytes(b"replacement-must-survive")
+            path.chmod(0o600)
+        else:
+            path.symlink_to(symlink_target)
+        quarantine = tmp_path / ".agentseek-quarantine-test"
+        path.rename(quarantine)
+        return quarantine
+
+    monkeypatch.setattr(
+        secure_temp, "_move_to_quarantine", substitute_then_move, raising=False
+    )
+
+    removed = secure_temp._quarantine_then_unlink(candidate, expected)
+
+    assert removed is False
+    assert captured.read_bytes() == b"created-object"
+    if replacement_kind == "regular":
+        assert any(
+            path.is_file() and path.read_bytes() == b"replacement-must-survive"
+            for path in tmp_path.iterdir()
+        )
+    else:
+        assert any(path.is_symlink() for path in tmp_path.iterdir())
+        assert symlink_target.read_bytes() == b"replacement-must-survive"
+
+
+@POSIX_ONLY
+def test_quarantine_directory_never_deletes_regular_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "agentseek-build-race"
+    candidate.mkdir(mode=0o700)
+    (candidate / "owned.txt").write_text("created-object", encoding="utf-8")
+    expected = candidate.lstat()
+    captured = tmp_path / "captured-original"
+
+    def substitute_then_move(path: Path) -> Path:
+        path.rename(captured)
+        path.write_bytes(b"replacement-must-survive")
+        quarantine = tmp_path / ".agentseek-quarantine-directory-test"
+        path.rename(quarantine)
+        return quarantine
+
+    monkeypatch.setattr(
+        secure_temp, "_move_to_quarantine", substitute_then_move, raising=False
+    )
+
+    removed = secure_temp._quarantine_then_rmtree(candidate, expected)
+
+    assert removed is False
+    assert (captured / "owned.txt").read_text(encoding="utf-8") == "created-object"
+    assert any(
+        path.is_file() and path.read_bytes() == b"replacement-must-survive"
+        for path in tmp_path.iterdir()
+    )
+
+
+@POSIX_ONLY
+def test_private_directory_never_chmods_a_pathname(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject_path_chmod(_path: Path, _mode: int) -> None:
+        raise AssertionError("private directories must be secured through their handle")
+
+    monkeypatch.setattr(Path, "chmod", reject_path_chmod)
+
+    with private_directory(tmp_root=tmp_path, prefix="agentseek-build-") as path:
+        assert path.is_dir()
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@POSIX_ONLY
+def test_private_directory_cleans_captured_object_after_verification_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject_directory(_fd: int, _path: Path, _expected: os.stat_result) -> None:
+        raise SecureArtifactError("Could not prove exclusive directory access.")
+
+    monkeypatch.setattr(secure_temp, "_verify_open_directory_posix", reject_directory)
+
+    with pytest.raises(SecureArtifactError, match="directory access"):
+        with private_directory(tmp_root=tmp_path, prefix="agentseek-build-"):
+            pytest.fail("an unverified directory must never be exposed")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@POSIX_ONLY
 def test_private_artifact_fails_closed_when_owner_cannot_be_proved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -82,7 +218,10 @@ def test_private_artifact_fails_closed_when_owner_cannot_be_proved(
         ):
             pytest.fail("an unverified path must never be exposed")
 
-    assert list(tmp_path.iterdir()) == []
+    quarantined = list(tmp_path.iterdir())
+    assert len(quarantined) == 1
+    assert quarantined[0].name.startswith(".agentseek-quarantine-")
+    assert quarantined[0].read_bytes() == b"private"
 
 
 @POSIX_ONLY
@@ -163,6 +302,48 @@ def test_sweep_removes_only_owned_private_old_regular_artifacts(
     assert symlink.is_symlink()
 
 
+@POSIX_ONLY
+def test_stale_sweep_never_deletes_regular_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "agentseek-compose-old"
+    candidate.write_bytes(b"created-object")
+    candidate.chmod(0o600)
+    old = time.time() - 48 * 60 * 60
+    os.utime(candidate, (old, old))
+    captured = tmp_path / "captured-original"
+    moved = False
+
+    def substitute_then_move(path: Path) -> Path:
+        nonlocal moved
+        moved = True
+        path.rename(captured)
+        path.write_bytes(b"replacement-must-survive")
+        path.chmod(0o600)
+        quarantine = tmp_path / ".agentseek-quarantine-stale-test"
+        path.rename(quarantine)
+        return quarantine
+
+    monkeypatch.setattr(
+        secure_temp, "_move_to_quarantine", substitute_then_move, raising=False
+    )
+
+    removed = sweep_expired_artifacts(
+        tmp_root=tmp_path,
+        prefix="agentseek-compose-",
+        older_than_seconds=24 * 60 * 60,
+        now=time.time(),
+    )
+
+    assert moved is True
+    assert removed == ()
+    assert captured.read_bytes() == b"created-object"
+    assert any(
+        path.is_file() and path.read_bytes() == b"replacement-must-survive"
+        for path in tmp_path.iterdir()
+    )
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows security APIs")
 def test_windows_private_artifact_dacl_round_trips_by_security_api(
     tmp_path: Path,
@@ -172,5 +353,5 @@ def test_windows_private_artifact_dacl_round_trips_by_security_api(
         prefix="agentseek-compose-",
         contents=b"private",
     ) as path:
-        secure_temp._verify_private_dacl(path)
-        secure_temp._verify_private_dacl(path.parent)
+        secure_temp._verify_private_dacl(path, directory=False)
+        secure_temp._verify_private_dacl(path.parent, directory=True)
