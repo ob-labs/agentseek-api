@@ -13,9 +13,9 @@ import tarfile
 import tomllib
 import types
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 from pydantic import ValidationError
@@ -27,6 +27,7 @@ from agentseek_api.docker_runtime import (
     DockerRunInvocation,
     ProcessInvocation,
     ProcessResult,
+    ProcessTransport,
 )
 from agentseek_api.services.langgraph_service import LangGraphService
 from tests.container_plan_helpers import write_sanitized_manifest
@@ -341,6 +342,95 @@ class _ProcessCapture:
         if self.return_codes is not None:
             return_code = self.return_codes.get(invocation.argv, return_code)
         return ProcessResult(returncode=return_code)
+
+
+@dataclass(frozen=True)
+class BoundaryCall:
+    argv: tuple[str, ...]
+    environment_names: frozenset[str]
+    cwd: Path
+    stdin_sha256: str | None
+    stdin_size: int
+    is_side_effecting: bool
+    _environment_items: tuple[tuple[str, str], ...] = field(repr=False)
+
+
+@dataclass
+class BoundaryRunner(ProcessTransport):
+    failure_case: str | None = None
+    calls: list[BoundaryCall] = field(default_factory=list)
+
+    @staticmethod
+    def _is_read_only(argv: tuple[str, ...]) -> bool:
+        if argv[:3] == ("docker", "image", "inspect"):
+            return True
+        if argv == ("docker", "compose", "version", "--short"):
+            return True
+        if argv in {
+            ("docker", "buildx", "version"),
+            ("docker", "buildx", "inspect"),
+        }:
+            return True
+        return argv[:2] == ("docker", "compose") and "config" in argv[2:]
+
+    def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
+        argv = tuple(invocation.argv)
+        environment_items = tuple(sorted(invocation.environment.items()))
+        stdin_bytes = invocation.stdin_bytes
+        self.calls.append(
+            BoundaryCall(
+                argv=argv,
+                environment_names=frozenset(invocation.environment),
+                cwd=Path(invocation.cwd),
+                stdin_sha256=(
+                    None
+                    if stdin_bytes is None
+                    else hashlib.sha256(stdin_bytes).hexdigest()
+                ),
+                stdin_size=0 if stdin_bytes is None else len(stdin_bytes),
+                is_side_effecting=not self._is_read_only(argv),
+                _environment_items=environment_items,
+            )
+        )
+        if not isinstance(invocation, ControlQueryInvocation):
+            return ProcessResult(returncode=0)
+        if argv == ("docker", "compose", "version", "--short"):
+            version = (
+                b"2.0.0\n"
+                if self.failure_case == "unsupported_compose_version"
+                else b"2.40.3\n"
+            )
+            return ProcessResult(returncode=0, stdout=version)
+        if argv == ("docker", "buildx", "version"):
+            return ProcessResult(
+                returncode=0,
+                stdout=b"github.com/docker/buildx v0.14.0 deadbeef\n",
+            )
+        if argv == ("docker", "buildx", "inspect"):
+            return ProcessResult(
+                returncode=1 if self.failure_case == "unavailable_buildkit" else 0
+            )
+        if argv[:3] == ("docker", "image", "inspect"):
+            labels = {
+                "org.agentseek.environment-contract": "preloaded-v1",
+                "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
+                "org.agentseek.runtime-distribution": "agentseek-api",
+                "org.agentseek.runtime-version": "0.3.0",
+            }
+            if self.failure_case == "missing_contract_label":
+                labels.pop("org.agentseek.environment-contract")
+            if self.failure_case == "missing_manifest_label":
+                labels.pop("org.agentseek.runtime-manifest")
+            entrypoint: list[str] = []
+            if self.failure_case == "incompatible_entrypoint":
+                entrypoint = ["/bin/sh"]
+            return ProcessResult(
+                returncode=0,
+                stdout=json.dumps([labels, entrypoint, []]).encode("utf-8"),
+            )
+        if argv[:3] == ("docker", "container", "inspect"):
+            return ProcessResult(returncode=1)
+        return ProcessResult(returncode=0)
 
 
 def _captured_image_build(capture: _ProcessCapture) -> BuildImageInvocation:
@@ -681,6 +771,386 @@ def _write_basic_manifest_config(root: Path) -> Path:
     manifest_path.write_text(config_path.read_text(encoding="utf-8"), encoding="utf-8")
     config_path.unlink()
     return manifest_path
+
+
+def invoke_failure_case(
+    command_path: str,
+    case: str,
+    *,
+    tmp_path: Path,
+    runner: BoundaryRunner,
+) -> tuple[int, str, str]:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    compose_path = tmp_path / "compose.yaml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    env_path = tmp_path / "selected.env"
+    save_path = tmp_path / "standalone-bundle"
+    runner.failure_case = case
+
+    if command_path == "build":
+        arguments = ["build", "--config", str(config_path), "-t", "agentseek:test"]
+    elif command_path == "dockerfile":
+        arguments = [
+            "dockerfile",
+            "--config",
+            str(config_path),
+            str(save_path),
+        ]
+    elif command_path == "up-image":
+        arguments = [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+        ]
+    else:
+        arguments = ["up", "--config", str(config_path)]
+
+    if command_path == "up-compose":
+        arguments.extend(("--docker-compose", str(compose_path)))
+
+    if case in {"missing_dotenv", "invalid_utf8_dotenv", "malformed_dotenv"}:
+        if case == "invalid_utf8_dotenv":
+            env_path.write_bytes(b"NAME=value\n\xff")
+        elif case == "malformed_dotenv":
+            env_path.write_text('NAME=value\nBROKEN "value"\n', encoding="utf-8")
+        arguments.extend(("--env-file", str(env_path)))
+    elif case == "unresolved_selected_reference":
+        env_path.write_text("SELECTED=${MISSING}\n", encoding="utf-8")
+        arguments.extend(("--env-file", str(env_path), "--pass-env", "SELECTED"))
+    elif case == "invalid_pass_env":
+        arguments.extend(("--pass-env", "not-valid-name"))
+    elif case == "missing_compose_selection":
+        payload["compose_env"] = ["MISSING"]
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+        arguments.extend(("--docker-compose", str(compose_path)))
+    elif case == "docker_control_collision":
+        arguments.extend(("--pass-env", "DOCKER_HOST"))
+    elif case == "compose_control_collision":
+        payload["env"] = {"DOCKER_HOST": "application-control"}
+        payload["compose_env"] = ["DOCKER_HOST"]
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+        arguments.extend(("--docker-compose", str(compose_path)))
+    elif case == "nul_value":
+        payload["env"] = {"AGENTSEEK_MODEL": "contains\x00nul"}
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif case == "escaping_build_include":
+        payload["build_include"] = ["../outside.txt"]
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif case == "symlink_build_include":
+        target = tmp_path / "outside.txt"
+        target.write_text("outside", encoding="utf-8")
+        (tmp_path / "included-link").symlink_to(target)
+        payload["build_include"] = ["included-link"]
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif case == "special_file_build_include":
+        fifo = tmp_path / "included-pipe"
+        os.mkfifo(fifo)
+        payload["build_include"] = ["included-pipe"]
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif case == "credential_dependency":
+        payload["dependencies"] = [
+            "fixture @ https://user:dependency-secret@packages.example/fixture.whl"
+        ]
+        config_path.write_text(json.dumps(payload), encoding="utf-8")
+    elif case == "unsafe_temp":
+        unsafe_target = tmp_path / "existing-output"
+        unsafe_target.mkdir(mode=0o755)
+        save_path.symlink_to(unsafe_target, target_is_directory=True)
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    hostile_ambient = {
+        "OPENAI_API_KEY": "boundary-canary",
+        "DOCKER_HOST": "unix:///hostile/docker.sock",
+    }
+    with patch.dict(os.environ, hostile_ambient, clear=False):
+        exit_code = main(
+            arguments,
+            process_transport=runner,
+            cwd=tmp_path,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    return exit_code, stdout.getvalue(), stderr.getvalue()
+
+
+@pytest.mark.parametrize(
+    ("command_path", "case"),
+    [
+        ("build", "missing_dotenv"),
+        ("build", "invalid_utf8_dotenv"),
+        ("build", "malformed_dotenv"),
+        ("dockerfile", "missing_dotenv"),
+        ("dockerfile", "invalid_utf8_dotenv"),
+        ("dockerfile", "malformed_dotenv"),
+        ("up", "malformed_dotenv"),
+        ("up", "unresolved_selected_reference"),
+        ("up", "invalid_pass_env"),
+        ("up", "missing_compose_selection"),
+        ("up-compose", "unsupported_compose_version"),
+        ("up", "docker_control_collision"),
+        ("up-compose", "compose_control_collision"),
+        ("up", "nul_value"),
+        ("build", "escaping_build_include"),
+        ("dockerfile", "symlink_build_include"),
+        ("up", "special_file_build_include"),
+        ("build", "credential_dependency"),
+        ("build", "unavailable_buildkit"),
+        ("dockerfile", "unsafe_temp"),
+        ("up-image", "missing_contract_label"),
+        ("up-image", "missing_manifest_label"),
+        ("up-image", "incompatible_entrypoint"),
+    ],
+)
+def test_container_plan_failure_starts_no_workload(
+    command_path: str,
+    case: str,
+    tmp_path: Path,
+) -> None:
+    runner = BoundaryRunner()
+    exit_code, stdout, stderr = invoke_failure_case(
+        command_path,
+        case,
+        tmp_path=tmp_path,
+        runner=runner,
+    )
+    assert exit_code == 2
+    assert all(not call.is_side_effecting for call in runner.calls)
+    if case in {
+        "missing_dotenv",
+        "invalid_utf8_dotenv",
+        "malformed_dotenv",
+        "unresolved_selected_reference",
+        "invalid_pass_env",
+        "missing_compose_selection",
+        "docker_control_collision",
+        "compose_control_collision",
+        "nul_value",
+        "escaping_build_include",
+        "symlink_build_include",
+        "special_file_build_include",
+        "credential_dependency",
+        "unsafe_temp",
+    }:
+        assert runner.calls == []
+    assert "boundary-canary" not in repr(runner.calls)
+    assert "boundary-canary" not in stdout
+    assert "boundary-canary" not in stderr
+
+
+def test_generated_up_builds_then_inspects_before_any_workload(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    runner = BoundaryRunner()
+
+    exit_code = main(
+        ["up", "--recreate"],
+        process_transport=runner,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    argv = [call.argv for call in runner.calls]
+    assert argv[:5] == [
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+        (
+            "docker",
+            "buildx",
+            "build",
+            "--load",
+            "--file",
+            "Dockerfile",
+            "--pull",
+            "--tag",
+            "agentseek-up:8123",
+            "-",
+        ),
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
+            "agentseek-up:8123",
+        ),
+        ("docker", "rm", "-f", "agentseek-up-8123"),
+    ]
+    assert len(argv) == 6
+    assert argv[5][:9] == (
+        "docker",
+        "run",
+        "--detach",
+        "--name",
+        "agentseek-up-8123",
+        "--add-host",
+        "host.docker.internal:host-gateway",
+        "-p",
+        "8123:2024",
+    )
+    assert argv[5][-8:] == (
+        "agentseek-api",
+        "serve",
+        "--environment-mode",
+        "preloaded-v1",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "2024",
+    )
+
+
+def test_generated_up_materializes_compose_artifact_before_build_and_cleans_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import secure_temp
+    from agentseek_api.cli import main
+
+    private_root = tmp_path / "private-root"
+    private_root.mkdir(mode=0o700)
+    monkeypatch.setattr(secure_temp.tempfile, "gettempdir", lambda: str(private_root))
+    config_path = _write_basic_langgraph_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["env"] = {"TOKEN": "literal"}
+    payload["compose_env"] = ["TOKEN"]
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    compose_path = tmp_path / "compose.yaml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+
+    class ArtifactBoundaryRunner(BoundaryRunner):
+        artifact_exists_during_build = False
+
+        def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
+            if isinstance(invocation, BuildImageInvocation):
+                self.artifact_exists_during_build = any(
+                    child.name.startswith("agentseek-compose-")
+                    for child in private_root.iterdir()
+                )
+            return super().__call__(invocation)
+
+    runner = ArtifactBoundaryRunner()
+    exit_code = main(
+        [
+            "up",
+            "--docker-compose",
+            str(compose_path),
+            "--recreate",
+        ],
+        process_transport=runner,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert runner.artifact_exists_during_build is True
+    assert list(private_root.iterdir()) == []
+
+
+@pytest.mark.parametrize("outcome", ["success", "nonzero", "exception", "interrupt"])
+def test_generated_up_exit_stack_cleans_all_artifacts_on_every_exit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: str,
+) -> None:
+    from agentseek_api import secure_temp
+    from agentseek_api.cli import main
+
+    private_root = tmp_path / "private-root"
+    private_root.mkdir(mode=0o700)
+    monkeypatch.setattr(secure_temp.tempfile, "gettempdir", lambda: str(private_root))
+    config_path = _write_basic_langgraph_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["env"] = {"TOKEN": "literal"}
+    payload["compose_env"] = ["TOKEN"]
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    compose_path = tmp_path / "compose.yaml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+
+    class CleanupBoundaryRunner(BoundaryRunner):
+        artifacts_at_run: tuple[str, ...] = ()
+
+        def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
+            result = super().__call__(invocation)
+            if isinstance(invocation, DockerRunInvocation):
+                self.artifacts_at_run = tuple(
+                    sorted(child.name for child in private_root.iterdir())
+                )
+                if outcome == "nonzero":
+                    return ProcessResult(returncode=23)
+                if outcome == "exception":
+                    raise RuntimeError("transport failed")
+                if outcome == "interrupt":
+                    raise KeyboardInterrupt
+            return result
+
+    runner = CleanupBoundaryRunner()
+    arguments = [
+        "up",
+        "--docker-compose",
+        str(compose_path),
+        "--recreate",
+    ]
+    if outcome == "exception":
+        with pytest.raises(RuntimeError, match="transport failed"):
+            main(arguments, process_transport=runner, cwd=tmp_path)
+    elif outcome == "interrupt":
+        with pytest.raises(KeyboardInterrupt):
+            main(arguments, process_transport=runner, cwd=tmp_path)
+    else:
+        assert main(arguments, process_transport=runner, cwd=tmp_path) == (
+            23 if outcome == "nonzero" else 0
+        )
+
+    assert len(runner.artifacts_at_run) == 2
+    assert any(name.startswith("agentseek-build-") for name in runner.artifacts_at_run)
+    assert any(
+        name.startswith("agentseek-compose-") for name in runner.artifacts_at_run
+    )
+    assert list(private_root.iterdir()) == []
+
+
+def test_up_image_branch_never_plans_a_build_bundle(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    payload = json.loads(config_path.read_text(encoding="utf-8"))
+    payload["dependencies"] = [
+        "fixture @ https://user:credential@packages.example/fixture.whl"
+    ]
+    config_path.write_text(json.dumps(payload), encoding="utf-8")
+    runner = BoundaryRunner()
+
+    exit_code = main(
+        ["up", "--image", "agentseek:test", "--recreate"],
+        process_transport=runner,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert all("buildx" not in call.argv for call in runner.calls)
+    assert not any(call.stdin_size for call in runner.calls)
+
+
+def test_dockerfile_branch_never_invokes_docker_or_compose(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    runner = BoundaryRunner()
+
+    exit_code = main(
+        ["dockerfile", str(tmp_path / "standalone")],
+        process_transport=runner,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert runner.calls == []
 
 
 def test_onboard_banner_preserves_unicode_for_stringio(tmp_path: Path) -> None:
@@ -3366,13 +3836,14 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
         "-",
     )
     assert capture.calls[2].stdin_bytes is not None
-    assert capture.calls[3].argv == (
+    assert capture.calls[3].argv[:3] == ("docker", "image", "inspect")
+    assert capture.calls[4].argv == (
         "docker",
         "container",
         "inspect",
         "agentseek-up-8124",
     )
-    assert capture.calls[4].argv[:9] == (
+    assert capture.calls[5].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -3383,8 +3854,8 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
         "-p",
         "8124:2024",
     )
-    assert capture.calls[4].argv[-1] == "agentseek-up:8124"
-    for invocation in capture.calls[:4]:
+    assert "agentseek-up:8124" in capture.calls[5].argv
+    for invocation in capture.calls[:5]:
         assert "METADATA_DB_URL" not in invocation.environment
         assert "postgresql://postgres:postgres@db/agentseek" not in " ".join(
             invocation.argv
@@ -3441,13 +3912,14 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[3].argv == (
+    assert capture.calls[3].argv[:3] == ("docker", "image", "inspect")
+    assert capture.calls[4].argv == (
         "docker",
         "container",
         "inspect",
         "agentseek-up-8123",
     )
-    assert capture.calls[4].argv[:9] == (
+    assert capture.calls[5].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -3458,7 +3930,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
         "-p",
         "8123:2024",
     )
-    assert capture.calls[4].argv[-1] == "agentseek-up:8123"
+    assert "agentseek-up:8123" in capture.calls[5].argv
     container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/auth.py:backend"

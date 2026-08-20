@@ -9,6 +9,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -1160,7 +1161,15 @@ def _execute_build_command(
         cwd=cwd,
         role=None,
     )
-    with private_directory(prefix="agentseek-build-") as output_root:
+    docker_control = dict(docker_control_environment(environment_plan))
+    with ExitStack() as cleanup:
+        sweep_expired_artifacts(
+            prefix="agentseek-build-",
+            older_than_seconds=24 * 60 * 60,
+        )
+        output_root = cleanup.enter_context(
+            private_directory(prefix="agentseek-build-")
+        )
         bundle = materialize_build_bundle(
             build_plan,
             dockerfile_bytes=dockerfile_bytes,
@@ -1169,20 +1178,17 @@ def _execute_build_command(
         invocation = build_image_invocation(
             bundle,
             plan=build_plan,
-            docker_control=docker_control_environment(environment_plan),
+            docker_control=docker_control,
             tag=args.tag,
             platform=args.platform,
             pull=args.pull,
         )
-        try:
-            require_supported_buildx(
-                transport=process_transport,
-                docker_control=docker_control_environment(environment_plan),
-                cwd=cwd,
-                plan=build_plan,
-            )
-        except DockerRuntimeError as exc:
-            raise CliError(str(exc)) from exc
+        require_supported_buildx(
+            transport=process_transport,
+            docker_control=docker_control,
+            cwd=cwd,
+            plan=build_plan,
+        )
         return process_transport(invocation).returncode
 
 
@@ -1264,14 +1270,6 @@ def _execute_up_command(
             raise CliError(
                 "Custom-image auth cannot reference a host file; bake the module into the image and use an importable package reference."
             )
-        custom_image_contract = inspect_image_contract(
-            image,
-            transport=process_transport,
-            docker_control=docker_control,
-            cwd=cwd,
-        )
-        application_payload = dict(application_payload)
-        application_payload["AGENTSEEK_GRAPHS"] = custom_image_contract.manifest_path
     else:
         _load_cli_config(config_path)
         generated_plan = plan_container_image(
@@ -1304,22 +1302,43 @@ def _execute_up_command(
                 docker_control=docker_control,
             )
         )
-        require_supported_compose(
-            transport=process_transport,
-            docker_control=docker_control,
-            cwd=cwd,
-        )
-        sweep_expired_artifacts(
-            prefix="agentseek-compose-",
-            older_than_seconds=24 * 60 * 60,
-        )
         encoded_compose = encode_compose_environment(compose_payload).encode("utf-8")
 
-    if not image:
-        assert generated_plan is not None
-        assert generated_dockerfile_bytes is not None
-        image = f"agentseek-up:{args.port}"
-        with private_directory(prefix="agentseek-build-") as output_root:
+    with ExitStack() as cleanup:
+        build_invocation = None
+        if image:
+            custom_image_contract = inspect_image_contract(
+                image,
+                transport=process_transport,
+                docker_control=docker_control,
+                cwd=cwd,
+            )
+            application_payload = dict(application_payload)
+            application_payload["AGENTSEEK_GRAPHS"] = (
+                custom_image_contract.manifest_path
+            )
+            if compose_path is not None:
+                compose_payload = dict(
+                    select_compose_payload(
+                        application_payload=application_payload,
+                        selected_names=selection.compose_env,
+                        docker_control=docker_control,
+                    )
+                )
+                encoded_compose = encode_compose_environment(compose_payload).encode(
+                    "utf-8"
+                )
+        else:
+            assert generated_plan is not None
+            assert generated_dockerfile_bytes is not None
+            image = f"agentseek-up:{args.port}"
+            sweep_expired_artifacts(
+                prefix="agentseek-build-",
+                older_than_seconds=24 * 60 * 60,
+            )
+            output_root = cleanup.enter_context(
+                private_directory(prefix="agentseek-build-")
+            )
             bundle = materialize_build_bundle(
                 generated_plan,
                 dockerfile_bytes=generated_dockerfile_bytes,
@@ -1332,87 +1351,113 @@ def _execute_up_command(
                 tag=image,
                 pull=args.pull,
             )
-            try:
-                require_supported_buildx(
-                    transport=process_transport,
-                    docker_control=docker_control,
-                    cwd=cwd,
-                    plan=generated_plan,
+
+        compose_env_path: Path | None = None
+        if compose_path is not None:
+            require_supported_compose(
+                transport=process_transport,
+                docker_control=docker_control,
+                cwd=cwd,
+            )
+            sweep_expired_artifacts(
+                prefix="agentseek-compose-",
+                older_than_seconds=24 * 60 * 60,
+            )
+            assert encoded_compose is not None
+            compose_env_path = cleanup.enter_context(
+                private_artifact(
+                    prefix="agentseek-compose-",
+                    contents=encoded_compose,
                 )
-            except DockerRuntimeError as exc:
-                raise CliError(str(exc)) from exc
+            )
+
+        if build_invocation is not None:
+            assert generated_plan is not None
+            require_supported_buildx(
+                transport=process_transport,
+                docker_control=docker_control,
+                cwd=cwd,
+                plan=generated_plan,
+            )
             build_exit_code = process_transport(build_invocation).returncode
-        if build_exit_code != 0:
-            return build_exit_code
+            if build_exit_code != 0:
+                return build_exit_code
+            custom_image_contract = inspect_image_contract(
+                image,
+                transport=process_transport,
+                docker_control=docker_control,
+                cwd=cwd,
+            )
 
-    container_name = _container_name_for_port(args.port)
-    if args.recreate:
-        remove_invocation = build_docker_control_invocation(
-            argv=("docker", "rm", "-f", container_name),
-            docker_control=docker_control,
-            cwd=cwd,
-        )
-        process_transport(remove_invocation)
-    elif _container_exists(
-        container_name,
-        process_transport=process_transport,
-        docker_control=docker_control,
-        cwd=cwd,
-    ):
-        raise CliError(
-            f"Container '{container_name}' already exists. Re-run with '--recreate' or remove it manually."
-        )
+        container_name = _container_name_for_port(args.port)
+        remove_invocation = None
+        if args.recreate:
+            remove_invocation = build_docker_control_invocation(
+                argv=("docker", "rm", "-f", container_name),
+                docker_control=docker_control,
+                cwd=cwd,
+            )
 
-    if compose_path is not None:
-        assert encoded_compose is not None
-        with private_artifact(
-            prefix="agentseek-compose-",
-            contents=encoded_compose,
-        ) as env_path:
+        compose_invocation = None
+        if compose_path is not None:
+            assert compose_env_path is not None
             compose_invocation = build_compose_invocation(
                 compose_file=compose_path,
-                env_file=env_path,
+                env_file=compose_env_path,
                 docker_control=docker_control,
                 application_payload=application_payload,
                 selected_names=selection.compose_env,
                 cwd=cwd,
                 recreate=args.recreate,
             )
-            compose_exit_code = process_transport(compose_invocation).returncode
-        if compose_exit_code != 0:
-            return compose_exit_code
 
-    base_argv = (
-        "docker",
-        "run",
-        "--detach",
-        "--name",
-        container_name,
-        "--add-host",
-        "host.docker.internal:host-gateway",
-        "-p",
-        f"{args.port}:{DEFAULT_API_PORT}",
-    )
-    run_invocation = build_docker_run_invocation(
-        base_argv=base_argv,
-        image=image,
-        docker_control=docker_control,
-        application_payload=application_payload,
-        container_argv=(
-            ()
-            if custom_image_contract is None
-            else custom_image_contract.container_argv
-        ),
-        cwd=cwd,
-    )
-    run_exit_code = process_transport(run_invocation).returncode
-    if run_exit_code != 0:
-        return run_exit_code
-    if args.wait:
-        _wait_for_http_ready(
-            f"http://127.0.0.1:{args.port}/health", timeout_seconds=30.0
+        base_argv = (
+            "docker",
+            "run",
+            "--detach",
+            "--name",
+            container_name,
+            "--add-host",
+            "host.docker.internal:host-gateway",
+            "-p",
+            f"{args.port}:{DEFAULT_API_PORT}",
         )
-    return 0
+        run_invocation = build_docker_run_invocation(
+            base_argv=base_argv,
+            image=image,
+            docker_control=docker_control,
+            application_payload=application_payload,
+            container_argv=(
+                ()
+                if custom_image_contract is None
+                else custom_image_contract.container_argv
+            ),
+            cwd=cwd,
+        )
+
+        if remove_invocation is not None:
+            process_transport(remove_invocation)
+        elif _container_exists(
+            container_name,
+            process_transport=process_transport,
+            docker_control=docker_control,
+            cwd=cwd,
+        ):
+            raise CliError(
+                f"Container '{container_name}' already exists. Re-run with '--recreate' or remove it manually."
+            )
+        if compose_invocation is not None:
+            compose_exit_code = process_transport(compose_invocation).returncode
+            if compose_exit_code != 0:
+                return compose_exit_code
+        run_exit_code = process_transport(run_invocation).returncode
+        if run_exit_code != 0:
+            return run_exit_code
+        if args.wait:
+            _wait_for_http_ready(
+                f"http://127.0.0.1:{args.port}/health", timeout_seconds=30.0
+            )
+        return 0
 
 
 def _print_version(*, stdout: TextIO) -> int:

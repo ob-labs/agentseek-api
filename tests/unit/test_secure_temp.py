@@ -281,11 +281,15 @@ def test_sweep_removes_only_owned_private_old_regular_artifacts(
     recent = tmp_path / "agentseek-compose-recent"
     recent.write_bytes(b"recent")
     recent.chmod(0o600)
+    other_product = tmp_path / "agentseek-build-old"
+    other_product.write_bytes(b"other-product")
+    other_product.chmod(0o600)
     symlink = tmp_path / "agentseek-compose-link"
     symlink.symlink_to(old_private)
     old = time.time() - 48 * 60 * 60
     os.utime(old_private, (old, old))
     os.utime(old_public, (old, old))
+    os.utime(other_product, (old, old))
     os.utime(symlink, (old, old), follow_symlinks=False)
 
     removed = sweep_expired_artifacts(
@@ -299,6 +303,7 @@ def test_sweep_removes_only_owned_private_old_regular_artifacts(
     assert not old_private.exists()
     assert old_public.exists()
     assert recent.exists()
+    assert other_product.exists()
     assert symlink.is_symlink()
 
 
