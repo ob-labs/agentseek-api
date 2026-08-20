@@ -4,6 +4,7 @@ import argparse
 import importlib.metadata
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -697,16 +698,25 @@ def _resolve_application_container_payload(
     return payload, auth_selection
 
 
-def _is_host_auth_reference(reference: str) -> bool:
-    parts = _split_symbol_reference(reference)
-    if parts is None:
+def _is_valid_custom_image_auth(reference: str) -> bool:
+    if reference == "":
+        return True
+    if (
+        reference.startswith(".")
+        or reference.partition(":")[0].endswith(".py")
+        or "/" in reference
+        or "\\" in reference
+        or re.match(r"^[A-Za-z]:", reference)
+    ):
         return False
-    module_name, _ = parts
-    return (
-        module_name.endswith(".py")
-        or module_name.startswith(".")
-        or "/" in module_name
-        or "\\" in module_name
+    parts = _split_symbol_reference(reference)
+    if parts is None or reference.count(":") != 1:
+        return False
+    module_name, symbol_name = parts
+    identifier = r"[A-Za-z_][A-Za-z0-9_]*"
+    return bool(
+        re.fullmatch(rf"{identifier}(?:\.{identifier})*", module_name)
+        and re.fullmatch(identifier, symbol_name)
     )
 
 
@@ -714,11 +724,21 @@ def _planner_dotenv_paths(env_file: str | None, *, cwd: Path) -> tuple[Path, ...
     return () if env_file is None else (_resolve_path(env_file, cwd=cwd),)
 
 
-def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
-    command = [
+def _runtime_entrypoint_prefix(*, isolated: bool) -> list[str]:
+    return [
         sys.executable,
+        *(["-I"] if isolated else []),
         "-m",
         "agentseek_api.runtime_entrypoint",
+        *(["--preloaded-v1"] if isolated else []),
+    ]
+
+
+def build_uvicorn_command(
+    *, host: str, port: int, reload_enabled: bool, isolated: bool = False
+) -> list[str]:
+    command = [
+        *_runtime_entrypoint_prefix(isolated=isolated),
         "uvicorn",
         "--",
         "agentseek_api.main:app",
@@ -732,20 +752,16 @@ def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list
     return command
 
 
-def build_worker_command() -> list[str]:
+def build_worker_command(*, isolated: bool = False) -> list[str]:
     return [
-        sys.executable,
-        "-m",
-        "agentseek_api.runtime_entrypoint",
+        *_runtime_entrypoint_prefix(isolated=isolated),
         "worker",
     ]
 
 
-def build_scheduler_command() -> list[str]:
+def build_scheduler_command(*, isolated: bool = False) -> list[str]:
     return [
-        sys.executable,
-        "-m",
-        "agentseek_api.runtime_entrypoint",
+        *_runtime_entrypoint_prefix(isolated=isolated),
         "scheduler",
     ]
 
@@ -930,6 +946,7 @@ def _execute_runtime_command(
         host=args.host,
         port=args.port,
         reload_enabled=getattr(args, "reload", False),
+        isolated=args.environment_mode is EnvironmentMode.PRELOADED_V1,
     )
     return runner(command, env=env, cwd=str(cwd))
 
@@ -957,6 +974,7 @@ def _execute_dev_command(
         host=args.host,
         port=args.port,
         reload_enabled=args.reload,
+        isolated=args.environment_mode is EnvironmentMode.PRELOADED_V1,
     )
     if runner is not _default_runner:
         return runner(command, env=env, cwd=str(cwd))
@@ -983,7 +1001,12 @@ def _execute_worker_command(
             cwd=cwd,
         ).values
     )
-    return runner(build_worker_command(), env=env, cwd=str(cwd))
+    command = (
+        build_worker_command(isolated=True)
+        if args.environment_mode is EnvironmentMode.PRELOADED_V1
+        else build_worker_command()
+    )
+    return runner(command, env=env, cwd=str(cwd))
 
 
 def _execute_scheduler_command(
@@ -998,7 +1021,13 @@ def _execute_scheduler_command(
             cwd=cwd,
         ).values
     )
-    return runner(build_scheduler_command(), env=env, cwd=str(cwd))
+    return runner(
+        build_scheduler_command(
+            isolated=args.environment_mode is EnvironmentMode.PRELOADED_V1
+        ),
+        env=env,
+        cwd=str(cwd),
+    )
 
 
 def _load_config_payload(config_path: Path) -> dict[str, object]:
@@ -1231,11 +1260,7 @@ def _execute_up_command(
     generated_dockerfile_bytes: bytes | None = None
     custom_image_contract = None
     if image:
-        if (
-            final_auth is not None
-            and final_auth.value
-            and _is_host_auth_reference(final_auth.value)
-        ):
+        if final_auth is not None and not _is_valid_custom_image_auth(final_auth.value):
             raise CliError(
                 "Custom-image auth cannot reference a host file; bake the module into the image and use an importable package reference."
             )

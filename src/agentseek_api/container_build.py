@@ -860,8 +860,10 @@ def _optional_number(
     return value
 
 
-def _validate_preloaded_reference(reference: str, *, location: str) -> None:
-    if reference == "":
+def _validate_preloaded_reference(
+    reference: str, *, location: str, allow_empty: bool = False
+) -> None:
+    if reference == "" and allow_empty:
         return
     module, separator, symbol = reference.rpartition(":")
     error = f"{location} must use an importable package or copied container module reference."
@@ -871,7 +873,7 @@ def _validate_preloaded_reference(reference: str, *, location: str) -> None:
         identifier = r"[A-Za-z_][A-Za-z0-9_]*"
         if not re.fullmatch(
             rf"{identifier}(?:\.{identifier})*", module
-        ) or not re.fullmatch(rf"{identifier}(?:\.{identifier})*", symbol):
+        ) or not re.fullmatch(identifier, symbol):
             raise ContainerBuildError(error)
         return
     path = PurePosixPath(module)
@@ -1145,7 +1147,7 @@ def _parse_http(
     if app is not None and not isinstance(app, str):
         raise ContainerBuildError("http.app must be a string.")
     if isinstance(app, str) and preloaded:
-        _validate_preloaded_reference(app, location="http.app")
+        _validate_preloaded_reference(app, location="http.app", allow_empty=True)
     elif isinstance(app, str) and _is_path_reference(app):
         located = _module_file(app, base=reference_base)
         if located is not None:
@@ -1405,9 +1407,10 @@ def _parse_container_runtime_manifest_v1_object(
         excluded=frozenset(),
         preloaded=True,
     )
-    auth, auth_path = _parse_auth(document.get("auth"))
-    if auth_path is not None:
+    raw_auth = document.get("auth")
+    if isinstance(raw_auth, dict) and "path" in raw_auth:
         raise ContainerBuildError("Runtime manifest auth.path is not supported.")
+    auth, _ = _parse_auth(raw_auth)
     return ContainerRuntimeManifestV1(
         schema_version=1,
         runtime=RuntimeManifestV1(

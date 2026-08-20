@@ -6,8 +6,10 @@ import importlib
 import io
 import json
 import signal
+import sys
 import tarfile
 import tomllib
+import types
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -957,6 +959,97 @@ def test_settings_validation_formatter_omits_input_values() -> None:
 
     assert message == "Invalid runtime setting(s): PORT (int_parsing)."
     assert "invalid-port-canary" not in message
+
+
+def test_preloaded_runtime_rejects_loaded_agentseek_module_outside_distribution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.runtime_entrypoint import (
+        RuntimeBootstrapError,
+        _require_distribution_owned_runtime,
+    )
+
+    hostile = types.ModuleType("agentseek_api.hostile_canary")
+    hostile.__file__ = str(tmp_path / "agentseek_api" / "hostile_canary.py")
+    monkeypatch.setitem(sys.modules, hostile.__name__, hostile)
+
+    with pytest.raises(RuntimeBootstrapError):
+        _require_distribution_owned_runtime()
+
+
+def test_preloaded_runtime_identity_error_is_fixed_and_value_free(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from agentseek_api import runtime_entrypoint
+
+    def reject_runtime() -> None:
+        raise runtime_entrypoint.RuntimeBootstrapError("ownership-secret-canary")
+
+    activate = Mock(side_effect=AssertionError("manifest activated after failed trust"))
+    monkeypatch.setattr(
+        runtime_entrypoint, "_require_distribution_owned_runtime", reject_runtime
+    )
+    monkeypatch.setattr(runtime_entrypoint, "_activate_preloaded_runtime", activate)
+
+    assert runtime_entrypoint.main(["--preloaded-v1", "worker"]) == 2
+    assert capsys.readouterr().err == (
+        "The preloaded runtime identity is incompatible.\n"
+    )
+    activate.assert_not_called()
+
+
+def test_preloaded_runtime_bootstrap_orders_trust_manifest_and_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import runtime_entrypoint
+
+    events: list[str] = []
+    monkeypatch.setattr(
+        runtime_entrypoint,
+        "_require_distribution_owned_runtime",
+        lambda: events.append("trust"),
+    )
+    monkeypatch.setattr(
+        runtime_entrypoint,
+        "_activate_preloaded_runtime",
+        lambda: events.append("manifest"),
+    )
+    monkeypatch.setattr(
+        runtime_entrypoint.importlib,
+        "import_module",
+        lambda name: events.append(f"import:{name}"),
+    )
+    monkeypatch.setattr(
+        runtime_entrypoint.runpy,
+        "run_module",
+        lambda name, **_kwargs: events.append(f"run:{name}"),
+    )
+
+    assert runtime_entrypoint.main(["--preloaded-v1", "worker"]) == 0
+    assert events == [
+        "trust",
+        "manifest",
+        "import:agentseek_api.settings",
+        "trust",
+        "run:agentseek_api.worker",
+    ]
+
+
+def test_preloaded_runtime_activates_only_canonical_manifest_roots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.runtime_entrypoint import _activate_preloaded_runtime
+
+    manifest = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest.read_text(encoding="utf-8"))
+    document["dependencies"] = ["/deps/agent/application"]
+    manifest.write_text(json.dumps(document), encoding="utf-8")
+    monkeypatch.setenv("AGENTSEEK_GRAPHS", str(manifest))
+    monkeypatch.setattr(sys, "path", ["trusted-site-packages"])
+
+    _activate_preloaded_runtime()
+
+    assert sys.path == ["/deps/agent/application", "trusted-site-packages"]
 
 
 def test_dev_command_accepts_langgraph_cli_flags_and_env_file(
@@ -2083,7 +2176,18 @@ def test_generated_up_uses_final_auth_selection_and_sanitized_build_stdin(
     assert container_env["OPENAI_API_KEY"] == "provider-secret-canary"
 
 
-@pytest.mark.parametrize("reference", ["auth.py:auth", "/host/auth.py:auth"])
+@pytest.mark.parametrize(
+    "reference",
+    [
+        "auth.py:auth",
+        "/host/auth.py:auth",
+        "installed.auth",
+        "installed.auth:",
+        ":auth",
+        r"installed\auth:auth",
+        r"C:\host\auth.py:auth",
+    ],
+)
 def test_up_with_custom_image_rejects_host_file_auth_references(
     tmp_path: Path, reference: str
 ) -> None:

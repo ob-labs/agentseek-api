@@ -177,6 +177,46 @@ def test_canonical_manifest_loader_rejects_nonimportable_package_references(
         load_container_runtime_manifest_v1(manifest_path)
 
 
+def test_canonical_manifest_loader_rejects_present_null_auth_path(
+    tmp_path: Path,
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["auth"] = {"path": None}
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError, match="auth.path"):
+        load_container_runtime_manifest_v1(manifest_path)
+
+
+@pytest.mark.parametrize(
+    "reference",
+    ["", "agentseek_api.services.sample_graphs:_build_echo_graph.extra"],
+)
+def test_canonical_loader_and_runtime_consumer_reject_same_graph_reference(
+    tmp_path: Path, reference: str
+) -> None:
+    from agentseek_api.services.langgraph_service import (
+        GraphManifestError,
+        _load_module_symbol,
+    )
+
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["graphs"] = {"chat": reference}
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError):
+        load_container_runtime_manifest_v1(manifest_path)
+    with pytest.raises(GraphManifestError):
+        _load_module_symbol(
+            dotted_path=reference,
+            graph_id="chat",
+            field_name="graph",
+            manifest_path=manifest_path,
+        )
+
+
 @pytest.mark.parametrize(
     "http",
     [
