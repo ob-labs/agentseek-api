@@ -18,6 +18,7 @@ from agentseek_api.docker_runtime import ProcessInvocation, ProcessResult
 
 SCRIPT = Path("scripts/test_container_env_boundary.py")
 AUTODISCOVERY_SCRIPT = Path("scripts/test_cli_config_autodiscovery.py")
+CLI_DOCKER_SCRIPT = Path("scripts/test-cli-docker.sh")
 
 
 def _load_script():
@@ -413,6 +414,13 @@ def test_cli_config_autodiscovery_executes_the_bundle_contract() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_cli_docker_smoke_asserts_the_canonical_candidate_filename() -> None:
+    text = CLI_DOCKER_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'dockerfile.index("agentseek_api-0.3.0-py3-none-any.whl[embedded]")' in text
+    assert 'dockerfile.index("agentseek-api-0.3.0.whl[embedded]")' not in text
 
 
 def test_cli_config_autodiscovery_emits_value_free_ci_failure_annotation(

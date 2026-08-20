@@ -222,7 +222,7 @@ if (
 positions = [
     dockerfile.index("packaging==25.0"),
     dockerfile.index("/tmp/custom-boundary"),
-    dockerfile.index("agentseek-api-0.3.0.whl[embedded]"),
+    dockerfile.index("agentseek_api-0.3.0-py3-none-any.whl[embedded]"),
     dockerfile.index("COPY manifest.v1.json /opt/agentseek/manifest.v1.json"),
     dockerfile.index('"python", "-m", "pip", "check"'),
     dockerfile.index("importlib.metadata"),
