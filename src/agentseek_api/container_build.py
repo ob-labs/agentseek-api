@@ -2069,9 +2069,9 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
                 "The candidate runtime artifact selection is invalid."
             )
         candidate_check = (
-            "import hashlib,pathlib;"
+            "import hashlib,pathlib,sys;"
             "p=pathlib.Path('/opt/agentseek/runtime/agentseek-api-0.3.0.whl');"
-            "raise SystemExit('candidate runtime hash mismatch') if "
+            "sys.exit('candidate runtime hash mismatch') if "
             f"hashlib.sha256(p.read_bytes()).hexdigest()!='{artifact.candidate_sha256}' "
             "else None"
         )
@@ -2097,11 +2097,11 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
     )
     lines.append("COPY manifest.v1.json /opt/agentseek/manifest.v1.json")
     manifest_check = (
-        "import hashlib,json,pathlib;"
+        "import hashlib,json,pathlib,sys;"
         "p=pathlib.Path('/opt/agentseek/manifest.v1.json');raw=p.read_bytes();"
         "doc=json.loads(raw);canonical=(json.dumps(doc,ensure_ascii=False,sort_keys=True,"
         "separators=(',',':'),allow_nan=False)+'\\n').encode();"
-        "raise SystemExit('runtime manifest integrity mismatch') if "
+        "sys.exit('runtime manifest integrity mismatch') if "
         f"raw!=canonical or hashlib.sha256(raw).hexdigest()!='{manifest_sha256}' "
         "else None"
     )
@@ -2110,20 +2110,20 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
     runtime_check = (
         "import importlib.metadata,pathlib,sys,sysconfig,agentseek_api.cli;"
         "distribution=importlib.metadata.distribution('agentseek-api');"
-        "raise SystemExit('runtime distribution version mismatch') if "
+        "sys.exit('runtime distribution version mismatch') if "
         f"distribution.version!='{artifact.version}' else None;"
         "module=pathlib.Path(agentseek_api.cli.__file__).resolve();"
         "files=distribution.files;"
-        "raise SystemExit('runtime distribution file inventory missing') if "
+        "sys.exit('runtime distribution file inventory missing') if "
         "files is None else None;"
         "owned={pathlib.Path(distribution.locate_file(item)).resolve() for item in files};"
-        "raise SystemExit('runtime module is not owned by distribution') if "
+        "sys.exit('runtime module is not owned by distribution') if "
         "module not in owned else None;"
         "roots={pathlib.Path(value).resolve() for key,value in sysconfig.get_paths().items() "
         "if key in {'purelib','platlib'}};"
-        "raise SystemExit('runtime module is outside site packages') if "
+        "sys.exit('runtime module is outside site packages') if "
         "not roots or not any(module.is_relative_to(root) for root in roots) else None;"
-        "raise SystemExit('Python 3.12 or newer is required') if "
+        "sys.exit('Python 3.12 or newer is required') if "
         "sys.version_info[:2]<(3,12) else None"
     )
     lines.append(_docker_exec_run(("python", "-c", runtime_check)))

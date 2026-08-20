@@ -292,98 +292,126 @@ def test_exact_runtime_install_forces_selected_artifact_replacement(
     assert "--force-reinstall" in runtime_install
 
 
-@pytest.mark.parametrize("candidate", [False, True])
-def test_runtime_verifier_rejects_module_not_owned_by_distribution_under_optimize(
-    tmp_path: Path, candidate: bool
-) -> None:
-    plan = (
-        _candidate_build_plan(tmp_path) if candidate else build_plan_fixture(tmp_path)
-    )
-    script = _generated_python_check(
-        render_build_dockerfile(plan).decode(), "importlib.metadata"
-    )
-    site_packages = tmp_path / "site-packages"
-    module = site_packages / "agentseek_api" / "cli.py"
-    module.parent.mkdir(parents=True)
-    module.write_text("", encoding="utf-8")
-    wrapper = "\n".join(
-        (
-            "import agentseek_api.cli,importlib.metadata,pathlib,sysconfig",
-            f"root=pathlib.Path({str(site_packages)!r})",
-            f"agentseek_api.cli.__file__={str(module)!r}",
-            "class D:",
-            " version='0.3.0'",
-            " files=(importlib.metadata.PackagePath('agentseek_api/not-cli.py'),)",
-            " def locate_file(self,item): return root/item",
-            "importlib.metadata.distribution=lambda name:D()",
-            "importlib.metadata.version=lambda name:'0.3.0'",
-            "sysconfig.get_paths=lambda:{'purelib':str(root),'platlib':str(root)}",
-            f"exec({script!r})",
-        )
-    )
-
-    completed = subprocess.run(
-        [sys.executable, "-O", "-c", wrapper],
+def _run_generated_check(script: str, setup: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, "-O", "-c", setup + "\n" + f"exec({script!r})"],
         capture_output=True,
         check=False,
         text=True,
     )
 
-    assert completed.returncode != 0
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_candidate_hash_verifier_has_success_and_failure_paths_under_optimize(
+    tmp_path: Path, valid: bool
+) -> None:
+    plan = _candidate_build_plan(tmp_path)
+    script = _generated_python_check(
+        render_build_dockerfile(plan).decode(), "agentseek-api-0.3.0.whl"
+    )
+    assert plan.runtime_artifact.candidate_wheel is not None
+    candidate = tmp_path / "candidate-check.whl"
+    candidate.write_bytes(
+        plan.runtime_artifact.candidate_wheel.read_bytes()
+        if valid
+        else b"independently-invalid-candidate"
+    )
+    setup = (
+        "import pathlib\n"
+        "OriginalPath=pathlib.Path\n"
+        f"actual=OriginalPath({str(candidate)!r})\n"
+        "pathlib.Path=lambda value: actual if value=="
+        "'/opt/agentseek/runtime/agentseek-api-0.3.0.whl' else OriginalPath(value)"
+    )
+
+    completed = _run_generated_check(script, setup)
+
+    assert (completed.returncode == 0) is valid, completed.stderr
 
 
-def test_manifest_verifier_rejects_wrong_hash_under_python_optimize(
-    tmp_path: Path,
+_VALID_MANIFEST = (
+    b'{"dependencies":["/deps/agent"],"graphs":{"chat":"chat.graph:graph"},'
+    b'"runtime":{"contract":"preloaded-v1","distribution":"agentseek-api",'
+    b'"version":"0.3.0"},"schema_version":1}\n'
+)
+
+
+@pytest.mark.parametrize("check", ["hash", "canonical", "parser"])
+@pytest.mark.parametrize("valid", [True, False])
+def test_manifest_verifier_has_success_and_failure_paths_under_optimize(
+    tmp_path: Path, check: str, valid: bool
 ) -> None:
     script = _generated_python_check(
         render_build_dockerfile(build_plan_fixture(tmp_path)).decode(),
         "manifest.v1.json",
     )
-    manifest = tmp_path / "manifest.v1.json"
-    manifest.write_text("{}\n", encoding="utf-8")
-    wrapper = (
-        "import pathlib;OriginalPath=pathlib.Path;"
-        f"actual=OriginalPath({str(manifest)!r});"
-        "pathlib.Path=lambda value: actual if value=='/opt/agentseek/manifest.v1.json' "
-        "else OriginalPath(value);"
-        f"exec({script!r})"
+    manifest = tmp_path / f"manifest-{check}.json"
+    invalid = {
+        "hash": b'{"schema_version":1}\n',
+        "canonical": json.dumps(
+            json.loads(_VALID_MANIFEST), indent=2, sort_keys=False
+        ).encode()
+        + b"\n",
+        "parser": b"not-json\n",
+    }
+    manifest.write_bytes(_VALID_MANIFEST if valid else invalid[check])
+    setup = (
+        "import pathlib\n"
+        "OriginalPath=pathlib.Path\n"
+        f"actual=OriginalPath({str(manifest)!r})\n"
+        "pathlib.Path=lambda value: actual if value=="
+        "'/opt/agentseek/manifest.v1.json' else OriginalPath(value)"
     )
 
-    completed = subprocess.run(
-        [sys.executable, "-O", "-c", wrapper],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    completed = _run_generated_check(script, setup)
 
-    assert completed.returncode != 0
+    assert (completed.returncode == 0) is valid, completed.stderr
 
 
-def test_candidate_hash_verifier_rejects_wrong_bytes_under_python_optimize(
-    tmp_path: Path,
+@pytest.mark.parametrize("check", ["ownership", "version", "site-packages", "python"])
+@pytest.mark.parametrize("valid", [True, False])
+def test_runtime_verifier_has_success_and_failure_paths_under_optimize(
+    tmp_path: Path, check: str, valid: bool
 ) -> None:
     script = _generated_python_check(
-        render_build_dockerfile(_candidate_build_plan(tmp_path)).decode(),
-        "agentseek-api-0.3.0.whl",
+        render_build_dockerfile(build_plan_fixture(tmp_path)).decode(),
+        "importlib.metadata",
     )
-    candidate = tmp_path / "wrong.whl"
-    candidate.write_bytes(b"wrong-candidate")
-    wrapper = (
-        "import pathlib;OriginalPath=pathlib.Path;"
-        f"actual=OriginalPath({str(candidate)!r});"
-        "pathlib.Path=lambda value: actual if value=="
-        "'/opt/agentseek/runtime/agentseek-api-0.3.0.whl' else OriginalPath(value);"
-        f"exec({script!r})"
+    site_packages = tmp_path / "site-packages"
+    distribution_root = (
+        tmp_path / "outside"
+        if check == "site-packages" and not valid
+        else site_packages
+    )
+    module = distribution_root / "agentseek_api" / "cli.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("", encoding="utf-8")
+    owned_file = (
+        "agentseek_api/not-cli.py"
+        if check == "ownership" and not valid
+        else "agentseek_api/cli.py"
+    )
+    version = "9.9.9" if check == "version" and not valid else "0.3.0"
+    python_version = "(3,11,0)" if check == "python" and not valid else "(3,12,0)"
+    setup = "\n".join(
+        (
+            "import agentseek_api.cli,importlib.metadata,pathlib,sys,sysconfig",
+            f"site=pathlib.Path({str(site_packages)!r})",
+            f"distribution_root=pathlib.Path({str(distribution_root)!r})",
+            f"agentseek_api.cli.__file__={str(module)!r}",
+            "class Distribution:",
+            f" version={version!r}",
+            f" files=(importlib.metadata.PackagePath({owned_file!r}),)",
+            " def locate_file(self,item): return distribution_root/item",
+            "importlib.metadata.distribution=lambda name:Distribution()",
+            "sysconfig.get_paths=lambda:{'purelib':str(site),'platlib':str(site)}",
+            f"sys.version_info={python_version}",
+        )
     )
 
-    completed = subprocess.run(
-        [sys.executable, "-O", "-c", wrapper],
-        capture_output=True,
-        check=False,
-        text=True,
-    )
+    completed = _run_generated_check(script, setup)
 
-    assert completed.returncode != 0
+    assert (completed.returncode == 0) is valid, completed.stderr
 
 
 def test_renderer_json_escapes_install_operands_and_candidate_source(

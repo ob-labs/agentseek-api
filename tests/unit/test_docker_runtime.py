@@ -289,17 +289,23 @@ def test_pip_config_swap_during_buildx_probes_is_rejected(tmp_path: Path) -> Non
 
 
 @pytest.mark.docker
+@pytest.mark.parametrize("valid_secret", [True, False])
 def test_buildx_secret_mount_consumes_canary_without_disclosure(
-    tmp_path: Path,
+    tmp_path: Path, valid_secret: bool
 ) -> None:
     if not docker_daemon_available(cwd=tmp_path):
         pytest.skip("requires a Docker daemon")
     plan = build_plan_fixture(tmp_path)
     assert plan.pip_config_file is not None
-    canary = f"agentseek-buildx-secret-{uuid.uuid4().hex}"
-    plan.pip_config_file.write_text(canary, encoding="utf-8")
+    expected_canary = f"agentseek-buildx-secret-{uuid.uuid4().hex}"
+    actual_secret = (
+        expected_canary
+        if valid_secret
+        else f"agentseek-buildx-wrong-secret-{uuid.uuid4().hex}"
+    )
+    plan.pip_config_file.write_text(actual_secret, encoding="utf-8")
     plan = plan_container_image(config_path=plan.config_path)
-    digest = hashlib.sha256(canary.encode()).hexdigest()
+    digest = hashlib.sha256(expected_canary.encode()).hexdigest()
     dockerfile = (
         "# syntax=docker/dockerfile:1.7\n"
         "FROM python:3.12-alpine\n"
@@ -309,9 +315,9 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
                 "python",
                 "-c",
                 (
-                    "import hashlib,pathlib;"
+                    "import hashlib,pathlib,sys;"
                     "data=pathlib.Path('/run/secrets/pip_config').read_bytes();"
-                    f"raise SystemExit(1) if hashlib.sha256(data).hexdigest()!='{digest}' else None"
+                    f"sys.exit(1) if hashlib.sha256(data).hexdigest()!='{digest}' else None"
                 ),
             ]
         )
@@ -320,7 +326,7 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
     bundle = materialize_build_bundle(
         plan,
         dockerfile_bytes=dockerfile,
-        output_root=tmp_path / "secret-smoke-bundle",
+        output_root=tmp_path / f"secret-smoke-bundle-{valid_secret}",
     )
     allowed = {
         "PATH",
@@ -364,7 +370,9 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
             timeout=240,
         )
         combined = completed.stdout + completed.stderr
-        assert completed.returncode == 0, combined.decode(errors="replace")
+        assert (completed.returncode == 0) is valid_secret, combined.decode(
+            errors="replace"
+        )
         history = subprocess.run(
             ["docker", "image", "history", "--no-trunc", tag],
             cwd=tmp_path,
@@ -375,11 +383,12 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
             shell=False,
             timeout=30,
         )
-        assert history.returncode == 0
-        assert canary.encode() not in combined + history.stdout + history.stderr
-        assert canary.encode() not in invocation.stdin_bytes
-        assert canary not in invocation.argv
-        assert canary not in repr(invocation)
+        assert (history.returncode == 0) is valid_secret
+        observed = combined + history.stdout + history.stderr + invocation.stdin_bytes
+        for secret in (expected_canary, actual_secret):
+            assert secret.encode() not in observed
+            assert all(secret not in argument for argument in invocation.argv)
+            assert secret not in repr(invocation)
     finally:
         subprocess.run(
             ["docker", "image", "rm", "--force", tag],
