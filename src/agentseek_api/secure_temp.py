@@ -1001,22 +1001,26 @@ def sweep_expired_artifacts(
                 or candidate.resolve(strict=True).parent != root.resolve(strict=True)
             ):
                 continue
-            if os.name != "nt" and (
-                metadata.st_uid != _current_uid()
-                or (
-                    stat.S_ISREG(metadata.st_mode)
-                    and (
-                        stat.S_IMODE(metadata.st_mode) != _PRIVATE_FILE_MODE
-                        or metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
-                    )
+            if os.name != "nt":
+                expected_mode = (
+                    _PRIVATE_FILE_MODE
+                    if stat.S_ISREG(metadata.st_mode)
+                    else _PRIVATE_DIRECTORY_MODE
+                    if stat.S_ISDIR(metadata.st_mode)
+                    else None
                 )
-            ):
-                continue
-            if (  # pragma: no cover - native Windows only
-                os.name == "nt" and stat.S_ISDIR(metadata.st_mode)
-            ):
+                if (
+                    expected_mode is None
+                    or metadata.st_uid != _current_uid()
+                    or stat.S_IMODE(metadata.st_mode) != expected_mode
+                    or metadata.st_mode & (stat.S_IRWXG | stat.S_IRWXO)
+                ):
+                    continue
+            if stat.S_ISDIR(metadata.st_mode):
                 was_removed = _quarantine_then_rmtree(
-                    candidate, metadata, verify_windows_tree=True
+                    candidate,
+                    metadata,
+                    verify_windows_tree=os.name == "nt",
                 )
             elif not stat.S_ISREG(metadata.st_mode):
                 continue

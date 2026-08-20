@@ -347,6 +347,7 @@ class _ProcessCapture:
 @dataclass(frozen=True)
 class BoundaryCall:
     argv: tuple[str, ...]
+    invocation_type: type[ProcessInvocation]
     environment_names: frozenset[str]
     cwd: Path
     stdin_sha256: str | None
@@ -361,7 +362,10 @@ class BoundaryRunner(ProcessTransport):
     calls: list[BoundaryCall] = field(default_factory=list)
 
     @staticmethod
-    def _is_read_only(argv: tuple[str, ...]) -> bool:
+    def _is_read_only(invocation: ProcessInvocation) -> bool:
+        if not isinstance(invocation, ControlQueryInvocation):
+            return False
+        argv = tuple(invocation.argv)
         if argv[:3] == ("docker", "image", "inspect"):
             return True
         if argv == ("docker", "compose", "version", "--short"):
@@ -380,6 +384,7 @@ class BoundaryRunner(ProcessTransport):
         self.calls.append(
             BoundaryCall(
                 argv=argv,
+                invocation_type=type(invocation),
                 environment_names=frozenset(invocation.environment),
                 cwd=Path(invocation.cwd),
                 stdin_sha256=(
@@ -388,7 +393,7 @@ class BoundaryRunner(ProcessTransport):
                     else hashlib.sha256(stdin_bytes).hexdigest()
                 ),
                 stdin_size=0 if stdin_bytes is None else len(stdin_bytes),
-                is_side_effecting=not self._is_read_only(argv),
+                is_side_effecting=not self._is_read_only(invocation),
                 _environment_items=environment_items,
             )
         )
@@ -431,6 +436,55 @@ class BoundaryRunner(ProcessTransport):
         if argv[:3] == ("docker", "container", "inspect"):
             return ProcessResult(returncode=1)
         return ProcessResult(returncode=0)
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("docker", "compose", "version", "--short"),
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "fixture",
+            "agentseek:test",
+        ),
+        ("docker", "compose", "-f", "compose.yaml", "config"),
+    ],
+)
+def test_boundary_runner_requires_control_query_type_for_read_only_call(
+    argv: tuple[str, ...], tmp_path: Path
+) -> None:
+    runner = BoundaryRunner()
+
+    result = runner(
+        ProcessInvocation(argv=argv, environment={}, cwd=tmp_path, stdin_bytes=None)
+    )
+
+    assert result.stdout == b""
+    assert len(runner.calls) == 1
+    assert runner.calls[0].is_side_effecting is True
+
+
+def test_boundary_runner_treats_container_inspect_as_workload_boundary(
+    tmp_path: Path,
+) -> None:
+    runner = BoundaryRunner()
+
+    runner(
+        ControlQueryInvocation(
+            argv=("docker", "container", "inspect", "agentseek-up-8123"),
+            environment={},
+            cwd=tmp_path,
+            stdin_bytes=None,
+        )
+    )
+
+    assert len(runner.calls) == 1
+    assert runner.calls[0].is_side_effecting is True
 
 
 def _captured_image_build(capture: _ProcessCapture) -> BuildImageInvocation:
@@ -938,6 +992,50 @@ def test_container_plan_failure_starts_no_workload(
         "unsafe_temp",
     }:
         assert runner.calls == []
+    expected_control_calls = {
+        "unsupported_compose_version": [("docker", "compose", "version", "--short")],
+        "unavailable_buildkit": [
+            ("docker", "buildx", "version"),
+            ("docker", "buildx", "inspect"),
+        ],
+        "missing_contract_label": [
+            (
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
+                "agentseek:test",
+            )
+        ],
+        "missing_manifest_label": [
+            (
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
+                "agentseek:test",
+            )
+        ],
+        "incompatible_entrypoint": [
+            (
+                "docker",
+                "image",
+                "inspect",
+                "--format",
+                "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
+                "agentseek:test",
+            )
+        ],
+    }
+    if case in expected_control_calls:
+        assert len(runner.calls) == len(expected_control_calls[case])
+        assert all(
+            getattr(call, "invocation_type", None) is ControlQueryInvocation
+            for call in runner.calls
+        )
+        assert [call.argv for call in runner.calls] == expected_control_calls[case]
     assert "boundary-canary" not in repr(runner.calls)
     assert "boundary-canary" not in stdout
     assert "boundary-canary" not in stderr

@@ -349,6 +349,90 @@ def test_stale_sweep_never_deletes_regular_replacement(
     )
 
 
+@POSIX_ONLY
+def test_sweep_removes_only_verified_old_private_build_directory(
+    tmp_path: Path,
+) -> None:
+    old_private = tmp_path / "agentseek-build-old"
+    old_private.mkdir(mode=0o700)
+    nested = old_private / "nested"
+    nested.mkdir(mode=0o700)
+    (nested / "inventory.json").write_text("{}", encoding="utf-8")
+    old_public = tmp_path / "agentseek-build-public"
+    old_public.mkdir(mode=0o755)
+    recent = tmp_path / "agentseek-build-recent"
+    recent.mkdir(mode=0o700)
+    other_prefix = tmp_path / "agentseek-compose-old"
+    other_prefix.mkdir(mode=0o700)
+    symlink = tmp_path / "agentseek-build-link"
+    symlink.symlink_to(old_private, target_is_directory=True)
+    old = time.time() - 48 * 60 * 60
+    for path in (old_private, old_public, other_prefix):
+        os.utime(path, (old, old))
+    os.utime(symlink, (old, old), follow_symlinks=False)
+
+    removed = sweep_expired_artifacts(
+        tmp_root=tmp_path,
+        prefix="agentseek-build-",
+        older_than_seconds=24 * 60 * 60,
+        now=time.time(),
+    )
+
+    assert removed == (old_private,)
+    assert not old_private.exists()
+    assert old_public.is_dir()
+    assert recent.is_dir()
+    assert other_prefix.is_dir()
+    assert symlink.is_symlink()
+
+
+@POSIX_ONLY
+def test_stale_directory_sweep_never_deletes_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    candidate = tmp_path / "agentseek-build-old"
+    candidate.mkdir(mode=0o700)
+    (candidate / "inventory.json").write_text("created-object", encoding="utf-8")
+    old = time.time() - 48 * 60 * 60
+    os.utime(candidate, (old, old))
+    captured = tmp_path / "captured-original"
+    moved = False
+
+    def substitute_then_move(path: Path) -> Path:
+        nonlocal moved
+        moved = True
+        path.rename(captured)
+        path.mkdir(mode=0o700)
+        (path / "replacement.txt").write_text(
+            "replacement-must-survive", encoding="utf-8"
+        )
+        quarantine = tmp_path / ".agentseek-quarantine-stale-directory-test"
+        path.rename(quarantine)
+        return quarantine
+
+    monkeypatch.setattr(secure_temp, "_move_to_quarantine", substitute_then_move)
+
+    removed = sweep_expired_artifacts(
+        tmp_root=tmp_path,
+        prefix="agentseek-build-",
+        older_than_seconds=24 * 60 * 60,
+        now=time.time(),
+    )
+
+    assert moved is True
+    assert removed == ()
+    assert (captured / "inventory.json").read_text(encoding="utf-8") == (
+        "created-object"
+    )
+    assert any(
+        path.is_dir()
+        and (path / "replacement.txt").read_text(encoding="utf-8")
+        == "replacement-must-survive"
+        for path in tmp_path.iterdir()
+        if (path / "replacement.txt").exists()
+    )
+
+
 @pytest.mark.parametrize(
     ("control", "entries"),
     [
