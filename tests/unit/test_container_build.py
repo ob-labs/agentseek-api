@@ -221,6 +221,13 @@ def test_generated_up_auth_preserves_empty_and_rewrites_local_file(
     plan = plan_container_image(config_path=project / "agentseek.json")
     origin = EnvironmentOrigin("launch", "AUTH_MODULE_PATH")
 
+    absent_plan, absent_patch = plan_generated_up_auth(plan, None)
+    assert absent_patch is None
+    assert all(
+        SourceReason.AUTH not in source.reasons
+        for source in absent_plan.selected_sources.values()
+    )
+
     empty_plan, empty_patch = plan_generated_up_auth(
         plan, FinalAuthSelection(value="", origin=origin)
     )
@@ -834,3 +841,573 @@ def test_archive_rejects_added_symlink(tmp_path: Path) -> None:
     (bundle.context / "escape").symlink_to(project / "agentseek.json")
     with pytest.raises(Exception, match="unsafe"):
         bundle.archive_bytes()
+
+
+# Task 4 Fix Round 1 regressions
+
+
+def test_ordinary_selected_source_same_bytes_replacement_is_rejected(
+    tmp_path: Path,
+) -> None:
+    project = make_graph_project(tmp_path)
+    source = project / "asset.txt"
+    source.write_text("stable", encoding="utf-8")
+    plan = plan_container_image(
+        config_path=project / "agentseek.json", build_include=("asset.txt",)
+    )
+    replacement = project / "replacement.txt"
+    replacement.write_bytes(source.read_bytes())
+    replacement.replace(source)
+
+    with pytest.raises(Exception, match="identity"):
+        materialize_build_bundle(
+            plan,
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=tmp_path / "bundle",
+        )
+
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_ordinary_selected_source_hash_is_rechecked_when_metadata_is_restored(
+    tmp_path: Path,
+) -> None:
+    project = make_graph_project(tmp_path)
+    source = project / "asset.txt"
+    source.write_text("safe-content", encoding="utf-8")
+    plan = plan_container_image(
+        config_path=project / "agentseek.json", build_include=("asset.txt",)
+    )
+    frozen = source.stat()
+    source.write_text("evil-content", encoding="utf-8")
+    os.utime(source, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))
+
+    with pytest.raises(Exception, match="hash|changed"):
+        materialize_build_bundle(
+            plan,
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=tmp_path / "bundle",
+        )
+
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_intermediate_directory_symlink_swap_is_rejected_without_reading_canary(
+    tmp_path: Path,
+) -> None:
+    project = make_graph_project(tmp_path)
+    selected_dir = project / "assets"
+    selected_dir.mkdir()
+    selected_file = selected_dir / "value.txt"
+    selected_file.write_text("safe", encoding="utf-8")
+    plan = plan_container_image(
+        config_path=project / "agentseek.json", build_include=("assets/value.txt",)
+    )
+    moved = project / "assets-original"
+    selected_dir.rename(moved)
+    outside = tmp_path / "outside-assets"
+    outside.mkdir()
+    (outside / "value.txt").write_text("external-directory-canary", encoding="utf-8")
+    selected_dir.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(Exception, match="project root|symlink|identity") as caught:
+        materialize_build_bundle(
+            plan,
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=tmp_path / "bundle",
+        )
+
+    assert "external-directory-canary" not in str(caught.value)
+    assert not (tmp_path / "bundle").exists()
+
+
+@pytest.mark.parametrize("vcs_name", [".git", ".hg", ".svn", ".bzr"])
+def test_all_supported_vcs_metadata_is_recursively_excluded(
+    tmp_path: Path, vcs_name: str
+) -> None:
+    project = make_graph_project(tmp_path)
+    vcs = project / vcs_name
+    vcs.mkdir()
+    (vcs / "secret").write_text("vcs-canary", encoding="utf-8")
+
+    plan = plan_container_image(config_path=project / "agentseek.json")
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=b"FROM scratch\n",
+        output_root=tmp_path / "bundle",
+    )
+
+    assert b"vcs-canary" not in bundle.archive_bytes()
+    with pytest.raises(Exception, match="VCS"):
+        plan_container_image(
+            config_path=project / "agentseek.json", build_include=(vcs_name,)
+        )
+
+
+def test_public_manifest_mappings_are_deep_frozen(tmp_path: Path) -> None:
+    project = make_graph_project(tmp_path)
+    schemes = {"key": {"type": "apiKey", "name": "x-key", "in": "header"}}
+    config = project / "agentseek.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graphs": {"chat": "chat.graph:graph"},
+                "auth": {
+                    "openapi": {
+                        "securitySchemes": schemes,
+                        "security": [{"key": []}],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    manifest = plan_container_image(config_path=config).manifest
+    before = manifest.to_json_bytes()
+    schemes["key"]["name"] = "mutated"
+    with pytest.raises(TypeError):
+        manifest.auth.openapi.security_schemes["key"]["name"] = "mutated"  # type: ignore[index]
+    assert manifest.to_json_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"store": {"ttl": {"default_ttl": float("nan")}}},
+        {"store": {"ttl": {"default_ttl": float("inf")}}},
+        {
+            "graphs": {
+                "chat": {
+                    "graph": "chat.graph:graph",
+                    "input_schema": {"bad": float("nan")},
+                }
+            }
+        },
+    ],
+)
+def test_non_finite_manifest_numbers_are_rejected(
+    tmp_path: Path, payload: dict[str, object]
+) -> None:
+    project = make_graph_project(tmp_path)
+    config = project / "agentseek.json"
+    document = {"graphs": {"chat": "chat.graph:graph"}, **payload}
+    config.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(Exception, match="finite"):
+        plan_container_image(config_path=config)
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    [
+        {"name": "x-key", "in": "header"},
+        {"type": "apiKey", "in": "header"},
+        {"type": "http"},
+        {"type": "oauth2", "flows": {}},
+        {
+            "type": "oauth2",
+            "flows": {"authorizationCode": {"scopes": {}}},
+        },
+        {"type": "openIdConnect"},
+    ],
+)
+def test_openapi_scheme_type_specific_required_fields_fail_closed(
+    tmp_path: Path, scheme: dict[str, object]
+) -> None:
+    project = make_graph_project(tmp_path)
+    config = project / "agentseek.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graphs": {"chat": "chat.graph:graph"},
+                "auth": {
+                    "openapi": {"securitySchemes": {"bad": scheme}, "security": []}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="required|type|flow"):
+        plan_container_image(config_path=config)
+
+
+@pytest.mark.parametrize(
+    "scheme",
+    [
+        {"type": "http", "scheme": "bearer", "bearerFormat": "JWT"},
+        {
+            "type": "openIdConnect",
+            "openIdConnectUrl": "https://id.example/.well-known/openid-configuration",
+        },
+        {
+            "type": "oauth2",
+            "flows": {
+                "implicit": {
+                    "authorizationUrl": "https://id.example/authorize",
+                    "scopes": {},
+                },
+                "password": {
+                    "tokenUrl": "https://id.example/token",
+                    "scopes": {},
+                },
+                "clientCredentials": {
+                    "tokenUrl": "https://id.example/token",
+                    "refreshUrl": "https://id.example/refresh",
+                    "scopes": {},
+                },
+            },
+        },
+    ],
+)
+def test_openapi_scheme_type_specific_valid_fields_round_trip(
+    tmp_path: Path, scheme: dict[str, object]
+) -> None:
+    project = make_graph_project(tmp_path)
+    config = project / "agentseek.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graphs": {"chat": "chat.graph:graph"},
+                "auth": {
+                    "openapi": {"securitySchemes": {"valid": scheme}, "security": []}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    document = plan_container_image(config_path=config).manifest.to_json_object()
+
+    assert document["auth"]["openapi"]["securitySchemes"]["valid"] == scheme  # type: ignore[index]
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://id.example/config?token=openapi-canary",
+        "https://id.example/config#access_token=openapi-canary",
+    ],
+)
+def test_openapi_query_and_unsafe_fragment_urls_are_value_free(
+    tmp_path: Path, url: str
+) -> None:
+    project = make_graph_project(tmp_path)
+    config = project / "agentseek.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graphs": {"chat": "chat.graph:graph"},
+                "auth": {
+                    "openapi": {
+                        "securitySchemes": {
+                            "bad": {
+                                "type": "openIdConnect",
+                                "openIdConnectUrl": url,
+                            }
+                        },
+                        "security": [],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(Exception, match="query|fragment") as caught:
+        plan_container_image(config_path=config)
+    assert "openapi-canary" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://packages.example/fixture.whl?token=query-canary",
+        "https://packages.example/fixture.whl#access_token=fragment-canary",
+    ],
+)
+def test_credential_query_and_unsafe_fragment_urls_are_rejected_value_free(
+    tmp_path: Path, url: str
+) -> None:
+    project = make_graph_project(tmp_path)
+    config = project / "agentseek.json"
+    config.write_text(
+        json.dumps({"graphs": {"chat": "chat.graph:graph"}, "dependencies": [url]}),
+        encoding="utf-8",
+    )
+    with pytest.raises(Exception, match="query|fragment|credential") as caught:
+        plan_container_image(config_path=config)
+    assert "canary" not in str(caught.value)
+
+
+def test_config_dotenv_is_config_parent_relative_and_recursively_excluded(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    config_dir = project / "config"
+    package = project / "chat"
+    config_dir.mkdir(parents=True)
+    package.mkdir()
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="fixture"\nversion="1.0"\n', encoding="utf-8"
+    )
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    dotenv = config_dir / ".env"
+    dotenv.write_text("TOKEN=recursive-dotenv-canary\n", encoding="utf-8")
+    config = config_dir / "agentseek.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graphs": {"chat": "../chat/graph.py:graph"},
+                "dependencies": [".."],
+                "env": ".env",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    plan = plan_container_image(config_path=config, invocation_cwd=project)
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=b"FROM scratch\n",
+        output_root=tmp_path / "bundle",
+    )
+
+    assert dotenv.resolve() in plan.excluded_paths
+    assert b"recursive-dotenv-canary" not in bundle.archive_bytes()
+
+
+@pytest.mark.parametrize(
+    "source_kind",
+    ["config-mapping", "config-dotenv", "cli-dotenv", "launch"],
+)
+def test_relative_final_auth_uses_invocation_cwd_for_non_auth_origins(
+    tmp_path: Path, source_kind: str
+) -> None:
+    project = tmp_path / "project"
+    config_dir = project / "config"
+    config_dir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="fixture"\nversion="1.0"\n', encoding="utf-8"
+    )
+    (project / "auth.py").write_text("auth = 'cwd'\n", encoding="utf-8")
+    (config_dir / "auth.py").write_text("auth = 'config'\n", encoding="utf-8")
+    config = config_dir / "agentseek.json"
+    config.write_text(
+        json.dumps({"graphs": {"chat": "installed.graph:graph"}}),
+        encoding="utf-8",
+    )
+    plan = plan_container_image(config_path=config, invocation_cwd=project)
+
+    updated, patch = plan_generated_up_auth(
+        plan,
+        FinalAuthSelection(
+            "auth.py:auth", EnvironmentOrigin(source_kind, "fixture.env")
+        ),
+    )
+
+    assert patch == AuthPayloadPatch("/deps/agent/auth.py:auth")
+    assert updated.selected_sources["app/auth.py"].source_path == project / "auth.py"
+
+
+def test_relative_dedicated_auth_origin_uses_config_parent(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    config_dir = project / "config"
+    config_dir.mkdir(parents=True)
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="fixture"\nversion="1.0"\n', encoding="utf-8"
+    )
+    (project / "auth.py").write_text("auth = 'cwd'\n", encoding="utf-8")
+    selected = config_dir / "auth.py"
+    selected.write_text("auth = 'config'\n", encoding="utf-8")
+    config = config_dir / "agentseek.json"
+    config.write_text(
+        json.dumps({"graphs": {"chat": "installed.graph:graph"}}),
+        encoding="utf-8",
+    )
+    plan = plan_container_image(config_path=config, invocation_cwd=project)
+
+    updated, patch = plan_generated_up_auth(
+        plan,
+        FinalAuthSelection("auth.py:auth", EnvironmentOrigin("auth", str(config))),
+    )
+
+    assert patch == AuthPayloadPatch("/deps/agent/config/auth.py:auth")
+    assert updated.selected_sources["app/config/auth.py"].source_path == selected
+
+
+@pytest.mark.parametrize("cwd_kind", ["missing", "regular-file"])
+def test_invocation_cwd_must_be_an_existing_directory(
+    tmp_path: Path, cwd_kind: str
+) -> None:
+    project = make_graph_project(tmp_path)
+    invocation_cwd = tmp_path / cwd_kind
+    if cwd_kind == "regular-file":
+        invocation_cwd.write_text("not a directory", encoding="utf-8")
+
+    with pytest.raises(Exception, match="invocation cwd"):
+        plan_container_image(
+            config_path=project / "agentseek.json", invocation_cwd=invocation_cwd
+        )
+
+
+def test_materialization_rejects_output_context_swap_without_deleting_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    output = tmp_path / "bundle"
+    captured = tmp_path / "captured-context"
+    original_write = container_build._write_file  # noqa: SLF001
+    calls = 0
+
+    def swap_after_first_write(path: Path, data: bytes) -> None:
+        nonlocal calls
+        original_write(path, data)
+        calls += 1
+        if calls == 1:
+            (output / "context").rename(captured)
+            (output / "context").mkdir(mode=0o700)
+            (output / "context" / "replacement-canary").write_text(
+                "must-survive", encoding="utf-8"
+            )
+
+    monkeypatch.setattr(container_build, "_write_file", swap_after_first_write)
+
+    with pytest.raises(Exception, match="identity|changed"):
+        materialize_build_bundle(
+            plan_container_image(config_path=project / "agentseek.json"),
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=output,
+        )
+
+    assert (output / "context" / "replacement-canary").read_text(
+        encoding="utf-8"
+    ) == "must-survive"
+    assert captured.is_dir()
+
+
+def test_materialization_rejects_output_root_swap_without_deleting_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    output = tmp_path / "bundle"
+    captured = tmp_path / "captured-root"
+    original_write = container_build._write_file  # noqa: SLF001
+    calls = 0
+
+    def swap_after_first_write(path: Path, data: bytes) -> None:
+        nonlocal calls
+        original_write(path, data)
+        calls += 1
+        if calls == 1:
+            output.rename(captured)
+            output.mkdir(mode=0o700)
+            (output / "replacement-canary").write_text("must-survive", encoding="utf-8")
+
+    monkeypatch.setattr(container_build, "_write_file", swap_after_first_write)
+
+    with pytest.raises(Exception, match="root identity"):
+        materialize_build_bundle(
+            plan_container_image(config_path=project / "agentseek.json"),
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=output,
+        )
+
+    assert (output / "replacement-canary").read_text(encoding="utf-8") == (
+        "must-survive"
+    )
+    assert captured.is_dir()
+
+
+def test_materialization_rejects_project_root_inode_swap(tmp_path: Path) -> None:
+    project = make_graph_project(tmp_path)
+    plan = plan_container_image(config_path=project / "agentseek.json")
+    captured = tmp_path / "captured-project"
+    project.rename(captured)
+    project.mkdir()
+
+    with pytest.raises(Exception, match="project root identity"):
+        materialize_build_bundle(
+            plan,
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=tmp_path / "bundle",
+        )
+
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_materialization_rejects_vanished_project_root(tmp_path: Path) -> None:
+    project = make_graph_project(tmp_path)
+    plan = plan_container_image(config_path=project / "agentseek.json")
+    project.rename(tmp_path / "captured-project")
+
+    with pytest.raises(Exception, match="project root changed"):
+        materialize_build_bundle(
+            plan,
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=tmp_path / "bundle",
+        )
+
+    assert not (tmp_path / "bundle").exists()
+
+
+def test_materialization_fails_closed_when_private_output_creation_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.secure_temp import SecureArtifactError
+
+    project = make_graph_project(tmp_path)
+
+    def reject_output(_path: Path) -> None:
+        raise SecureArtifactError("private output unavailable")
+
+    monkeypatch.setattr(container_build, "create_private_directory", reject_output)
+
+    with pytest.raises(Exception, match="could not be created"):
+        materialize_build_bundle(
+            plan_container_image(config_path=project / "agentseek.json"),
+            dockerfile_bytes=b"FROM scratch\n",
+            output_root=tmp_path / "bundle",
+        )
+
+
+def test_materialization_writes_every_byte_when_os_write_is_partial(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    original_write = os.write
+
+    def partial_write(fd: int, data: bytes | memoryview) -> int:
+        return original_write(fd, bytes(data[: max(1, len(data) // 2)]))
+
+    monkeypatch.setattr(container_build.os, "write", partial_write)
+    bundle = materialize_build_bundle(
+        plan_container_image(config_path=project / "agentseek.json"),
+        dockerfile_bytes=b"FROM scratch\n",
+        output_root=tmp_path / "bundle",
+    )
+
+    assert bundle.dockerfile.read_bytes() == b"FROM scratch\n"
+    assert bundle.manifest.read_bytes().endswith(b"\n")
+    assert bundle.archive_bytes()
+
+
+def test_materialization_computes_each_inventory_digest_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project = make_graph_project(tmp_path)
+    output = tmp_path / "bundle"
+    original_read_bytes = Path.read_bytes
+
+    def reject_output_reopen(path: Path) -> bytes:
+        if output / "context" in (path, *path.parents):
+            raise AssertionError("frozen output bytes must drive inventory")
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", reject_output_reopen)
+    bundle = materialize_build_bundle(
+        plan_container_image(config_path=project / "agentseek.json"),
+        dockerfile_bytes=b"FROM scratch\n",
+        output_root=output,
+    )
+
+    assert bundle.inventory

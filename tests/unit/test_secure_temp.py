@@ -525,3 +525,59 @@ def test_windows_sweep_removes_private_directory_with_inherited_descendants(
         assert not path.exists()
     finally:
         manager.__exit__(None, None, None)
+
+
+@POSIX_ONLY
+def test_verify_private_directory_rechecks_owner_mode_and_identity(
+    tmp_path: Path,
+) -> None:
+    directory = tmp_path / "bundle-output"
+    directory.mkdir(mode=0o700)
+
+    expected = secure_temp.verify_private_directory(directory)
+    assert (expected.st_dev, expected.st_ino) == (
+        directory.lstat().st_dev,
+        directory.lstat().st_ino,
+    )
+
+    directory.chmod(0o755)
+    with pytest.raises(SecureArtifactError, match="exclusive directory access"):
+        secure_temp.verify_private_directory(directory, expected=expected)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows security APIs")
+def test_verify_private_directory_uses_native_windows_dacl_collection(
+    tmp_path: Path,
+) -> None:
+    with private_directory(tmp_root=tmp_path, prefix="agentseek-build-") as path:
+        expected = secure_temp.verify_private_directory(path)
+        secure_temp.verify_private_directory(path, expected=expected)
+        secure_temp._verify_private_dacl(path, directory=True)
+
+
+@POSIX_ONLY
+def test_create_private_directory_establishes_exact_private_output(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "persistent-bundle"
+
+    expected = secure_temp.create_private_directory(output)
+
+    assert stat.S_IMODE(output.stat().st_mode) == 0o700
+    assert output.stat().st_uid == os.getuid()
+    secure_temp.verify_private_directory(output, expected=expected)
+
+    with pytest.raises(FileExistsError):
+        secure_temp.create_private_directory(output)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows security APIs")
+def test_create_private_directory_establishes_native_windows_output_dacl(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "persistent-bundle"
+
+    expected = secure_temp.create_private_directory(output)
+
+    secure_temp.verify_private_directory(output, expected=expected)
+    secure_temp._verify_private_dacl(output, directory=True)

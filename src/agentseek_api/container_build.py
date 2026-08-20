@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import math
 import os
 import re
 import shutil
@@ -25,12 +26,18 @@ from packaging.version import Version
 
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
 from agentseek_api.environment import EnvironmentOrigin
+from agentseek_api.secure_temp import (
+    SecureArtifactError,
+    create_private_directory,
+    verify_private_directory,
+)
 
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 
 _RUNTIME_VERSION = "0.3.0"
 _CONTAINER_ROOT = PurePosixPath("/deps/agent")
+_VCS_METADATA_NAMES = frozenset({".git", ".hg", ".svn", ".bzr"})
 
 
 class ContainerBuildError(ValueError):
@@ -38,6 +45,8 @@ class ContainerBuildError(ValueError):
 
 
 def _freeze_json(value: object, *, location: str) -> JsonValue:
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ContainerBuildError(f"{location} must contain finite numbers only.")
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, (list, tuple)):
@@ -125,6 +134,28 @@ class AuthOpenApiManifestV1:
         default=None, repr=False
     )
 
+    def __post_init__(self) -> None:
+        if self.security_schemes is not None:
+            schemes: dict[str, Mapping[str, JsonValue]] = {}
+            for name, scheme in self.security_schemes.items():
+                frozen = _freeze_json(
+                    dict(scheme), location=f"auth.openapi.securitySchemes.{name}"
+                )
+                assert isinstance(frozen, Mapping)
+                schemes[name] = frozen
+            object.__setattr__(self, "security_schemes", MappingProxyType(schemes))
+        if self.security is not None:
+            object.__setattr__(
+                self,
+                "security",
+                tuple(
+                    MappingProxyType(
+                        {name: tuple(scopes) for name, scopes in requirement.items()}
+                    )
+                    for requirement in self.security
+                ),
+            )
+
 
 @dataclass(frozen=True)
 class AuthPolicyManifestV1:
@@ -160,6 +191,13 @@ class SourceReason(StrEnum):
 class SelectedSource:
     source_path: Path = field(repr=False)
     reasons: frozenset[SourceReason]
+    source_identity: tuple[int, int, int, int] | None = field(
+        default=None, repr=False, compare=False
+    )
+    source_sha256: str | None = field(default=None, repr=False, compare=False)
+    ancestor_identities: tuple[tuple[Path, tuple[int, int]], ...] = field(
+        default=(), repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if not self.reasons:
@@ -286,6 +324,7 @@ class ContainerRuntimeManifestV1:
                 ensure_ascii=False,
                 sort_keys=True,
                 separators=(",", ":"),
+                allow_nan=False,
             ).encode("utf-8")
             + b"\n"
         )
@@ -302,7 +341,10 @@ class ContainerBuildPlan:
     pip_config_file: Path | None = field(repr=False)
     manifest: ContainerRuntimeManifestV1 = field(repr=False)
     selected_sources: Mapping[str, SelectedSource] = field(repr=False)
+    config_path: Path = field(repr=False)
     project_root: Path = field(repr=False)
+    project_root_identity: tuple[int, int] = field(repr=False)
+    invocation_cwd: Path = field(repr=False)
     excluded_paths: frozenset[Path] = field(default_factory=frozenset, repr=False)
 
     def __post_init__(self) -> None:
@@ -442,7 +484,22 @@ def _auth_json(auth: AuthPolicyManifestV1) -> dict[str, object]:
 def _safe_regular(path: Path, *, project_root: Path, purpose: str) -> Path:
     try:
         raw = path.absolute()
+        relative_raw = raw.relative_to(project_root)
+        current = project_root
+        for part in relative_raw.parts[:-1]:
+            current = current / part
+            parent_status = current.lstat()
+            if stat.S_ISLNK(parent_status.st_mode) or not stat.S_ISDIR(
+                parent_status.st_mode
+            ):
+                raise ContainerBuildError(
+                    f"The {purpose} source has an unsafe intermediate directory."
+                )
         status = raw.lstat()
+    except ValueError as exc:
+        raise ContainerBuildError(
+            f"The {purpose} source must remain inside the project root."
+        ) from exc
     except OSError as exc:
         raise ContainerBuildError(f"The {purpose} source is missing.") from exc
     if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
@@ -454,7 +511,7 @@ def _safe_regular(path: Path, *, project_root: Path, purpose: str) -> Path:
         raise ContainerBuildError(
             f"The {purpose} source must remain inside the project root."
         ) from exc
-    if ".git" in resolved.relative_to(project_root).parts:
+    if _VCS_METADATA_NAMES.intersection(resolved.relative_to(project_root).parts):
         raise ContainerBuildError(
             f"The {purpose} source selects excluded VCS metadata."
         )
@@ -463,7 +520,23 @@ def _safe_regular(path: Path, *, project_root: Path, purpose: str) -> Path:
 
 def _safe_directory(path: Path, *, project_root: Path, purpose: str) -> Path:
     try:
-        raw_status = path.absolute().lstat()
+        raw = path.absolute()
+        relative_raw = raw.relative_to(project_root)
+        current = project_root
+        for part in relative_raw.parts:
+            current = current / part
+            component_status = current.lstat()
+            if stat.S_ISLNK(component_status.st_mode) or not stat.S_ISDIR(
+                component_status.st_mode
+            ):
+                raise ContainerBuildError(
+                    f"The {purpose} source has an unsafe intermediate directory."
+                )
+        raw_status = raw.lstat()
+    except ValueError as exc:
+        raise ContainerBuildError(
+            f"The {purpose} source must remain inside the project root."
+        ) from exc
     except OSError as exc:
         raise ContainerBuildError(f"The {purpose} source is missing.") from exc
     if stat.S_ISLNK(raw_status.st_mode) or not stat.S_ISDIR(raw_status.st_mode):
@@ -475,7 +548,7 @@ def _safe_directory(path: Path, *, project_root: Path, purpose: str) -> Path:
         raise ContainerBuildError(
             f"The {purpose} source must remain inside the project root."
         ) from exc
-    if ".git" in resolved.relative_to(project_root).parts:
+    if _VCS_METADATA_NAMES.intersection(resolved.relative_to(project_root).parts):
         raise ContainerBuildError(
             f"The {purpose} source selects excluded VCS metadata."
         )
@@ -521,19 +594,52 @@ def _add_selected(
     destination: str,
     source: Path,
     reason: SourceReason,
+    project_root: Path | None = None,
 ) -> None:
     if destination.startswith("/") or ".." in PurePosixPath(destination).parts:
         raise ContainerBuildError("A selected destination escaped the build context.")
+    selection_root = source.parent if project_root is None else project_root
+    source_status = source.lstat()
+    source_identity = _file_identity(source_status)
+    source_sha256 = hashlib.sha256(
+        _read_regular_source(source, expected_identity=source_identity)
+    ).hexdigest()
+    ancestors: list[tuple[Path, tuple[int, int]]] = []
+    current = source.parent
+    while True:
+        ancestors.append((current, _directory_identity(current.lstat())))
+        if current == selection_root:
+            break
+        if selection_root not in current.parents:
+            raise ContainerBuildError("A selected source escaped the project root.")
+        current = current.parent
+    ancestor_identities = tuple(reversed(ancestors))
     existing = selected.get(destination)
     if existing is None:
-        selected[destination] = SelectedSource(source, frozenset({reason}))
+        selected[destination] = SelectedSource(
+            source,
+            frozenset({reason}),
+            source_identity=source_identity,
+            source_sha256=source_sha256,
+            ancestor_identities=ancestor_identities,
+        )
         return
     if existing.source_path != source:
         raise ContainerBuildError(
             "Two different sources selected the same destination."
         )
+    if (
+        existing.source_identity != source_identity
+        or existing.source_sha256 != source_sha256
+        or existing.ancestor_identities != ancestor_identities
+    ):
+        raise ContainerBuildError("A selected source identity changed during planning.")
     selected[destination] = SelectedSource(
-        source, existing.reasons | frozenset({reason})
+        source,
+        existing.reasons | frozenset({reason}),
+        source_identity=source_identity,
+        source_sha256=source_sha256,
+        ancestor_identities=ancestor_identities,
     )
 
 
@@ -550,7 +656,7 @@ def _select_file(
     relative = source.relative_to(project_root)
     if (
         source in excluded
-        or ".git" in relative.parts
+        or _VCS_METADATA_NAMES.intersection(relative.parts)
         or source.name
         in {
             ".gitignore",
@@ -565,7 +671,13 @@ def _select_file(
     destination = str(
         PurePosixPath(destination_prefix) / PurePosixPath(relative.as_posix())
     )
-    _add_selected(selected, destination=destination, source=source, reason=reason)
+    _add_selected(
+        selected,
+        destination=destination,
+        source=source,
+        reason=reason,
+        project_root=project_root,
+    )
     return source
 
 
@@ -580,7 +692,7 @@ def _select_tree(
     root = _safe_directory(root, project_root=project_root, purpose=reason.value)
     for candidate in sorted(root.rglob("*")):
         relative = candidate.relative_to(project_root)
-        if ".git" in relative.parts:
+        if _VCS_METADATA_NAMES.intersection(relative.parts):
             continue
         status = candidate.lstat()
         if stat.S_ISLNK(status.st_mode):
@@ -636,6 +748,8 @@ def _optional_number(
     expected = int if integer else (int, float)
     if isinstance(value, bool) or not isinstance(value, expected):
         raise ContainerBuildError(f"{location} must be numeric.")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ContainerBuildError(f"{location} must be finite.")
     return value
 
 
@@ -909,34 +1023,44 @@ def _validate_security_scheme(name: str, raw: object) -> Mapping[str, JsonValue]
         raise ContainerBuildError(
             f"auth.openapi.securitySchemes.{name} must be an object."
         )
-    allowed = {
-        "type",
-        "description",
-        "name",
-        "in",
-        "scheme",
-        "bearerFormat",
-        "flows",
-        "openIdConnectUrl",
+    location = f"auth.openapi.securitySchemes.{name}"
+    scheme_type = raw.get("type")
+    if not isinstance(scheme_type, str):
+        raise ContainerBuildError(f"{location}.type is required and must be a string.")
+    allowed_by_type = {
+        "apiKey": {"type", "description", "name", "in"},
+        "http": {"type", "description", "scheme", "bearerFormat"},
+        "oauth2": {"type", "description", "flows"},
+        "openIdConnect": {"type", "description", "openIdConnectUrl"},
     }
-    _validate_allowed(raw, allowed, f"auth.openapi.securitySchemes.{name}")
+    allowed = allowed_by_type.get(scheme_type)
+    if allowed is None:
+        raise ContainerBuildError(f"{location}.type is unsupported.")
+    _validate_allowed(raw, allowed, location)
+    required_by_type = {
+        "apiKey": {"name", "in"},
+        "http": {"scheme"},
+        "oauth2": {"flows"},
+        "openIdConnect": {"openIdConnectUrl"},
+    }
+    missing = required_by_type[scheme_type] - raw.keys()
+    if missing:
+        raise ContainerBuildError(f"{location} is missing required fields.")
+    if scheme_type == "apiKey" and raw.get("in") not in {"query", "header", "cookie"}:
+        raise ContainerBuildError(f"{location}.in has an unsupported value.")
     for key, value in raw.items():
         if key.startswith("x-"):
             raise ContainerBuildError(
                 "OpenAPI security metadata cannot contain extensions."
             )
         if key == "flows":
-            _validate_oauth_flows(
-                value, location=f"auth.openapi.securitySchemes.{name}.flows"
-            )
+            _validate_oauth_flows(value, location=f"{location}.flows")
             continue
         if not isinstance(value, str):
-            raise ContainerBuildError(
-                f"auth.openapi.securitySchemes.{name}.{key} must be a string."
-            )
+            raise ContainerBuildError(f"{location}.{key} must be a string.")
         if key.endswith("Url"):
             _reject_credential_url(value)
-    return _freeze_json(raw, location=f"auth.openapi.securitySchemes.{name}")  # type: ignore[return-value]
+    return _freeze_json(raw, location=location)  # type: ignore[return-value]
 
 
 def _reject_credential_url(value: str) -> None:
@@ -945,10 +1069,18 @@ def _reject_credential_url(value: str) -> None:
         raise ContainerBuildError(
             "OpenAPI security metadata has a credential-bearing URL."
         )
+    if parsed.query:
+        raise ContainerBuildError(
+            "OpenAPI security metadata URL query parameters are not permitted."
+        )
+    if parsed.fragment and not re.fullmatch(r"sha256=[0-9a-fA-F]{64}", parsed.fragment):
+        raise ContainerBuildError(
+            "OpenAPI security metadata URL fragment is not permitted."
+        )
 
 
 def _validate_oauth_flows(value: object, *, location: str) -> None:
-    if not isinstance(value, dict):
+    if not isinstance(value, dict) or not value:
         raise ContainerBuildError(f"{location} must be an object.")
     _validate_allowed(
         value,
@@ -962,6 +1094,16 @@ def _validate_oauth_flows(value: object, *, location: str) -> None:
         if flow_name in {"implicit", "authorizationCode"}:
             allowed.add("authorizationUrl")
         _validate_allowed(flow, allowed, f"{location}.{flow_name}")
+        required = {
+            "implicit": {"authorizationUrl", "scopes"},
+            "password": {"tokenUrl", "scopes"},
+            "clientCredentials": {"tokenUrl", "scopes"},
+            "authorizationCode": {"authorizationUrl", "tokenUrl", "scopes"},
+        }[flow_name]
+        if required - flow.keys():
+            raise ContainerBuildError(
+                f"{location}.{flow_name} is missing required flow fields."
+            )
         scopes = flow.get("scopes")
         if not isinstance(scopes, dict) or not all(
             isinstance(key, str) and isinstance(item, str)
@@ -1057,7 +1199,13 @@ def _validate_requirement_url(value: str) -> None:
             raise ContainerBuildError(
                 "Dependency URLs must use HTTPS without embedded credentials; use pip_config_file."
             )
-        if parsed.fragment.startswith("subdirectory="):
+        if parsed.query:
+            raise ContainerBuildError(
+                "Dependency URL query parameters are not permitted; use pip_config_file."
+            )
+        if parsed.fragment and not re.fullmatch(
+            r"sha256=[0-9a-fA-F]{64}", parsed.fragment
+        ):
             raise ContainerBuildError("Dependency URL fragments are not supported.")
 
 
@@ -1322,9 +1470,23 @@ def plan_container_image(
     build_include: Sequence[str] | None = None,
     base_image_override: str | None = None,
     runtime_artifact: RuntimeArtifactV1 = PUBLISHED_RUNTIME_ARTIFACT,
+    invocation_cwd: Path | None = None,
 ) -> ContainerBuildPlan:
     config = Path(config_path).absolute()
-    project_root = _discover_project_root(config)
+    if invocation_cwd is None:
+        project_root = _discover_project_root(config)
+        resolved_invocation_cwd = project_root
+    else:
+        resolved_invocation_cwd = Path(invocation_cwd).resolve()
+        try:
+            invocation_status = resolved_invocation_cwd.lstat()
+        except OSError as exc:
+            raise ContainerBuildError("The invocation cwd is missing.") from exc
+        if stat.S_ISLNK(invocation_status.st_mode) or not stat.S_ISDIR(
+            invocation_status.st_mode
+        ):
+            raise ContainerBuildError("The invocation cwd must be a directory.")
+        project_root = resolved_invocation_cwd
     reference_base = config.parent.resolve()
     config = _safe_regular(config, project_root=project_root, purpose="config")
     payload = _load_config(config)
@@ -1333,7 +1495,7 @@ def plan_container_image(
     if isinstance(raw_env, str):
         path = Path(raw_env).expanduser()
         if not path.is_absolute():
-            path = project_root / path
+            path = reference_base / path
         configured_dotenv.append(path)
     all_dotenv = [*configured_dotenv, *(Path(item) for item in dotenv_paths)]
     resolved_dotenv: list[Path] = []
@@ -1410,7 +1572,7 @@ def plan_container_image(
         value = raw_env.get("AUTH_MODULE_PATH")
         if isinstance(value, str):
             static_auth = value
-            static_auth_base = project_root
+            static_auth_base = resolved_invocation_cwd
     if static_auth and _is_path_reference(static_auth):
         located = _module_file(static_auth, base=static_auth_base)
         if located is not None:
@@ -1506,6 +1668,7 @@ def plan_container_image(
             destination=destination,
             source=candidate_source,
             reason=SourceReason.RUNTIME_ARTIFACT,
+            project_root=project_root,
         )
 
     raw_base = payload.get("base_image")
@@ -1544,7 +1707,10 @@ def plan_container_image(
         pip_config_file=pip_path,
         manifest=manifest,
         selected_sources=selected,
+        config_path=config,
         project_root=project_root,
+        project_root_identity=_directory_identity(project_root.lstat()),
+        invocation_cwd=resolved_invocation_cwd,
         excluded_paths=excluded,
     )
 
@@ -1554,7 +1720,13 @@ def _without_auth_reasons(plan: ContainerBuildPlan) -> dict[str, SelectedSource]
     for destination, source in plan.selected_sources.items():
         reasons = source.reasons - frozenset({SourceReason.AUTH})
         if reasons:
-            selected[destination] = SelectedSource(source.source_path, reasons)
+            selected[destination] = SelectedSource(
+                source.source_path,
+                reasons,
+                source_identity=source.source_identity,
+                source_sha256=source.source_sha256,
+                ancestor_identities=source.ancestor_identities,
+            )
     return selected
 
 
@@ -1570,7 +1742,12 @@ def plan_generated_up_auth(
         return replace(plan, selected_sources=selected), AuthPayloadPatch(
             selection.value
         )
-    located = _module_file(selection.value, base=plan.project_root)
+    auth_base = (
+        plan.config_path.parent
+        if selection.origin.source_kind == "auth"
+        else plan.invocation_cwd
+    )
+    located = _module_file(selection.value, base=auth_base)
     if located is None:
         return replace(plan, selected_sources=selected), AuthPayloadPatch(
             selection.value
@@ -1587,11 +1764,6 @@ def plan_generated_up_auth(
     return replace(plan, selected_sources=selected), AuthPayloadPatch(rewritten)
 
 
-def _digest(path: Path) -> tuple[str, int]:
-    data = path.read_bytes()
-    return hashlib.sha256(data).hexdigest(), len(data)
-
-
 def _write_file(path: Path, data: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -1599,14 +1771,22 @@ def _write_file(path: Path, data: bytes) -> None:
         flags |= os.O_NOFOLLOW
     fd = os.open(path, flags, 0o600)
     try:
-        os.write(fd, data)
+        remaining = memoryview(data)
+        while remaining:
+            written = os.write(fd, remaining)
+            if written <= 0:
+                raise ContainerBuildError("Could not write the build bundle.")
+            remaining = remaining[written:]
         os.fsync(fd)
     finally:
         os.close(fd)
 
 
 def _read_regular_source(
-    path: Path, *, expected_identity: tuple[int, int, int, int] | None = None
+    path: Path,
+    *,
+    expected_identity: tuple[int, int, int, int] | None = None,
+    identity_error: str = "A selected build source identity changed before materialization.",
 ) -> bytes:
     try:
         before = path.lstat()
@@ -1630,9 +1810,7 @@ def _read_regular_source(
                 "A selected build source identity changed before copy."
             )
         if expected_identity is not None and opened_identity != expected_identity:
-            raise ContainerBuildError(
-                "The candidate wheel identity changed before materialization."
-            )
+            raise ContainerBuildError(identity_error)
         chunks: list[bytes] = []
         while True:
             chunk = os.read(fd, 1024 * 1024)
@@ -1650,6 +1828,15 @@ def materialize_build_bundle(
     dockerfile_bytes: bytes,
     output_root: Path,
 ) -> ContainerBuildBundle:
+    try:
+        if _directory_identity(plan.project_root.lstat()) != plan.project_root_identity:
+            raise ContainerBuildError(
+                "The project root identity changed before materialization."
+            )
+    except OSError as exc:
+        raise ContainerBuildError(
+            "The project root changed before materialization."
+        ) from exc
     root = Path(output_root).absolute()
     try:
         root_status = root.lstat()
@@ -1671,24 +1858,80 @@ def materialize_build_bundle(
             )
     else:
         try:
-            root.mkdir(parents=True, mode=0o700)
-        except OSError as exc:
+            root.parent.mkdir(parents=True, exist_ok=True)
+            create_private_directory(root)
+        except (OSError, SecureArtifactError) as exc:
             raise ContainerBuildError(
                 "The build output root could not be created."
             ) from exc
     _verify_private_output_root(root)
+    root_identity = _directory_identity(root.lstat())
     context = root / "context"
     context.mkdir(mode=0o700)
+    context_identity = _directory_identity(context.lstat())
     created: list[Path] = []
+    frozen_outputs: dict[Path, bytes] = {}
+
+    def verify_output_directories() -> None:
+        _verify_directory_identity(
+            root,
+            expected=root_identity,
+            message="The build output root identity changed.",
+        )
+        _verify_directory_identity(
+            context,
+            expected=context_identity,
+            message="The build output context identity changed.",
+        )
+
+    def write_output(path: Path, data: bytes) -> None:
+        verify_output_directories()
+        _write_file(path, data)
+        verify_output_directories()
+        frozen_outputs[path] = data
+
     try:
         for destination, selected in sorted(plan.selected_sources.items()):
             source = selected.source_path
-            candidate_identity = (
-                plan.runtime_artifact.candidate_identity
-                if selected.reasons == frozenset({SourceReason.RUNTIME_ARTIFACT})
-                else None
+            try:
+                resolved_source = source.resolve(strict=True)
+                resolved_source.relative_to(plan.project_root)
+            except (OSError, ValueError) as exc:
+                raise ContainerBuildError(
+                    "A selected source escaped the project root before materialization."
+                ) from exc
+            if resolved_source != source:
+                raise ContainerBuildError(
+                    "A selected source gained an unsafe symlink before materialization."
+                )
+            for ancestor, expected_identity in selected.ancestor_identities:
+                try:
+                    current_identity = _directory_identity(ancestor.lstat())
+                except OSError as exc:
+                    raise ContainerBuildError(
+                        "A selected source ancestor changed before materialization."
+                    ) from exc
+                if current_identity != expected_identity:
+                    raise ContainerBuildError(
+                        "A selected source ancestor identity changed before materialization."
+                    )
+            if selected.source_identity is None:
+                raise ContainerBuildError("A selected source has no frozen identity.")
+            if selected.source_sha256 is None:
+                raise ContainerBuildError("A selected source has no frozen hash.")
+            data = _read_regular_source(
+                source,
+                expected_identity=selected.source_identity,
+                identity_error=(
+                    "The candidate wheel identity changed before materialization."
+                    if selected.reasons == frozenset({SourceReason.RUNTIME_ARTIFACT})
+                    else "A selected build source identity changed before materialization."
+                ),
             )
-            data = _read_regular_source(source, expected_identity=candidate_identity)
+            if hashlib.sha256(data).hexdigest() != selected.source_sha256:
+                raise ContainerBuildError(
+                    "A selected build source hash changed before materialization."
+                )
             if selected.reasons == frozenset({SourceReason.RUNTIME_ARTIFACT}):
                 expected = plan.runtime_artifact.candidate_sha256
                 if hashlib.sha256(data).hexdigest() != expected:
@@ -1702,24 +1945,24 @@ def materialize_build_bundle(
                 ):
                     raise ContainerBuildError("The candidate wheel identity changed.")
             target = context / PurePosixPath(destination)
-            _write_file(target, data)
+            write_output(target, data)
             created.append(target)
         manifest = context / "manifest.v1.json"
-        _write_file(manifest, plan.manifest.to_json_bytes())
+        write_output(manifest, plan.manifest.to_json_bytes())
         constraints = context / "runtime-constraints.txt"
-        _write_file(constraints, b"agentseek-api==0.3.0\n")
+        write_output(constraints, b"agentseek-api==0.3.0\n")
         dockerfile = context / "Dockerfile"
-        _write_file(dockerfile, bytes(dockerfile_bytes))
+        write_output(dockerfile, bytes(dockerfile_bytes))
         inventory = tuple(
             BuildInventoryEntry(
                 relative_path=path.relative_to(context).as_posix(),
-                sha256=_digest(path)[0],
-                size=_digest(path)[1],
+                sha256=hashlib.sha256(frozen_outputs[path]).hexdigest(),
+                size=len(frozen_outputs[path]),
             )
             for path in sorted(created + [manifest, constraints, dockerfile])
         )
         inventory_path = root / "inventory.json"
-        _write_file(
+        write_output(
             inventory_path,
             (
                 json.dumps(
@@ -1745,14 +1988,23 @@ def materialize_build_bundle(
             inventory=inventory,
         )
     except Exception:
-        shutil.rmtree(context, ignore_errors=True)
+        root_is_original = _directory_identity_matches(root, root_identity)
+        context_is_original = root_is_original and _directory_identity_matches(
+            context, context_identity
+        )
+        if context_is_original:
+            shutil.rmtree(context, ignore_errors=True)
         inventory_path = root / "inventory.json"
-        if inventory_path.exists() and not inventory_path.is_symlink():
+        if (
+            root_is_original
+            and inventory_path.exists()
+            and not inventory_path.is_symlink()
+        ):
             try:
                 inventory_path.unlink()
             except OSError:
                 pass
-        if root_was_created:
+        if root_was_created and root_is_original:
             try:
                 root.rmdir()
             except OSError:
@@ -1762,16 +2014,39 @@ def materialize_build_bundle(
 
 def _verify_private_output_root(root: Path) -> None:
     try:
-        status = root.lstat()
-    except OSError as exc:
+        verify_private_directory(root)
+    except SecureArtifactError as exc:
         raise ContainerBuildError(
             "The build output root could not be verified private."
         ) from exc
-    if stat.S_ISLNK(status.st_mode) or not stat.S_ISDIR(status.st_mode):
-        raise ContainerBuildError("The build output root is not a private directory.")
-    if os.name != "nt":
-        if status.st_uid != os.getuid() or stat.S_IMODE(status.st_mode) != 0o700:
-            raise ContainerBuildError("The build output root is not user-private.")
+
+
+def _directory_identity_matches(path: Path, expected: tuple[int, int]) -> bool:
+    try:
+        status = path.lstat()
+    except OSError:
+        return False
+    is_junction = getattr(path, "is_junction", None)
+    return (
+        stat.S_ISDIR(status.st_mode)
+        and not stat.S_ISLNK(status.st_mode)
+        and not (is_junction is not None and is_junction())
+        and _directory_identity(status) == expected
+    )
+
+
+def _verify_directory_identity(
+    path: Path,
+    *,
+    expected: tuple[int, int],
+    message: str,
+) -> None:
+    if not _directory_identity_matches(path, expected):
+        raise ContainerBuildError(message)
+
+
+def _directory_identity(status: os.stat_result) -> tuple[int, int]:
+    return (status.st_dev, status.st_ino)
 
 
 def create_deterministic_context_archive(

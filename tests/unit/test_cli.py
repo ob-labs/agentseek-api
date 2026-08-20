@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib
 import io
 import signal
+import tarfile
 import tomllib
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -1361,12 +1364,16 @@ def test_dockerfile_command_writes_langgraph_compatible_runtime_file(
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+    output_root = tmp_path / "docker-build-bundle"
 
-    exit_code = main(["dockerfile", str(dockerfile_path)], cwd=tmp_path)
+    exit_code = main(["dockerfile", str(output_root)], cwd=tmp_path)
 
     assert exit_code == 0
+    dockerfile_path = output_root / "context" / "Dockerfile"
     content = dockerfile_path.read_text(encoding="utf-8")
+    assert (output_root / "inventory.json").is_file()
+    assert (output_root / "context" / "manifest.v1.json").is_file()
+    assert (output_root / "context" / "app" / "chat" / "graph.py").is_file()
     assert "FROM python:3.12-slim" in content
     assert (
         "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
@@ -1403,7 +1410,7 @@ def test_dockerfile_command_prefers_agentseek_json_without_explicit_flag(
     exit_code = main(["dockerfile", str(dockerfile_path)], cwd=tmp_path)
 
     assert exit_code == 0
-    content = dockerfile_path.read_text(encoding="utf-8")
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert "ENV AGENTSEEK_GRAPHS=/deps/agent/agentseek.json" in content
     assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" not in content
 
@@ -1454,7 +1461,7 @@ version = "0.1.0"
     )
 
     assert exit_code == 0
-    content = dockerfile_path.read_text(encoding="utf-8")
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM python:3.13-slim-bookworm" in content
     assert "RUN echo custom-step" in content
     assert (
@@ -1502,7 +1509,7 @@ version = "0.1.0"
     )
 
     assert exit_code == 0
-    content = dockerfile_path.read_text(encoding="utf-8")
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert (
         "ENV PYTHONPATH=/deps/agent:/deps/agent/sample_project:/deps/agent/sample_project/local_pkg:/deps/agent/sample_project/reqs"
         in content
@@ -1545,7 +1552,7 @@ def test_dockerfile_command_skips_root_install_when_root_is_not_installable(
     )
 
     assert exit_code == 0
-    content = dockerfile_path.read_text(encoding="utf-8")
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert "ENV PYTHONPATH=/deps/agent:/deps/agent/src" in content
     assert "RUN pip install --no-cache-dir ." not in content
 
@@ -1592,7 +1599,7 @@ version = "0.1.0"
     )
 
     assert exit_code == 0
-    content = dockerfile_path.read_text(encoding="utf-8")
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert "RUN pip install --no-cache-dir /deps/agent/apps/agent" in content
     assert "RUN pip install --no-cache-dir /deps/agent\n" not in content
 
@@ -1634,7 +1641,7 @@ version = "0.1.0"
     )
 
     assert exit_code == 0
-    content = dockerfile_path.read_text(encoding="utf-8")
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert "RUN pip install --no-cache-dir /deps/agent" in content
     assert (
         "RUN pip install --no-cache-dir /deps/agent/examples/docker_ci_auth"
@@ -1668,7 +1675,7 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
     invocation = capture.calls[0]
     assert type(invocation) is ProcessInvocation
     assert "AGENTSEEK_GRAPHS" not in invocation.environment
-    assert invocation.argv[:8] == (
+    assert invocation.argv == (
         "docker",
         "build",
         "--platform",
@@ -1676,10 +1683,21 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
         "-t",
         "agentseek:test",
         "-f",
-        str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
+        "Dockerfile",
+        "-",
     )
-    assert invocation.argv[-1] == "."
-    generated = (tmp_path / ".agentseek" / "Dockerfile").read_text(encoding="utf-8")
+    assert invocation.stdin_bytes is not None
+    assert str(tmp_path) not in " ".join(invocation.argv)
+    with tarfile.open(fileobj=io.BytesIO(invocation.stdin_bytes), mode="r:") as archive:
+        members = set(archive.getnames())
+        generated = archive.extractfile("Dockerfile").read().decode()  # type: ignore[union-attr]
+    assert {
+        "Dockerfile",
+        "manifest.v1.json",
+        "runtime-constraints.txt",
+        "app/chat/__init__.py",
+        "app/chat/graph.py",
+    } <= members
     assert (
         "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
         in generated
@@ -1690,6 +1708,187 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
         'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]'
         in generated
     )
+    assert not (tmp_path / ".agentseek").exists()
+
+
+def test_build_excludes_cli_dotenv_even_through_local_dependency_tree(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "build.env"
+    env_file.write_text("TOKEN=cli-dotenv-canary\n", encoding="utf-8")
+    capture = _ProcessCapture()
+
+    exit_code = main(
+        ["build", "-t", "agentseek:test", "--env-file", str(env_file)],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    archive_bytes = capture.calls[0].stdin_bytes
+    assert archive_bytes is not None
+    assert b"cli-dotenv-canary" not in archive_bytes
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
+        assert "app/build.env" not in archive.getnames()
+
+
+def test_candidate_runtime_injection_changes_copied_build_artifact(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+    from agentseek_api.container_build import candidate_runtime_artifact
+
+    _write_basic_langgraph_config(tmp_path)
+    wheel = tmp_path / "agentseek_api-0.3.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr(
+            "agentseek_api-0.3.0.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.0\n",
+        )
+    artifact = candidate_runtime_artifact(
+        wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()
+    )
+    capture = _ProcessCapture()
+
+    exit_code = main(
+        ["build", "-t", "agentseek:candidate"],
+        process_transport=capture,
+        cwd=tmp_path,
+        runtime_artifact=artifact,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    archive_bytes = capture.calls[0].stdin_bytes
+    assert archive_bytes is not None
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
+        copied = archive.extractfile(f"runtime/{wheel.name}")
+        assert copied is not None
+        assert copied.read() == wheel.read_bytes()
+
+
+def test_generated_up_uses_final_auth_selection_and_sanitized_build_stdin(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname="fixture"\nversion="1.0"\n', encoding="utf-8"
+    )
+    lower_auth = tmp_path / "lower_auth.py"
+    lower_auth.write_text("auth = 'lower'\n", encoding="utf-8")
+    winning_auth = tmp_path / "winning_auth.py"
+    winning_auth.write_text("auth = 'winner'\n", encoding="utf-8")
+    config = tmp_path / "agentseek.json"
+    config.write_text(
+        '{"graphs":{"chat":"installed.graph:graph"},'
+        '"auth":{"path":"./lower_auth.py:auth"}}',
+        encoding="utf-8",
+    )
+    env_file = tmp_path / "up.env"
+    env_file.write_text(
+        "AUTH_MODULE_PATH=winning_auth.py:auth\n"
+        "OPENAI_API_KEY=provider-secret-canary\n",
+        encoding="utf-8",
+    )
+    capture = _ProcessCapture()
+
+    exit_code = main(
+        ["up", "--env-file", str(env_file), "--no-pull"],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    build = capture.calls[0]
+    assert build.argv == (
+        "docker",
+        "build",
+        "-t",
+        "agentseek-up:8123",
+        "-f",
+        "Dockerfile",
+        "-",
+    )
+    assert build.stdin_bytes is not None
+    assert b"provider-secret-canary" not in build.stdin_bytes
+    assert "provider-secret-canary" not in " ".join(build.argv)
+    assert "provider-secret-canary" not in repr(build)
+    with tarfile.open(fileobj=io.BytesIO(build.stdin_bytes), mode="r:") as archive:
+        members = set(archive.getnames())
+        assert "app/winning_auth.py" in members
+        assert "app/lower_auth.py" not in members
+        assert "app/up.env" not in members
+    container_env = _application_environment(capture)
+    assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/winning_auth.py:auth"
+    assert container_env["OPENAI_API_KEY"] == "provider-secret-canary"
+
+
+@pytest.mark.parametrize("reference", ["auth.py:auth", "/host/auth.py:auth"])
+def test_up_with_custom_image_rejects_host_file_auth_references(
+    tmp_path: Path, reference: str
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "up.env"
+    env_file.write_text(f"AUTH_MODULE_PATH={reference}\n", encoding="utf-8")
+    capture = _ProcessCapture()
+    stderr = io.StringIO()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config),
+            "--image",
+            "agentseek:test",
+            "--env-file",
+            str(env_file),
+        ],
+        process_transport=capture,
+        cwd=tmp_path,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert capture.calls is None
+    assert "package" in stderr.getvalue()
+    assert "host" in stderr.getvalue().lower()
+
+
+@pytest.mark.parametrize("reference", ["", "installed.auth:auth"])
+def test_up_with_custom_image_preserves_empty_or_package_auth(
+    tmp_path: Path, reference: str
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "up.env"
+    env_file.write_text(f"AUTH_MODULE_PATH={reference}\n", encoding="utf-8")
+    capture = _ProcessCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config),
+            "--image",
+            "agentseek:test",
+            "--env-file",
+            str(env_file),
+        ],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert _application_environment(capture)["AUTH_MODULE_PATH"] == reference
 
 
 def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
@@ -2012,7 +2211,7 @@ def test_dockerfile_command_allows_supported_explicit_langgraph_base_image(
     )
 
     assert exit_code == 0
-    content = dockerfile_path.read_text(encoding="utf-8")
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM langchain/langgraph-api:0.2" in content
 
 
@@ -2449,9 +2648,10 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
         "-t",
         "agentseek-up:8124",
         "-f",
-        str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
-        ".",
+        "Dockerfile",
+        "-",
     )
+    assert capture.calls[0].stdin_bytes is not None
     assert capture.calls[1].argv == (
         "docker",
         "container",
@@ -2511,6 +2711,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
 """.strip(),
         encoding="utf-8",
     )
+    (tmp_path / "auth.py").write_text("backend = object()\n", encoding="utf-8")
     capture = _ProcessCapture()
 
     exit_code = main(
@@ -2518,8 +2719,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
             "up",
             "--config",
             str(config_path),
-            "--image",
-            "agentseek:test",
+            "--no-pull",
         ],
         process_transport=capture,
         cwd=tmp_path,
@@ -2527,13 +2727,13 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0].argv == (
+    assert capture.calls[1].argv == (
         "docker",
         "container",
         "inspect",
         "agentseek-up-8123",
     )
-    assert capture.calls[1].argv[:9] == (
+    assert capture.calls[2].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -2544,7 +2744,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
         "-p",
         "8123:2024",
     )
-    assert capture.calls[1].argv[-1] == "agentseek:test"
+    assert capture.calls[2].argv[-1] == "agentseek-up:8123"
     container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/auth.py:backend"
@@ -2662,7 +2862,13 @@ def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> No
     )
 
     assert exit_code == 0
-    dockerfile = (tmp_path / ".agentseek" / "Dockerfile").read_text(encoding="utf-8")
+    assert capture.calls is not None
+    archive_bytes = capture.calls[0].stdin_bytes
+    assert archive_bytes is not None
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
+        dockerfile_file = archive.extractfile("Dockerfile")
+        assert dockerfile_file is not None
+        dockerfile = dockerfile_file.read().decode()
     assert "FROM python:3.13-slim-bookworm" in dockerfile
 
 
@@ -2704,8 +2910,8 @@ def test_up_command_returns_build_failure_without_running_container(
         "-t",
         "agentseek-up:8125",
         "-f",
-        str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
-        ".",
+        "Dockerfile",
+        "-",
     )
     capture = _ProcessCapture(return_codes={build_argv: 9})
 

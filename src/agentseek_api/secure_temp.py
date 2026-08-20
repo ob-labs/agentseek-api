@@ -186,6 +186,65 @@ def _verify_closed_windows(  # pragma: no cover - native Windows only
     _verify_private_dacl(path, directory=directory)
 
 
+def verify_private_directory(
+    path: Path, *, expected: os.stat_result | None = None
+) -> os.stat_result:
+    """Recheck a private output directory with native ownership/ACL semantics."""
+
+    directory = Path(path)
+    try:
+        metadata = directory.lstat()
+    except OSError as exc:
+        raise SecureArtifactError(
+            "Could not prove exclusive directory access."
+        ) from exc
+    if _is_link_or_junction(directory, metadata) or not stat.S_ISDIR(metadata.st_mode):
+        raise SecureArtifactError("Could not prove exclusive directory access.")
+    frozen = metadata if expected is None else expected
+    if os.name == "nt":  # pragma: no cover - native Windows only
+        _verify_closed_windows(directory, frozen, directory=True)
+    else:
+        _verify_closed_directory_posix(directory, frozen)
+    return metadata
+
+
+def create_private_directory(path: Path) -> os.stat_result:
+    """Create one exact persistent directory with the private-root contract."""
+
+    directory = Path(path)
+    fd: int | None = None
+    expected: os.stat_result | None = None
+    try:
+        if os.name == "nt":  # pragma: no cover - native Windows only
+            expected = _create_private_windows_directory_at(directory)
+        else:
+            os.mkdir(directory, _PRIVATE_DIRECTORY_MODE)
+            expected = directory.lstat()
+            flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            fd = os.open(directory, flags)
+            os.fchmod(fd, _PRIVATE_DIRECTORY_MODE)
+            _verify_open_directory_posix(fd, directory, expected)
+            os.close(fd)
+            fd = None
+            _verify_closed_directory_posix(directory, expected)
+        return expected
+    except FileExistsError:
+        raise
+    except (OSError, SecureArtifactError) as exc:
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if expected is not None:
+            _quarantine_then_rmtree(directory, expected)
+        if isinstance(exc, SecureArtifactError):
+            raise
+        raise SecureArtifactError("Could not create a private directory.") from exc
+
+
 def _win32_libraries(  # pragma: no cover - native Windows only
 ) -> tuple[ctypes.WinDLL, ctypes.WinDLL]:  # type: ignore[name-defined]
     if os.name != "nt":
@@ -390,9 +449,9 @@ def _apply_private_dacl(  # pragma: no cover - native Windows only
             raise _win32_error("Could not establish exclusive Windows access.")
 
 
-def _create_private_windows_directory(  # pragma: no cover - native Windows only
-    root: Path, prefix: str
-) -> tuple[Path, os.stat_result]:
+def _create_private_windows_directory_at(  # pragma: no cover - native Windows only
+    candidate: Path,
+) -> os.stat_result:
     from ctypes import wintypes
 
     _, kernel32 = _win32_libraries()
@@ -404,22 +463,33 @@ def _create_private_windows_directory(  # pragma: no cover - native Windows only
             ("bInheritHandle", wintypes.BOOL),
         ]
 
+    with _private_security_descriptor(directory=True) as descriptor:
+        attributes = SecurityAttributes(
+            ctypes.sizeof(SecurityAttributes), descriptor, False
+        )
+        if kernel32.CreateDirectoryW(str(candidate), ctypes.byref(attributes)):
+            expected = candidate.lstat()
+            try:
+                _verify_private_dacl(candidate, directory=True)
+            except SecureArtifactError:
+                _quarantine_then_rmtree(candidate, expected)
+                raise
+            return expected
+        if ctypes.get_last_error() == 183:
+            raise FileExistsError(str(candidate))
+        raise SecureArtifactError("Could not create a private directory.")
+
+
+def _create_private_windows_directory(  # pragma: no cover - native Windows only
+    root: Path, prefix: str
+) -> tuple[Path, os.stat_result]:
     for _ in range(_MAX_CREATE_ATTEMPTS):
         candidate = _candidate_path(root, prefix)
-        with _private_security_descriptor(directory=True) as descriptor:
-            attributes = SecurityAttributes(
-                ctypes.sizeof(SecurityAttributes), descriptor, False
-            )
-            if kernel32.CreateDirectoryW(str(candidate), ctypes.byref(attributes)):
-                expected = candidate.lstat()
-                try:
-                    _verify_private_dacl(candidate, directory=True)
-                except SecureArtifactError:
-                    _quarantine_then_rmtree(candidate, expected)
-                    raise
-                return candidate, expected
-            if ctypes.get_last_error() != 183:
-                raise SecureArtifactError("Could not create a private directory.")
+        try:
+            expected = _create_private_windows_directory_at(candidate)
+        except FileExistsError:
+            continue
+        return candidate, expected
     raise SecureArtifactError("Could not create a private directory.")
 
 
@@ -961,7 +1031,9 @@ def sweep_expired_artifacts(
 
 __all__ = [
     "SecureArtifactError",
+    "create_private_directory",
     "private_artifact",
     "private_directory",
     "sweep_expired_artifacts",
+    "verify_private_directory",
 ]

@@ -26,8 +26,11 @@ from agentseek_api.container_policy import (
 from agentseek_api.container_build import (
     PUBLISHED_RUNTIME_ARTIFACT,
     ContainerBuildError,
+    FinalAuthSelection,
     RuntimeArtifactV1,
+    materialize_build_bundle,
     plan_container_image,
+    plan_generated_up_auth,
 )
 from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.docker_runtime import (
@@ -59,6 +62,7 @@ from agentseek_api.process_supervisor import (
 from agentseek_api.secure_temp import (
     SecureArtifactError,
     private_artifact,
+    private_directory,
     sweep_expired_artifacts,
 )
 
@@ -595,19 +599,35 @@ def _resolve_application_container_payload(
     plan: EnvironmentPlan,
     *,
     selection: ContainerSelection,
-    cwd: Path,
-) -> dict[str, str]:
+) -> tuple[dict[str, str], FinalAuthSelection | None]:
     try:
         resolved = resolve_environment(plan, APP_CONTAINER_POLICY)
         payload = dict(select_application_payload(resolved, selection))
     except (ContainerPolicyError, DotenvFileError) as exc:
         raise CliError(str(exc)) from exc
-    auth_module_path = payload.get("AUTH_MODULE_PATH")
-    if auth_module_path:
-        payload["AUTH_MODULE_PATH"] = _containerize_symbol_reference(
-            auth_module_path, cwd=cwd
+    auth_selection: FinalAuthSelection | None = None
+    if "AUTH_MODULE_PATH" in payload:
+        auth_selection = FinalAuthSelection(
+            payload["AUTH_MODULE_PATH"], resolved.origins["AUTH_MODULE_PATH"]
         )
-    return payload
+    return payload, auth_selection
+
+
+def _is_host_auth_reference(reference: str) -> bool:
+    parts = _split_symbol_reference(reference)
+    if parts is None:
+        return False
+    module_name, _ = parts
+    return (
+        module_name.endswith(".py")
+        or module_name.startswith(".")
+        or "/" in module_name
+        or "\\" in module_name
+    )
+
+
+def _planner_dotenv_paths(env_file: str | None, *, cwd: Path) -> tuple[Path, ...]:
+    return () if env_file is None else (_resolve_path(env_file, cwd=cwd),)
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
@@ -1161,12 +1181,21 @@ def _execute_dockerfile_command(
         )
     _load_cli_config(config_path)
     save_path = _resolve_path(args.save_path, cwd=cwd)
-    plan_container_image(
+    plan = plan_container_image(
         config_path=config_path,
+        dotenv_paths=_planner_dotenv_paths(args.env_file, cwd=cwd),
         runtime_artifact=runtime_artifact,
+        invocation_cwd=cwd,
     )
-    write_dockerfile(config_path=config_path, save_path=save_path, cwd=cwd)
-    stdout.write(f"{save_path}\n")
+    dockerfile_bytes = render_dockerfile(config_path=config_path, cwd=cwd).encode(
+        "utf-8"
+    )
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=dockerfile_bytes,
+        output_root=save_path,
+    )
+    stdout.write(f"{bundle.dockerfile}\n")
     return 0
 
 
@@ -1183,33 +1212,40 @@ def _execute_build_command(
             f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
         )
     _load_cli_config(config_path)
-    plan_container_image(
+    build_plan = plan_container_image(
         config_path=config_path,
+        dotenv_paths=_planner_dotenv_paths(args.env_file, cwd=cwd),
         runtime_artifact=runtime_artifact,
+        invocation_cwd=cwd,
     )
-    generated_dockerfile = write_dockerfile(
-        config_path=config_path,
-        save_path=(cwd / ".agentseek" / "Dockerfile").resolve(),
-        cwd=cwd,
+    dockerfile_bytes = render_dockerfile(config_path=config_path, cwd=cwd).encode(
+        "utf-8"
     )
     command = ["docker", "build"]
     if args.platform:
         command.extend(["--platform", args.platform])
     if args.pull:
         command.append("--pull")
-    command.extend(["-t", args.tag, "-f", str(generated_dockerfile), "."])
-    plan = build_host_environment_plan(
+    command.extend(["-t", args.tag, "-f", "Dockerfile", "-"])
+    environment_plan = build_host_environment_plan(
         config_path=config_path,
         env_file=args.env_file,
         cwd=cwd,
         role=None,
     )
-    invocation = build_docker_control_invocation(
-        argv=tuple(command),
-        docker_control=docker_control_environment(plan),
-        cwd=cwd,
-    )
-    return process_transport(invocation).returncode
+    with private_directory(prefix="agentseek-build-") as output_root:
+        bundle = materialize_build_bundle(
+            build_plan,
+            dockerfile_bytes=dockerfile_bytes,
+            output_root=output_root,
+        )
+        invocation = build_docker_control_invocation(
+            argv=tuple(command),
+            docker_control=docker_control_environment(environment_plan),
+            cwd=cwd,
+            stdin_bytes=bundle.archive_bytes(),
+        )
+        return process_transport(invocation).returncode
 
 
 def _container_name_for_port(port: int) -> str:
@@ -1272,9 +1308,40 @@ def _execute_up_command(
         postgres_uri=args.postgres_uri,
     )
     docker_control = dict(docker_control_environment(environment_plan))
-    application_payload = _resolve_application_container_payload(
-        environment_plan, selection=selection, cwd=cwd
+    application_payload, final_auth = _resolve_application_container_payload(
+        environment_plan, selection=selection
     )
+
+    generated_plan = None
+    generated_dockerfile_bytes: bytes | None = None
+    if image:
+        if (
+            final_auth is not None
+            and final_auth.value
+            and _is_host_auth_reference(final_auth.value)
+        ):
+            raise CliError(
+                "Custom-image auth cannot reference a host file; bake the module into the image and use an importable package reference."
+            )
+    else:
+        generated_plan = plan_container_image(
+            config_path=config_path,
+            dotenv_paths=_planner_dotenv_paths(args.env_file, cwd=cwd),
+            base_image_override=args.base_image,
+            runtime_artifact=runtime_artifact,
+            invocation_cwd=cwd,
+        )
+        generated_plan, auth_patch = plan_generated_up_auth(generated_plan, final_auth)
+        application_payload = dict(application_payload)
+        if auth_patch is None:
+            application_payload.pop("AUTH_MODULE_PATH", None)
+        else:
+            application_payload["AUTH_MODULE_PATH"] = auth_patch.value
+        generated_dockerfile_bytes = render_dockerfile(
+            config_path=config_path,
+            cwd=cwd,
+            base_image_override=args.base_image,
+        ).encode("utf-8")
 
     compose_path: Path | None = None
     compose_payload: dict[str, str] = {}
@@ -1302,26 +1369,26 @@ def _execute_up_command(
         encoded_compose = encode_compose_environment(compose_payload).encode("utf-8")
 
     if not image:
-        plan_container_image(
-            config_path=config_path,
-            base_image_override=args.base_image,
-            runtime_artifact=runtime_artifact,
-        )
+        assert generated_plan is not None
+        assert generated_dockerfile_bytes is not None
         image = f"agentseek-up:{args.port}"
-        generated_dockerfile = write_dockerfile(
-            config_path=config_path,
-            save_path=(cwd / ".agentseek" / "Dockerfile").resolve(),
-            cwd=cwd,
-            base_image_override=args.base_image,
-        )
         build_command = ["docker", "build"]
         if args.pull:
             build_command.append("--pull")
-        build_command.extend(["-t", image, "-f", str(generated_dockerfile), "."])
-        build_invocation = build_docker_control_invocation(
-            argv=tuple(build_command), docker_control=docker_control, cwd=cwd
-        )
-        build_exit_code = process_transport(build_invocation).returncode
+        build_command.extend(["-t", image, "-f", "Dockerfile", "-"])
+        with private_directory(prefix="agentseek-build-") as output_root:
+            bundle = materialize_build_bundle(
+                generated_plan,
+                dockerfile_bytes=generated_dockerfile_bytes,
+                output_root=output_root,
+            )
+            build_invocation = build_docker_control_invocation(
+                argv=tuple(build_command),
+                docker_control=docker_control,
+                cwd=cwd,
+                stdin_bytes=bundle.archive_bytes(),
+            )
+            build_exit_code = process_transport(build_invocation).returncode
         if build_exit_code != 0:
             return build_exit_code
 
