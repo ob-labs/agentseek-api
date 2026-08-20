@@ -76,3 +76,19 @@ def test_cli_compatibility_runs_platform_container_selection_and_artifact_tests(
 
     assert "tests/unit/test_container_policy.py" in body
     assert "tests/unit/test_secure_temp.py" in body
+
+
+def test_cli_compatibility_uses_the_executable_bundle_smoke_for_dockerfile() -> None:
+    workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    body = _job(workflow, "cli-compatibility")
+    step = re.search(
+        r"(?ms)^      - name: Dockerfile command renders a runnable config\n"
+        r"(?P<body>.*?)(?=^      - name:|\Z)",
+        body,
+    )
+    assert step is not None
+
+    assert step.group("body").strip() == (
+        "run: uv run python scripts/test_cli_config_autodiscovery.py "
+        "--config examples/external_graph/manifest.json"
+    )

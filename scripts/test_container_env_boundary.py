@@ -28,6 +28,11 @@ from agentseek_api.docker_runtime import (
 )
 from agentseek_api.secure_temp import private_artifact, private_directory
 
+try:
+    from container_image_archive import scan_image_archive
+except ModuleNotFoundError:  # Loaded as a module by the unit acceptance tests.
+    from scripts.container_image_archive import scan_image_archive
+
 
 _ROOT = Path(__file__).resolve().parents[1]
 _PORT = "48123"
@@ -152,11 +157,14 @@ def _parse_environment(output: bytes) -> Mapping[str, str]:
     return MappingProxyType(parsed)
 
 
-def _probe_script(names: tuple[str, ...]) -> str:
+def _probe_script(names: tuple[str, ...], result_name: str) -> str:
+    if Path(result_name).name != result_name or not result_name:
+        raise BoundaryFailure("synthetic probe result name boundary failed")
     encoded_names = json.dumps(names, ensure_ascii=True, separators=(",", ":"))
+    encoded_result_path = json.dumps(f"/result/{result_name}", ensure_ascii=True)
     return (
         "import json,os,pathlib;"
-        "p=pathlib.Path('/result/environment.json');"
+        f"p=pathlib.Path({encoded_result_path});"
         f"names={encoded_names};"
         "p.write_text(json.dumps({n:os.environ.get(n) for n in names},"
         "ensure_ascii=False,sort_keys=True,separators=(',',':')),encoding='utf-8');"
@@ -173,12 +181,13 @@ def _run_probe(
     result_path: Path,
 ) -> Mapping[str, str]:
     names = tuple(sorted(application))
+    container_name = f"agentseek-boundary-probe-{secrets.token_hex(6)}"
     argv = [
         "docker",
         "run",
         "--rm",
         "--name",
-        f"agentseek-boundary-probe-{secrets.token_hex(6)}",
+        container_name,
     ]
     if os.name != "nt":
         argv.extend(("--user", f"{os.getuid()}:{os.getgid()}"))
@@ -190,7 +199,7 @@ def _run_probe(
     )
     for name in names:
         argv.extend(("-e", name))
-    argv.extend((image, "python", "-c", _probe_script(names)))
+    argv.extend((image, "python", "-c", _probe_script(names, result_path.name)))
     result = _safe_process(
         tuple(argv),
         cwd=cwd,
@@ -198,6 +207,14 @@ def _run_probe(
     )
     if result.returncode != 0:
         raise BoundaryFailure("synthetic Docker carrier probe failed")
+    remaining = _safe_process(
+        ("docker", "container", "inspect", container_name),
+        cwd=cwd,
+        environment=docker_environment,
+        timeout=30,
+    )
+    if remaining.returncode == 0:
+        raise BoundaryFailure("synthetic probe cleanup boundary failed")
     try:
         status = result_path.stat()
         if stat.S_IMODE(status.st_mode) != 0o600:
@@ -217,6 +234,7 @@ def _run_probe(
 class _EvidenceTransport:
     result_path: Path
     compose_dotenv_canary: str = field(repr=False)
+    forbidden_values: tuple[bytes, ...] = field(repr=False)
     invocations: list[CapturedInvocation] = field(default_factory=list, repr=False)
     build_environment: Mapping[str, str] = field(
         default_factory=lambda: MappingProxyType({}), repr=False
@@ -309,6 +327,12 @@ class _EvidenceTransport:
         )
         if history.returncode != 0:
             raise BoundaryFailure("built image history query failed")
+        for forbidden in self.forbidden_values:
+            scan_image_archive(
+                archive_bytes,
+                forbidden=forbidden,
+                history=history.stdout,
+            )
         self.image_archive_and_history = archive_bytes + b"\n" + history.stdout
 
     def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
@@ -470,6 +494,25 @@ def _prove_value_domain_carrier(
         raise BoundaryFailure("direct Docker carrier value-domain boundary failed")
 
 
+def _remove_owned_image(
+    *, image: str, cwd: Path, environment: Mapping[str, str]
+) -> None:
+    removed = _safe_process(
+        ("docker", "image", "rm", "--force", image),
+        cwd=cwd,
+        environment=environment,
+        timeout=30,
+    )
+    remaining = _safe_process(
+        ("docker", "image", "inspect", image),
+        cwd=cwd,
+        environment=environment,
+        timeout=30,
+    )
+    if removed.returncode != 0 or remaining.returncode == 0:
+        raise BoundaryFailure("owned image cleanup boundary failed")
+
+
 def collect_boundary_evidence(
     *,
     disallowed_name: str,
@@ -511,6 +554,10 @@ def collect_boundary_evidence(
                 transport = _EvidenceTransport(
                     result_path=result_path,
                     compose_dotenv_canary=compose_dotenv_canary,
+                    forbidden_values=(
+                        disallowed_value.encode(),
+                        allowed_value.encode(),
+                    ),
                 )
                 try:
                     os.environ[disallowed_name] = disallowed_value
@@ -572,11 +619,10 @@ def collect_boundary_evidence(
                             transport.invocations[0] if transport.invocations else None
                         )
                         environment = {} if first is None else first.environment
-                        _safe_process(
-                            ("docker", "image", "rm", "--force", transport.image),
+                        _remove_owned_image(
+                            image=transport.image,
                             cwd=project,
                             environment=environment,
-                            timeout=30,
                         )
 
 

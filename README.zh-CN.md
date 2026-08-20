@@ -386,7 +386,7 @@ Redis 实例同时运行。
 ### 0.3.0 容器迁移
 
 `preloaded-v1` 是不兼容旧行为、失败即关闭的容器边界。宿主机只解析一次
-应用配置。生成的镜像只接收显式选择的运行时 payload；宿主机环境、dotenv
+应用配置。从生成镜像启动的容器只接收显式选择的运行时 payload；宿主机环境、dotenv
 文件、包仓库凭证和未选择的 Compose 值都不会进入构建上下文或镜像层。
 `--pass-env` 与 `--compose-pass-env` 只应接收可信输入：它们授权变量跨越指定
 运行时边界，并不允许变量进入镜像构建。
@@ -406,7 +406,8 @@ Redis 实例同时运行。
 manifest、已安装 distribution、entrypoint 与标签必须一致。系统不提供旧镜像
 回退：传给 `up --image` 前必须完成迁移与校验；否则应继续用旧 launcher 配合
 旧镜像。Train A 已达成版本为 API 0.2.3、templates 0.1.3、AgentSeek 0.1.3；
-后续 Train B 的 template/catalog 与 AgentSeek 版本计划为 0.1.4。
+后续 Train B 的 template/catalog 计划单独发布 0.1.4。AgentSeek 也计划另行发布
+0.1.4；两者都基于已经发布的 0.1.3。
 
 CLI 层会尽量容忍 LangGraph 在端点级别使用的配置键，例如 `http` 与
 `api_version`。Store 配置会被 HTTP Store API 以及注入的 LangGraph

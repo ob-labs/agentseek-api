@@ -3,11 +3,16 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
+import json
+import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+
+from agentseek_api.docker_runtime import ProcessResult
 
 
 SCRIPT = Path("scripts/test_container_env_boundary.py")
@@ -79,6 +84,101 @@ def test_success_output_is_one_value_free_line() -> None:
     assert output.getvalue() == "container boundary verification passed\n"
 
 
+@pytest.mark.parametrize(
+    "application",
+    [
+        {"ALLOWED_SENTINEL": "selected-value"},
+        {
+            "VALUE_EMPTY": "",
+            "VALUE_NEWLINE": "physical\nnewline",
+            "VALUE_UNICODE": "海洋数据库",
+        },
+    ],
+)
+def test_probe_writes_and_reads_the_exact_private_result_basename(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    application: dict[str, str],
+) -> None:
+    module = _load_script()
+    result_path = tmp_path / f"environment-{os.urandom(8).hex()}"
+    result_path.write_bytes(b"")
+    result_path.chmod(0o600)
+    calls: list[tuple[str, ...]] = []
+
+    def fake_process(argv, *, cwd, environment, stdin=None, timeout=None):
+        del cwd, stdin, timeout
+        calls.append(argv)
+        if argv[:3] == ("docker", "container", "inspect"):
+            return ProcessResult(returncode=1)
+        script = argv[-1].replace("/result/", f"{result_path.parent}/")
+        completed = subprocess.run(
+            [sys.executable, "-c", script],
+            env=dict(environment),
+            capture_output=True,
+            check=False,
+        )
+        return ProcessResult(
+            returncode=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
+
+    monkeypatch.setattr(module, "_safe_process", fake_process)
+
+    observed = module._run_probe(
+        image="synthetic:test",
+        application=application,
+        docker_environment={"PATH": os.environ["PATH"]},
+        cwd=tmp_path,
+        result_path=result_path,
+    )
+
+    assert dict(observed) == application
+    assert json.loads(result_path.read_text(encoding="utf-8")) == application
+    assert tuple(path.name for path in tmp_path.iterdir()) == (result_path.name,)
+    assert calls[1][:3] == ("docker", "container", "inspect")
+
+
+def test_probe_fails_if_auto_remove_leaves_the_owned_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_script()
+    result_path = tmp_path / "environment-random"
+    result_path.write_text("{}", encoding="utf-8")
+    result_path.chmod(0o600)
+
+    monkeypatch.setattr(
+        module,
+        "_safe_process",
+        lambda *args, **kwargs: ProcessResult(returncode=0),
+    )
+
+    with pytest.raises(module.BoundaryFailure, match="cleanup"):
+        module._run_probe(
+            image="synthetic:test",
+            application={},
+            docker_environment={"PATH": os.environ["PATH"]},
+            cwd=tmp_path,
+            result_path=result_path,
+        )
+
+
+def test_owned_image_cleanup_requires_removal_and_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_script()
+    results = iter((ProcessResult(returncode=0), ProcessResult(returncode=0)))
+    monkeypatch.setattr(module, "_safe_process", lambda *args, **kwargs: next(results))
+
+    with pytest.raises(module.BoundaryFailure, match="cleanup"):
+        module._remove_owned_image(
+            image="synthetic:test",
+            cwd=tmp_path,
+            environment={"PATH": os.environ["PATH"]},
+        )
+
+
 @pytest.mark.parametrize("name", ["README.md", "README.zh-CN.md", "CHANGELOG.md"])
 def test_container_migration_docs_cover_the_public_boundary(name: str) -> None:
     text = Path(name).read_text(encoding="utf-8")
@@ -95,3 +195,24 @@ def test_container_migration_docs_cover_the_public_boundary(name: str) -> None:
     }
 
     assert required_literals <= set(re.findall(r"[\w.-]+|--[\w-]+", text))
+
+
+def test_release_docs_name_template_catalog_and_agentseek_as_separate_releases() -> (
+    None
+):
+    for name in ("README.md", "README.zh-CN.md", "CHANGELOG.md"):
+        text = Path(name).read_text(encoding="utf-8")
+        assert re.search(r"template/catalog.{0,80}0\.1\.4", text, re.DOTALL)
+        assert re.search(r"AgentSeek.{0,80}0\.1\.4", text, re.DOTALL)
+
+
+def test_cli_config_autodiscovery_executes_the_bundle_contract() -> None:
+    completed = subprocess.run(
+        [sys.executable, "scripts/test_cli_config_autodiscovery.py"],
+        cwd=Path.cwd(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr

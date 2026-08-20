@@ -421,7 +421,7 @@ Useful config fields:
 ### Container migration for 0.3.0
 
 The `preloaded-v1` contract is a breaking, fail-closed container boundary. The
-host resolves application configuration once. Generated images receive only
+host resolves application configuration once. Containers started from generated images receive only
 the selected runtime payload, while ambient host values, dotenv files, package
 credentials, and unselected Compose values stay outside the build context and
 image layers. Use `--pass-env` or `--compose-pass-env` only for trusted input;
@@ -445,7 +445,8 @@ The manifest, installed distribution, entrypoint, and labels must agree. There
 is no legacy-image fallback: migrate and attest the image before passing it to
 `up --image`, or keep using the older launcher with the older image. Release
 Train A coordinates are API 0.2.3, templates 0.1.3, and AgentSeek 0.1.3; the
-planned dependent Train B template/catalog and AgentSeek follow-ups are 0.1.4.
+The planned Train B template/catalog release is 0.1.4. The separate planned
+AgentSeek release is also 0.1.4; both follow the shipped 0.1.3 releases.
 
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP

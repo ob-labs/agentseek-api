@@ -39,8 +39,9 @@ Notable changes to AgentSeek API are documented in this file.
   `org.agentseek.runtime-version` labels and matching manifest/runtime state.
   There is no legacy-image fallback.
 - Release Train A shipped API 0.2.3, templates 0.1.3, and AgentSeek 0.1.3. The
-  planned dependent Train B template/catalog and AgentSeek follow-ups are
-  0.1.4; those consumer changes remain separate release gates.
+  planned Train B template/catalog release is 0.1.4. The separate planned
+  AgentSeek release is also 0.1.4; both follow their shipped 0.1.3 releases and
+  remain separate release gates.
 
 ## 0.2.3 - 2026-08-17
 

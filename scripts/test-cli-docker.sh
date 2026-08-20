@@ -17,11 +17,52 @@ HISTORY_FILE="$TMP_DIR/image.history"
 BUILD_LOG="$TMP_DIR/build.log"
 WHEEL_BUILD_LOG="$TMP_DIR/wheel-build.log"
 BUILD_SENTINEL="$(uv run python -c 'import secrets; print(secrets.token_urlsafe(24))')"
+IMAGE_OWNED=0
+CONTAINER_OWNED=0
+
+container_id() {
+  docker container ls --all --filter "name=^/${APP_CONTAINER}$" --format '{{.ID}}'
+}
+
+image_id() {
+  docker image ls --all --no-trunc --filter "reference=${IMAGE_TAG}" --format '{{.ID}}'
+}
 
 cleanup() {
-  docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || true
-  docker image rm -f "$IMAGE_TAG" >/dev/null 2>&1 || true
-  rm -rf -- "$TMP_DIR"
+  local status=$?
+  local cleanup_failed=0
+  local remaining=""
+  trap - EXIT
+  set +e
+  if [[ "$CONTAINER_OWNED" -eq 1 ]]; then
+    remaining="$(container_id 2>/dev/null)" || cleanup_failed=1
+    if [[ -n "$remaining" ]]; then
+      docker rm -f "$APP_CONTAINER" >/dev/null 2>&1 || cleanup_failed=1
+    fi
+    remaining="$(container_id 2>/dev/null)" || cleanup_failed=1
+    if [[ -n "$remaining" ]]; then
+      cleanup_failed=1
+    fi
+  fi
+  if [[ "$IMAGE_OWNED" -eq 1 ]]; then
+    remaining="$(image_id 2>/dev/null)" || cleanup_failed=1
+    if [[ -n "$remaining" ]]; then
+      docker image rm -f "$IMAGE_TAG" >/dev/null 2>&1 || cleanup_failed=1
+    fi
+    remaining="$(image_id 2>/dev/null)" || cleanup_failed=1
+    if [[ -n "$remaining" ]]; then
+      cleanup_failed=1
+    fi
+  fi
+  rm -rf -- "$TMP_DIR" || cleanup_failed=1
+  if [[ -e "$TMP_DIR" ]]; then
+    cleanup_failed=1
+  fi
+  if [[ "$status" -eq 0 && "$cleanup_failed" -ne 0 ]]; then
+    echo "Owned container resource cleanup boundary failed." >&2
+    exit 1
+  fi
+  exit "$status"
 }
 
 print_logs() {
@@ -151,13 +192,33 @@ if [[ ! -d "$BUNDLE_CONTEXT" || ! -s "$BUNDLE_CONTEXT/Dockerfile" ]]; then
   exit 1
 fi
 
-uv run python - "$BUNDLE_CONTEXT" "$BUILD_SENTINEL" <<'PY'
+uv run python - "$BUNDLE_DIR" "$BUILD_SENTINEL" <<'PY'
+import hashlib
+import json
 from pathlib import Path
 import sys
 
 bundle = Path(sys.argv[1])
 sentinel = sys.argv[2].encode()
-dockerfile = (bundle / "Dockerfile").read_text(encoding="utf-8")
+context = bundle / "context"
+dockerfile_path = context / "Dockerfile"
+manifest_path = context / "manifest.v1.json"
+inventory_path = bundle / "inventory.json"
+if not all(path.is_file() for path in (dockerfile_path, manifest_path, inventory_path)):
+    raise SystemExit("Private build bundle metadata was not produced")
+dockerfile_bytes = dockerfile_path.read_bytes()
+dockerfile = dockerfile_bytes.decode("utf-8")
+manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+inventory = json.loads(inventory_path.read_text(encoding="utf-8"))
+if not isinstance(manifest, dict) or not isinstance(inventory, list):
+    raise SystemExit("Private build bundle metadata shape failed")
+matches = [item for item in inventory if item.get("relative_path") == "Dockerfile"]
+if (
+    len(matches) != 1
+    or matches[0].get("size") != len(dockerfile_bytes)
+    or matches[0].get("sha256") != hashlib.sha256(dockerfile_bytes).hexdigest()
+):
+    raise SystemExit("Dockerfile inventory binding failed")
 positions = [
     dockerfile.index("packaging==25.0"),
     dockerfile.index("/tmp/custom-boundary"),
@@ -168,11 +229,20 @@ positions = [
 ]
 if positions != sorted(positions) or len(set(positions)) != len(positions):
     raise SystemExit("Dockerfile install and verification order failed")
-for path in bundle.rglob("*"):
+for path in context.rglob("*"):
     if path.is_file() and sentinel in path.read_bytes():
         raise SystemExit("Build context sentinel isolation failed")
 PY
 
+if ! EXISTING_IMAGE="$(image_id)"; then
+  echo "Candidate image ownership query failed." >&2
+  exit 1
+fi
+if [[ -n "$EXISTING_IMAGE" ]]; then
+  echo "Candidate image ownership boundary failed." >&2
+  exit 1
+fi
+IMAGE_OWNED=1
 if ! docker buildx build --load --file "$BUNDLE_CONTEXT/Dockerfile" --tag "$IMAGE_TAG" "$BUNDLE_CONTEXT" >"$BUILD_LOG" 2>&1; then
   echo "Candidate bundle image build failed." >&2
   exit 1
@@ -224,6 +294,15 @@ if importlib.metadata.version("agentseek-api") != "0.3.0":
     raise SystemExit("Runtime distribution version failed")
 PY
 
+if ! EXISTING_CONTAINER="$(container_id)"; then
+  echo "Application container ownership query failed." >&2
+  exit 1
+fi
+if [[ -n "$EXISTING_CONTAINER" ]]; then
+  echo "Application container ownership boundary failed." >&2
+  exit 1
+fi
+CONTAINER_OWNED=1
 if ! uv run agentseek-api up \
   --config "$PROJECT_DIR/launch.json" \
   --image "$IMAGE_TAG" \
@@ -272,14 +351,10 @@ fi
 docker image save --output "$IMAGE_ARCHIVE" "$IMAGE_TAG"
 docker history --no-trunc --format '{{json .}}' "$IMAGE_TAG" >"$HISTORY_FILE"
 chmod 600 "$IMAGE_ARCHIVE" "$HISTORY_FILE"
-uv run python - "$IMAGE_ARCHIVE" "$HISTORY_FILE" "$BUILD_SENTINEL" <<'PY'
-from pathlib import Path
-import sys
-
-sentinel = sys.argv[3].encode()
-if sentinel in Path(sys.argv[1]).read_bytes() or sentinel in Path(sys.argv[2]).read_bytes():
-    raise SystemExit("Image layer or history sentinel isolation failed")
-PY
+AGENTSEEK_IMAGE_SCAN_SENTINEL="$BUILD_SENTINEL" \
+  uv run python scripts/container_image_archive.py \
+  --archive "$IMAGE_ARCHIVE" \
+  --history "$HISTORY_FILE"
 
 printf 'candidate wheel sha256: %s\n' "$CANDIDATE_SHA256"
 printf 'runtime version: %s\n' "$RUNTIME_VERSION"
