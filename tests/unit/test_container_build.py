@@ -4,6 +4,8 @@ import hashlib
 import io
 import json
 import os
+import subprocess
+import sys
 import tarfile
 import tempfile
 import zipfile
@@ -38,6 +40,32 @@ from tests.container_plan_helpers import (
     package_only_build_plan_fixture,
     read_archive_member,
 )
+
+
+def _dockerfile_run_argv(text: str) -> list[list[str]]:
+    return [
+        json.loads(line[line.index("[") :])
+        for line in text.splitlines()
+        if line.startswith("RUN ")
+    ]
+
+
+def _generated_python_check(text: str, needle: str) -> str:
+    return next(
+        argv[2]
+        for argv in _dockerfile_run_argv(text)
+        if argv[:2] == ["python", "-c"] and needle in argv[2]
+    )
+
+
+def _candidate_build_plan(root: Path):
+    project = make_graph_project(root)
+    wheel = project / "candidate.whl"
+    digest = _write_candidate_wheel(wheel)
+    return plan_container_image(
+        config_path=project / "agentseek.json",
+        runtime_artifact=candidate_runtime_artifact(wheel, digest),
+    )
 
 
 def test_dockerfile_uses_manifest_labels_and_buildkit_pip_secret(
@@ -243,6 +271,119 @@ def test_renderer_preserves_plan_fields_and_authoritative_order(tmp_path: Path) 
     manifest = text.index("COPY manifest.v1.json")
     labels = text.index("LABEL org.agentseek.environment-contract")
     assert user_install < custom < runtime_install < manifest < labels
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+def test_exact_runtime_install_forces_selected_artifact_replacement(
+    tmp_path: Path, candidate: bool
+) -> None:
+    plan = (
+        _candidate_build_plan(tmp_path) if candidate else build_plan_fixture(tmp_path)
+    )
+
+    commands = _dockerfile_run_argv(render_build_dockerfile(plan).decode())
+    runtime_install = next(
+        argv
+        for argv in commands
+        if argv[:4] == ["python", "-m", "pip", "install"]
+        and any("agentseek-api" in operand for operand in argv)
+    )
+
+    assert "--force-reinstall" in runtime_install
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+def test_runtime_verifier_rejects_module_not_owned_by_distribution_under_optimize(
+    tmp_path: Path, candidate: bool
+) -> None:
+    plan = (
+        _candidate_build_plan(tmp_path) if candidate else build_plan_fixture(tmp_path)
+    )
+    script = _generated_python_check(
+        render_build_dockerfile(plan).decode(), "importlib.metadata"
+    )
+    site_packages = tmp_path / "site-packages"
+    module = site_packages / "agentseek_api" / "cli.py"
+    module.parent.mkdir(parents=True)
+    module.write_text("", encoding="utf-8")
+    wrapper = "\n".join(
+        (
+            "import agentseek_api.cli,importlib.metadata,pathlib,sysconfig",
+            f"root=pathlib.Path({str(site_packages)!r})",
+            f"agentseek_api.cli.__file__={str(module)!r}",
+            "class D:",
+            " version='0.3.0'",
+            " files=(importlib.metadata.PackagePath('agentseek_api/not-cli.py'),)",
+            " def locate_file(self,item): return root/item",
+            "importlib.metadata.distribution=lambda name:D()",
+            "importlib.metadata.version=lambda name:'0.3.0'",
+            "sysconfig.get_paths=lambda:{'purelib':str(root),'platlib':str(root)}",
+            f"exec({script!r})",
+        )
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", wrapper],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+
+
+def test_manifest_verifier_rejects_wrong_hash_under_python_optimize(
+    tmp_path: Path,
+) -> None:
+    script = _generated_python_check(
+        render_build_dockerfile(build_plan_fixture(tmp_path)).decode(),
+        "manifest.v1.json",
+    )
+    manifest = tmp_path / "manifest.v1.json"
+    manifest.write_text("{}\n", encoding="utf-8")
+    wrapper = (
+        "import pathlib;OriginalPath=pathlib.Path;"
+        f"actual=OriginalPath({str(manifest)!r});"
+        "pathlib.Path=lambda value: actual if value=='/opt/agentseek/manifest.v1.json' "
+        "else OriginalPath(value);"
+        f"exec({script!r})"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", wrapper],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+
+
+def test_candidate_hash_verifier_rejects_wrong_bytes_under_python_optimize(
+    tmp_path: Path,
+) -> None:
+    script = _generated_python_check(
+        render_build_dockerfile(_candidate_build_plan(tmp_path)).decode(),
+        "agentseek-api-0.3.0.whl",
+    )
+    candidate = tmp_path / "wrong.whl"
+    candidate.write_bytes(b"wrong-candidate")
+    wrapper = (
+        "import pathlib;OriginalPath=pathlib.Path;"
+        f"actual=OriginalPath({str(candidate)!r});"
+        "pathlib.Path=lambda value: actual if value=="
+        "'/opt/agentseek/runtime/agentseek-api-0.3.0.whl' else OriginalPath(value);"
+        f"exec({script!r})"
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-O", "-c", wrapper],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert completed.returncode != 0
 
 
 def test_renderer_json_escapes_install_operands_and_candidate_source(

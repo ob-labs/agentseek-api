@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import subprocess
+import uuid
+import zipfile
 from dataclasses import replace
 from pathlib import Path
 
@@ -32,7 +36,10 @@ from agentseek_api.docker_runtime import (
     require_supported_compose,
 )
 from agentseek_api.container_build import (
+    PUBLISHED_RUNTIME_ARTIFACT,
+    candidate_runtime_artifact,
     materialize_build_bundle,
+    plan_container_image,
     render_build_dockerfile,
 )
 from agentseek_api.environment import ContainerPolicyError
@@ -96,6 +103,37 @@ def test_dockerfile_and_build_omit_pip_secret_when_not_configured(
     assert b"type=secret,id=pip_config" not in dockerfile
     assert "--secret" not in invocation.argv
     assert "None" not in invocation.argv
+
+
+@pytest.mark.parametrize("mismatch", ["pip-secret", "runtime", "plan"])
+def test_build_image_invocation_rejects_bundle_plan_mismatch(
+    tmp_path: Path, mismatch: str
+) -> None:
+    plan = build_plan_fixture(tmp_path)
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=render_build_dockerfile(plan),
+        output_root=tmp_path / "bundle",
+    )
+    if mismatch == "pip-secret":
+        supplied_plan = replace(plan, pip_config_file=None, pip_config_identity=None)
+    elif mismatch == "runtime":
+        wheel = plan.project_root / "candidate.whl"
+        with zipfile.ZipFile(wheel, "w") as archive:
+            archive.writestr(
+                "agentseek_api-0.3.0.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.0\n",
+            )
+        artifact = candidate_runtime_artifact(
+            wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()
+        )
+        assert artifact != PUBLISHED_RUNTIME_ARTIFACT
+        supplied_plan = replace(plan, runtime_artifact=artifact)
+    else:
+        supplied_plan = replace(plan, base_image="python:3.13-alpine")
+
+    with pytest.raises(DockerRuntimeError, match="bundle does not match.*plan"):
+        build_image_invocation(bundle, plan=supplied_plan, docker_control={})
 
 
 def test_build_image_invocation_requires_stdin_bytes(tmp_path: Path) -> None:
@@ -175,6 +213,36 @@ def test_require_supported_buildx_fails_before_build(
     assert all(call.argv[:3] != ("docker", "buildx", "build") for call in calls)
 
 
+def test_buildx_without_secret_support_fails_bounded_and_value_free(
+    tmp_path: Path,
+) -> None:
+    plan = build_plan_fixture(tmp_path)
+    assert plan.pip_config_file is not None
+    canary = "private-index-password-canary"
+    plan.pip_config_file.write_text(canary, encoding="utf-8")
+    calls: list[ProcessInvocation] = []
+
+    def transport(invocation: ProcessInvocation) -> ProcessResult:
+        calls.append(invocation)
+        return ProcessResult(
+            returncode=0,
+            stdout=b"github.com/docker/buildx v0.11.2 deadbeef\n",
+        )
+
+    with pytest.raises(DockerRuntimeError, match="secret") as caught:
+        require_supported_buildx(
+            transport=transport,
+            docker_control={},
+            cwd=tmp_path,
+            plan=plan,
+        )
+
+    assert len(calls) == 1
+    assert isinstance(calls[0], ControlQueryInvocation)
+    assert canary not in str(caught.value)
+    assert canary not in repr(calls)
+
+
 def test_pip_config_swap_before_build_invocation_is_rejected(tmp_path: Path) -> None:
     plan = build_plan_fixture(tmp_path)
     bundle = materialize_build_bundle(
@@ -218,6 +286,111 @@ def test_pip_config_swap_during_buildx_probes_is_rejected(tmp_path: Path) -> Non
         ("docker", "buildx", "version"),
         ("docker", "buildx", "inspect"),
     ]
+
+
+@pytest.mark.docker
+def test_buildx_secret_mount_consumes_canary_without_disclosure(
+    tmp_path: Path,
+) -> None:
+    if not docker_daemon_available(cwd=tmp_path):
+        pytest.skip("requires a Docker daemon")
+    plan = build_plan_fixture(tmp_path)
+    assert plan.pip_config_file is not None
+    canary = f"agentseek-buildx-secret-{uuid.uuid4().hex}"
+    plan.pip_config_file.write_text(canary, encoding="utf-8")
+    plan = plan_container_image(config_path=plan.config_path)
+    digest = hashlib.sha256(canary.encode()).hexdigest()
+    dockerfile = (
+        "# syntax=docker/dockerfile:1.7\n"
+        "FROM python:3.12-alpine\n"
+        "RUN --mount=type=secret,id=pip_config,target=/run/secrets/pip_config "
+        + json.dumps(
+            [
+                "python",
+                "-c",
+                (
+                    "import hashlib,pathlib;"
+                    "data=pathlib.Path('/run/secrets/pip_config').read_bytes();"
+                    f"raise SystemExit(1) if hashlib.sha256(data).hexdigest()!='{digest}' else None"
+                ),
+            ]
+        )
+        + "\n"
+    ).encode()
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=dockerfile,
+        output_root=tmp_path / "secret-smoke-bundle",
+    )
+    allowed = {
+        "PATH",
+        "HOME",
+        "USERPROFILE",
+        "SYSTEMROOT",
+        "DOCKER_HOST",
+        "DOCKER_CONTEXT",
+        "DOCKER_CONFIG",
+        "DOCKER_TLS_VERIFY",
+        "DOCKER_CERT_PATH",
+    }
+    docker_control = {
+        name: value for name, value in os.environ.items() if name in allowed
+    }
+    transport = SubprocessTransport()
+    require_supported_buildx(
+        transport=transport,
+        docker_control=docker_control,
+        cwd=tmp_path,
+        plan=plan,
+    )
+    tag = f"agentseek-buildx-secret-smoke:{uuid.uuid4().hex}"
+    invocation = build_image_invocation(
+        bundle,
+        plan=plan,
+        docker_control=docker_control,
+        tag=tag,
+    )
+
+    try:
+        completed = subprocess.run(
+            list(invocation.argv),
+            cwd=invocation.cwd,
+            env=dict(invocation.environment),
+            input=invocation.stdin_bytes,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+            timeout=240,
+        )
+        combined = completed.stdout + completed.stderr
+        assert completed.returncode == 0, combined.decode(errors="replace")
+        history = subprocess.run(
+            ["docker", "image", "history", "--no-trunc", tag],
+            cwd=tmp_path,
+            env=docker_control,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+            timeout=30,
+        )
+        assert history.returncode == 0
+        assert canary.encode() not in combined + history.stdout + history.stderr
+        assert canary.encode() not in invocation.stdin_bytes
+        assert canary not in invocation.argv
+        assert canary not in repr(invocation)
+    finally:
+        subprocess.run(
+            ["docker", "image", "rm", "--force", tag],
+            cwd=tmp_path,
+            env=docker_control,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+            shell=False,
+            timeout=30,
+        )
 
 
 SPECIAL_VALUES = {

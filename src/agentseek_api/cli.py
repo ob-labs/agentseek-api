@@ -971,38 +971,6 @@ def build_container_env(
     return env
 
 
-def _default_base_image(*, python_version: str | None, image_distro: str | None) -> str:
-    version = (python_version or "3.12").strip()
-    distro = (image_distro or "debian").strip().lower()
-    if distro in {"", "debian"}:
-        return f"python:{version}-slim"
-    if distro in {"bookworm", "bullseye"}:
-        return f"python:{version}-slim-{distro}"
-    if distro == "wolfi":
-        raise CliError(
-            "image_distro 'wolfi' is not supported without an explicit base_image."
-        )
-    raise CliError(f"Unsupported image_distro '{image_distro}'.")
-
-
-def _supports_apt_get_base_image(base_image: str) -> bool:
-    normalized = base_image.strip().lower()
-    if normalized.startswith(("python:", "debian:", "ubuntu:", "langchain/langgraph")):
-        return "alpine" not in normalized and "wolfi" not in normalized
-    return any(
-        marker in normalized for marker in ("debian", "ubuntu", "bookworm", "bullseye")
-    )
-
-
-def _validate_base_image(base_image: str) -> None:
-    if _supports_apt_get_base_image(base_image):
-        return
-    raise CliError(
-        f"Base image '{base_image}' is not supported because generated Dockerfiles require apt-get. "
-        "Use a Debian/Ubuntu-compatible image such as 'python:3.12-slim' or 'langchain/langgraph-api'."
-    )
-
-
 def _execute_dockerfile_command(
     args: argparse.Namespace,
     *,
@@ -1015,14 +983,7 @@ def _execute_dockerfile_command(
         raise CliError(
             f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
         )
-    config = _load_cli_config(config_path)
-    _validate_base_image(
-        config.base_image
-        or _default_base_image(
-            python_version=config.python_version,
-            image_distro=config.image_distro,
-        )
-    )
+    _load_cli_config(config_path)
     save_path = _resolve_path(args.save_path, cwd=cwd)
     plan = plan_container_image(
         config_path=config_path,
@@ -1052,14 +1013,7 @@ def _execute_build_command(
         raise CliError(
             f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
         )
-    config = _load_cli_config(config_path)
-    _validate_base_image(
-        config.base_image
-        or _default_base_image(
-            python_version=config.python_version,
-            image_distro=config.image_distro,
-        )
-    )
+    _load_cli_config(config_path)
     build_plan = plan_container_image(
         config_path=config_path,
         dotenv_paths=_planner_dotenv_paths(args.env_file, cwd=cwd),
@@ -1175,15 +1129,7 @@ def _execute_up_command(
                 "Custom-image auth cannot reference a host file; bake the module into the image and use an importable package reference."
             )
     else:
-        config = _load_cli_config(config_path)
-        _validate_base_image(
-            args.base_image
-            or config.base_image
-            or _default_base_image(
-                python_version=config.python_version,
-                image_distro=config.image_distro,
-            )
-        )
+        _load_cli_config(config_path)
         generated_plan = plan_container_image(
             config_path=config_path,
             dotenv_paths=_planner_dotenv_paths(args.env_file, cwd=cwd),

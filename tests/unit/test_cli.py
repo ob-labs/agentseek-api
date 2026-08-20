@@ -2196,7 +2196,9 @@ def test_dockerfile_command_rejects_unsupported_image_distro(tmp_path: Path) -> 
     assert "not supported without an explicit base_image" in stderr.getvalue()
 
 
-def test_dockerfile_command_rejects_non_apt_base_image(tmp_path: Path) -> None:
+def test_dockerfile_command_allows_python_alpine_base_without_apt(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     config_path = tmp_path / "langgraph.json"
@@ -2211,19 +2213,20 @@ def test_dockerfile_command_rejects_non_apt_base_image(tmp_path: Path) -> None:
 """.strip(),
         encoding="utf-8",
     )
-    stderr = io.StringIO()
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
 
     exit_code = main(
-        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)],
         cwd=tmp_path,
-        stderr=stderr,
     )
 
-    assert exit_code == 2
-    assert "require apt-get" in stderr.getvalue()
+    assert exit_code == 0
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM python:3.12-alpine" in content
+    assert "apt-get" not in content
 
 
-def test_dockerfile_command_rejects_unknown_non_debian_base_image(
+def test_dockerfile_command_allows_explicit_python_runtime_base_image(
     tmp_path: Path,
 ) -> None:
     from agentseek_api.cli import main
@@ -2240,6 +2243,33 @@ def test_dockerfile_command_rejects_unknown_non_debian_base_image(
 """.strip(),
         encoding="utf-8",
     )
+    dockerfile_path = tmp_path / "Dockerfile.agentseek"
+
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)],
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
+    assert "FROM registry.access.redhat.com/ubi9/python-312" in content
+
+
+def test_dockerfile_command_rejects_syntactically_invalid_base_image(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "graphs": {"chat": "chat.graph:graph"},
+                "base_image": "python:3.12 slim",
+            }
+        ),
+        encoding="utf-8",
+    )
     stderr = io.StringIO()
 
     exit_code = main(
@@ -2249,7 +2279,7 @@ def test_dockerfile_command_rejects_unknown_non_debian_base_image(
     )
 
     assert exit_code == 2
-    assert "Debian/Ubuntu-compatible" in stderr.getvalue()
+    assert "base image is invalid" in stderr.getvalue()
 
 
 def test_dockerfile_command_allows_supported_explicit_langgraph_base_image(
@@ -2943,14 +2973,13 @@ def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> No
     assert "FROM python:3.13-slim-bookworm" in dockerfile
 
 
-def test_up_command_rejects_non_apt_base_image_before_docker_build(
+def test_up_command_allows_python_alpine_base_without_apt(
     tmp_path: Path,
 ) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    capture = _RunCapture()
-    stderr = io.StringIO()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2958,14 +2987,18 @@ def test_up_command_rejects_non_apt_base_image_before_docker_build(
             "--base-image",
             "python:3.12-alpine",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
-        stderr=stderr,
     )
 
-    assert exit_code == 2
-    assert capture.calls is None
-    assert "require apt-get" in stderr.getvalue()
+    assert exit_code == 0
+    archive_bytes = _captured_image_build(capture).stdin_bytes
+    with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
+        dockerfile_file = archive.extractfile("Dockerfile")
+        assert dockerfile_file is not None
+        dockerfile = dockerfile_file.read().decode()
+    assert "FROM python:3.12-alpine" in dockerfile
+    assert "apt-get" not in dockerfile
 
 
 def test_up_command_returns_build_failure_without_running_container(

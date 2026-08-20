@@ -16,7 +16,11 @@ from types import MappingProxyType
 from typing import Protocol
 
 from agentseek_api.container_policy import select_compose_payload
-from agentseek_api.container_build import ContainerBuildBundle, ContainerBuildPlan
+from agentseek_api.container_build import (
+    ContainerBuildBundle,
+    ContainerBuildPlan,
+    container_build_plan_fingerprint,
+)
 from agentseek_api.environment import ContainerPolicyError
 
 DEFAULT_CONTROL_QUERY_TIMEOUT_SECONDS = 10.0
@@ -262,6 +266,8 @@ def build_image_invocation(
 ) -> BuildImageInvocation:
     """Freeze a Buildx invocation whose only build context is verified tar stdin."""
 
+    if bundle.plan_fingerprint != container_build_plan_fingerprint(plan):
+        raise DockerRuntimeError("The build bundle does not match the supplied plan.")
     archive = bundle.archive_bytes()
     validate_pip_config_identity(plan)
     argv = ["docker", "buildx", "build", "--load", "--file", "Dockerfile"]
@@ -495,7 +501,9 @@ def require_supported_buildx(
         version == MINIMUM_BUILDX_VERSION and prerelease
     ):
         required = ".".join(str(component) for component in MINIMUM_BUILDX_VERSION)
-        raise DockerRuntimeError(f"Docker Buildx {required} or newer is required.")
+        raise DockerRuntimeError(
+            f"Docker Buildx {required} or newer is required for BuildKit secrets."
+        )
     inspect_query = build_docker_query_invocation(
         argv=("docker", "buildx", "inspect"),
         docker_control=docker_control,

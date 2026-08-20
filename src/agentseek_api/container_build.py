@@ -372,11 +372,73 @@ class ContainerBuildBundle:
     dockerfile: Path
     manifest: Path
     inventory: tuple[BuildInventoryEntry, ...]
+    plan_fingerprint: str = field(repr=False)
 
     def archive_bytes(self) -> bytes:
         return create_deterministic_context_archive(
             context=self.context, expected_inventory=self.inventory
         )
+
+
+def container_build_plan_fingerprint(plan: ContainerBuildPlan) -> str:
+    """Return a value-free digest binding a bundle to every frozen plan field."""
+
+    artifact = plan.runtime_artifact
+    payload = {
+        "base_image": plan.base_image,
+        "python_version": plan.python_version,
+        "image_distro": plan.image_distro,
+        "dockerfile_lines": plan.dockerfile_lines,
+        "runtime_artifact": {
+            "distribution": artifact.distribution,
+            "extra": artifact.extra,
+            "version": artifact.version,
+            "source": artifact.source.value,
+            "candidate_wheel": (
+                str(artifact.candidate_wheel)
+                if artifact.candidate_wheel is not None
+                else None
+            ),
+            "candidate_sha256": artifact.candidate_sha256,
+            "candidate_identity": artifact.candidate_identity,
+        },
+        "install_actions": [
+            {"kind": action.kind.value, "operand": action.operand}
+            for action in plan.install_actions
+        ],
+        "pip_config_file": (
+            str(plan.pip_config_file) if plan.pip_config_file is not None else None
+        ),
+        "pip_config_identity": plan.pip_config_identity,
+        "manifest_sha256": hashlib.sha256(plan.manifest.to_json_bytes()).hexdigest(),
+        "selected_sources": [
+            {
+                "destination": destination,
+                "source_path": str(selected.source_path),
+                "reasons": sorted(reason.value for reason in selected.reasons),
+                "source_identity": selected.source_identity,
+                "source_sha256": selected.source_sha256,
+                "ancestor_identities": [
+                    [str(path), identity]
+                    for path, identity in selected.ancestor_identities
+                ],
+            }
+            for destination, selected in sorted(plan.selected_sources.items())
+        ],
+        "config_path": str(plan.config_path),
+        "project_root": str(plan.project_root),
+        "project_root_identity": plan.project_root_identity,
+        "invocation_cwd": str(plan.invocation_cwd),
+        "excluded_paths": sorted(str(path) for path in plan.excluded_paths),
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -1832,7 +1894,7 @@ def plan_container_image(
         base = f"python:{raw_python}-slim-{raw_distro}"
     else:
         raise ContainerBuildError(
-            "image_distro is unsupported without an explicit base_image."
+            "image_distro is not supported without an explicit base_image."
         )
     manifest = ContainerRuntimeManifestV1(
         schema_version=1,
@@ -2002,11 +2064,16 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
     lines.extend(plan.dockerfile_lines)
 
     if candidate_source is not None:
-        assert artifact.candidate_sha256 is not None
+        if artifact.candidate_sha256 is None:
+            raise ContainerBuildError(
+                "The candidate runtime artifact selection is invalid."
+            )
         candidate_check = (
             "import hashlib,pathlib;"
             "p=pathlib.Path('/opt/agentseek/runtime/agentseek-api-0.3.0.whl');"
-            f"assert hashlib.sha256(p.read_bytes()).hexdigest()=='{artifact.candidate_sha256}'"
+            "raise SystemExit('candidate runtime hash mismatch') if "
+            f"hashlib.sha256(p.read_bytes()).hexdigest()!='{artifact.candidate_sha256}' "
+            "else None"
         )
         lines.append(_docker_exec_run(("python", "-c", candidate_check)))
         runtime_operand = "/opt/agentseek/runtime/agentseek-api-0.3.0.whl[embedded]"
@@ -2020,6 +2087,7 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
                 "pip",
                 "install",
                 "--no-cache-dir",
+                "--force-reinstall",
                 "--constraint",
                 "/opt/agentseek/runtime-constraints.txt",
                 runtime_operand,
@@ -2033,18 +2101,30 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
         "p=pathlib.Path('/opt/agentseek/manifest.v1.json');raw=p.read_bytes();"
         "doc=json.loads(raw);canonical=(json.dumps(doc,ensure_ascii=False,sort_keys=True,"
         "separators=(',',':'),allow_nan=False)+'\\n').encode();"
-        f"assert raw==canonical and hashlib.sha256(raw).hexdigest()=='{manifest_sha256}'"
+        "raise SystemExit('runtime manifest integrity mismatch') if "
+        f"raw!=canonical or hashlib.sha256(raw).hexdigest()!='{manifest_sha256}' "
+        "else None"
     )
     lines.append(_docker_exec_run(("python", "-c", manifest_check)))
     lines.append(_docker_exec_run(("python", "-m", "pip", "check")))
     runtime_check = (
         "import importlib.metadata,pathlib,sys,sysconfig,agentseek_api.cli;"
-        f"assert importlib.metadata.version('agentseek-api')=='{artifact.version}';"
+        "distribution=importlib.metadata.distribution('agentseek-api');"
+        "raise SystemExit('runtime distribution version mismatch') if "
+        f"distribution.version!='{artifact.version}' else None;"
         "module=pathlib.Path(agentseek_api.cli.__file__).resolve();"
+        "files=distribution.files;"
+        "raise SystemExit('runtime distribution file inventory missing') if "
+        "files is None else None;"
+        "owned={pathlib.Path(distribution.locate_file(item)).resolve() for item in files};"
+        "raise SystemExit('runtime module is not owned by distribution') if "
+        "module not in owned else None;"
         "roots={pathlib.Path(value).resolve() for key,value in sysconfig.get_paths().items() "
         "if key in {'purelib','platlib'}};"
-        "assert roots and any(module.is_relative_to(root) for root in roots);"
-        "assert sys.version_info[:2]>=(3,12)"
+        "raise SystemExit('runtime module is outside site packages') if "
+        "not roots or not any(module.is_relative_to(root) for root in roots) else None;"
+        "raise SystemExit('Python 3.12 or newer is required') if "
+        "sys.version_info[:2]<(3,12) else None"
     )
     lines.append(_docker_exec_run(("python", "-c", runtime_check)))
     lines.extend(
@@ -2455,6 +2535,7 @@ def materialize_build_bundle(
             dockerfile=dockerfile,
             manifest=manifest,
             inventory=inventory,
+            plan_fingerprint=container_build_plan_fingerprint(plan),
         )
     except Exception:
         root_is_original = _directory_identity_matches(root, root_identity)
@@ -2581,6 +2662,7 @@ __all__ = [
     "StoreTtlManifestV1",
     "StructuredGraphV1",
     "candidate_runtime_artifact",
+    "container_build_plan_fingerprint",
     "create_deterministic_context_archive",
     "interpret_host_runtime_policy",
     "interpret_manifest_runtime_policy",
