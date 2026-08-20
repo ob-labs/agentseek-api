@@ -13,6 +13,19 @@ from typing import AbstractSet
 from agentseek_api.environment import ResolvedEnvironment
 
 
+def make_graph_project(root: Path) -> Path:
+    project = root / "project"
+    package = project / "chat"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    (project / "agentseek.json").write_text(
+        json.dumps({"dependencies": ["."], "graphs": {"chat": "chat.graph:graph"}}),
+        encoding="utf-8",
+    )
+    return project
+
+
 @dataclass(frozen=True)
 class ComposeDecodedEnvironment(Mapping[str, str]):
     substitution: Mapping[str, str] = field(repr=False)

@@ -1202,6 +1202,71 @@ def test_release_versions_are_consistent() -> None:
     assert root_package["version"] == __version__
 
 
+def test_container_planning_uses_published_runtime_artifact_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentseek_api.cli as cli
+    from agentseek_api.container_build import PUBLISHED_RUNTIME_ARTIFACT
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    captured: list[object] = []
+    original = cli.plan_container_image
+
+    def capture(**kwargs: object) -> object:
+        captured.append(kwargs["runtime_artifact"])
+        return original(**kwargs)
+
+    monkeypatch.setattr(cli, "plan_container_image", capture)
+    output = io.StringIO()
+
+    exit_code = cli.main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stdout=output,
+    )
+
+    assert exit_code == 0
+    assert captured == [PUBLISHED_RUNTIME_ARTIFACT]
+
+
+def test_internal_candidate_runtime_artifact_is_forwarded_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import agentseek_api.cli as cli
+    from agentseek_api.container_build import RuntimeArtifactSource, RuntimeArtifactV1
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    wheel = tmp_path / "candidate.whl"
+    artifact = RuntimeArtifactV1(
+        distribution="agentseek-api",
+        extra="embedded",
+        version="0.3.0",
+        source=RuntimeArtifactSource.CANDIDATE_WHEEL,
+        candidate_wheel=wheel,
+        candidate_sha256="0" * 64,
+        candidate_identity=(0, 0, 0, 0),
+    )
+    captured: list[object] = []
+
+    def capture(**kwargs: object) -> object:
+        captured.append(kwargs["runtime_artifact"])
+        raise cli.ContainerBuildError("candidate boundary reached")
+
+    monkeypatch.setattr(cli, "plan_container_image", capture)
+    error = io.StringIO()
+
+    exit_code = cli.main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stderr=error,
+        runtime_artifact=artifact,
+    )
+
+    assert exit_code == 2
+    assert captured == [artifact]
+    assert error.getvalue() == "candidate boundary reached\n"
+
+
 def test_package_exposes_library_and_cli_entrypoints() -> None:
     project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
         "project"
@@ -1547,6 +1612,9 @@ version = "0.1.0"
     )
     manifest_dir = tmp_path / "examples" / "docker_ci_auth"
     manifest_dir.mkdir(parents=True)
+    graph_dir = tmp_path / "examples" / "graphs"
+    graph_dir.mkdir()
+    (graph_dir / "chat.py").write_text("graph = object()\n", encoding="utf-8")
     config_path = manifest_dir / "manifest.json"
     config_path.write_text(
         """

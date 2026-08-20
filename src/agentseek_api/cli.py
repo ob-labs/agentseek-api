@@ -23,6 +23,12 @@ from agentseek_api.container_policy import (
     select_application_payload,
     select_compose_payload,
 )
+from agentseek_api.container_build import (
+    PUBLISHED_RUNTIME_ARTIFACT,
+    ContainerBuildError,
+    RuntimeArtifactV1,
+    plan_container_image,
+)
 from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.docker_runtime import (
     DockerRuntimeError,
@@ -1142,27 +1148,45 @@ def write_dockerfile(
 
 
 def _execute_dockerfile_command(
-    args: argparse.Namespace, *, stdout: TextIO, cwd: Path
+    args: argparse.Namespace,
+    *,
+    stdout: TextIO,
+    cwd: Path,
+    runtime_artifact: RuntimeArtifactV1,
 ) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
         raise CliError(
             f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
         )
+    _load_cli_config(config_path)
     save_path = _resolve_path(args.save_path, cwd=cwd)
+    plan_container_image(
+        config_path=config_path,
+        runtime_artifact=runtime_artifact,
+    )
     write_dockerfile(config_path=config_path, save_path=save_path, cwd=cwd)
     stdout.write(f"{save_path}\n")
     return 0
 
 
 def _execute_build_command(
-    args: argparse.Namespace, *, process_transport: ProcessTransport, cwd: Path
+    args: argparse.Namespace,
+    *,
+    process_transport: ProcessTransport,
+    cwd: Path,
+    runtime_artifact: RuntimeArtifactV1,
 ) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
         raise CliError(
             f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
         )
+    _load_cli_config(config_path)
+    plan_container_image(
+        config_path=config_path,
+        runtime_artifact=runtime_artifact,
+    )
     generated_dockerfile = write_dockerfile(
         config_path=config_path,
         save_path=(cwd / ".agentseek" / "Dockerfile").resolve(),
@@ -1222,7 +1246,11 @@ def _container_exists(
 
 
 def _execute_up_command(
-    args: argparse.Namespace, *, process_transport: ProcessTransport, cwd: Path
+    args: argparse.Namespace,
+    *,
+    process_transport: ProcessTransport,
+    cwd: Path,
+    runtime_artifact: RuntimeArtifactV1,
 ) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
@@ -1274,6 +1302,11 @@ def _execute_up_command(
         encoded_compose = encode_compose_environment(compose_payload).encode("utf-8")
 
     if not image:
+        plan_container_image(
+            config_path=config_path,
+            base_image_override=args.base_image,
+            runtime_artifact=runtime_artifact,
+        )
         image = f"agentseek-up:{args.port}"
         generated_dockerfile = write_dockerfile(
             config_path=config_path,
@@ -1453,6 +1486,7 @@ def run_namespace(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     cwd: str | Path | None = None,
+    runtime_artifact: RuntimeArtifactV1 = PUBLISHED_RUNTIME_ARTIFACT,
 ) -> int:
     command = args.command
     workdir = Path(cwd or Path.cwd()).resolve()
@@ -1489,10 +1523,18 @@ def run_namespace(
         if command == "scheduler":
             return _execute_scheduler_command(args, runner=run, cwd=workdir)
         if command == "dockerfile":
-            return _execute_dockerfile_command(args, stdout=out, cwd=workdir)
+            return _execute_dockerfile_command(
+                args,
+                stdout=out,
+                cwd=workdir,
+                runtime_artifact=runtime_artifact,
+            )
         if command == "build":
             return _execute_build_command(
-                args, process_transport=docker_transport, cwd=workdir
+                args,
+                process_transport=docker_transport,
+                cwd=workdir,
+                runtime_artifact=runtime_artifact,
             )
         if command == "up":
             _reject_unsupported_options(
@@ -1506,7 +1548,10 @@ def run_namespace(
                 ),
             )
             return _execute_up_command(
-                args, process_transport=docker_transport, cwd=workdir
+                args,
+                process_transport=docker_transport,
+                cwd=workdir,
+                runtime_artifact=runtime_artifact,
             )
         raise CliError(f"Unsupported command '{command}'.")
     except (
@@ -1514,6 +1559,7 @@ def run_namespace(
         ContainerPolicyError,
         DockerRuntimeError,
         SecureArtifactError,
+        ContainerBuildError,
     ) as exc:
         err.write(f"{exc}\n")
         return 2
@@ -1528,6 +1574,7 @@ def main(
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     cwd: str | Path | None = None,
+    runtime_artifact: RuntimeArtifactV1 = PUBLISHED_RUNTIME_ARTIFACT,
 ) -> int:
     if prog is None:
         prog = _infer_cli_name() if argv is None else DEFAULT_CLI_NAME
@@ -1540,6 +1587,7 @@ def main(
         stdout=stdout,
         stderr=stderr,
         cwd=cwd,
+        runtime_artifact=runtime_artifact,
     )
 
 
