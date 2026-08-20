@@ -195,6 +195,20 @@ def _windows_index(
     return indexed
 
 
+def _check_windows_selected_names(names: frozenset[str], *, platform: str) -> None:
+    if platform != "win32":
+        return
+    seen: dict[str, str] = {}
+    for name in names:
+        normalized = name.casefold()
+        previous = seen.get(normalized)
+        if previous is not None and previous != name:
+            raise ContainerPolicyError(
+                f"Selected environment names contain duplicate Windows name '{previous}' and '{name}'."
+            )
+        seen[normalized] = name
+
+
 def _canonical_name(name: str, *, platform: str) -> str:
     if platform == "win32":
         return _WINDOWS_SPAWNED_NAMES.get(name.casefold(), name.upper())
@@ -251,6 +265,7 @@ def select_application_payload(
         | set(APPLICATION_COMPATIBILITY_KEYS)
         | set(selection.pass_env)
     )
+    _check_windows_selected_names(selection.pass_env, platform=platform)
     for name in selected:
         _validate_name(name)
     for name in selection.pass_env:
@@ -300,6 +315,7 @@ def select_compose_payload(
     _windows_index(
         docker_control, label="docker control environment", platform=platform
     )
+    _check_windows_selected_names(selected_names, platform=platform)
     payload: dict[str, str] = {}
     for name in selected_names:
         _validate_name(name)

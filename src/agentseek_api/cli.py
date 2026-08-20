@@ -16,10 +16,8 @@ from typing import TextIO
 
 from agentseek_api import __version__
 from agentseek_api.container_policy import (
-    APP_CONTAINER_POLICY,
     HOST_RUNTIME_POLICY,
     ContainerSelection,
-    select_application_payload,
 )
 from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
@@ -413,36 +411,113 @@ def build_runtime_env(
     cwd: Path,
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    plan = build_host_environment_plan(
+        config_path=config_path,
+        env_file=env_file,
+        cwd=cwd,
+        base_env=base_env,
+        role=None,
+    )
+    return _resolve_host_environment_plan(plan)
+
+
+def build_host_environment_plan(
+    *,
+    config_path: Path | None,
+    env_file: str | None,
+    cwd: Path,
+    base_env: dict[str, str] | None = None,
+    role: str | None,
+) -> EnvironmentPlan:
     inherited = dict(os.environ if base_env is None else base_env)
     config = _load_cli_config(config_path) if config_path is not None else None
     cli_dotenv = _resolve_path(env_file, cwd=cwd) if env_file else None
-    assignments: tuple[CommandDerivedAssignment, ...] = ()
+    assignments: list[CommandDerivedAssignment] = []
     inherited.pop("AGENTSEEK_GRAPHS", None)
     if config_path is not None:
-        assignments = (
+        assignments.append(
             CommandDerivedAssignment(
                 targets=frozenset({EnvironmentTarget.HOST_RUNTIME}),
                 values={"AGENTSEEK_GRAPHS": str(config_path)},
                 reason="selected host config path",
-            ),
+            )
         )
+    if role == "dev":
+        assignments.append(
+            CommandDerivedAssignment(
+                targets=frozenset({EnvironmentTarget.HOST_RUNTIME}),
+                values={"STUDIO_AUTH_LOCAL_DEV": "true"},
+                reason="development role safety",
+            )
+        )
+    return EnvironmentPlan(
+        config_path=config_path,
+        config_dotenv=config.env_file if config is not None else None,
+        config_mapping=config.env_mapping if config is not None else {},
+        auth_path=config.auth_path if config is not None else None,
+        cli_dotenv=cli_dotenv,
+        launch_environment=inherited,
+        command_assignments=tuple(assignments),
+        explicit_names=frozenset(),
+    )
+
+
+def _resolve_host_environment_plan(plan: EnvironmentPlan) -> dict[str, str]:
     try:
-        resolved = resolve_environment(
-            EnvironmentPlan(
-                config_path=config_path,
-                config_dotenv=config.env_file if config is not None else None,
-                config_mapping=config.env_mapping if config is not None else {},
-                auth_path=config.auth_path if config is not None else None,
-                cli_dotenv=cli_dotenv,
-                launch_environment=inherited,
-                command_assignments=assignments,
-                explicit_names=frozenset(),
-            ),
-            HOST_RUNTIME_POLICY,
-        )
+        resolved = resolve_environment(plan, HOST_RUNTIME_POLICY)
     except DotenvFileError as exc:
         raise CliError(str(exc)) from exc
     return dict(resolved.values)
+
+
+def build_container_command_assignments(
+    *, config_path: Path, cwd: Path, postgres_uri: str | None
+) -> tuple[CommandDerivedAssignment, ...]:
+    assignments = [
+        CommandDerivedAssignment(
+            targets=frozenset({EnvironmentTarget.APP_CONTAINER}),
+            values={
+                "AGENTSEEK_GRAPHS": _container_config_path(
+                    config_path=config_path, cwd=cwd
+                )
+            },
+            reason="container manifest path",
+        )
+    ]
+    if postgres_uri is not None:
+        assignments.append(
+            CommandDerivedAssignment(
+                targets=frozenset({EnvironmentTarget.APP_CONTAINER}),
+                values={
+                    "METADATA_DB_URL": postgres_uri,
+                    "METADATA_DB_BACKEND": "postgresql",
+                },
+                reason="postgres uri override",
+            )
+        )
+    return tuple(assignments)
+
+
+def build_container_selection(
+    *,
+    config_path: Path,
+    pass_env: Sequence[str],
+    compose_pass_env: Sequence[str],
+) -> ContainerSelection:
+    """Parse container selectors without coupling them to Docker execution."""
+
+    config = _load_cli_config(config_path)
+
+    def normalized(names: Sequence[str]) -> frozenset[str]:
+        normalized_names = frozenset(name.strip() for name in names)
+        if "" in normalized_names:
+            raise CliError("Container environment selector names must be non-empty.")
+        return normalized_names
+
+    return ContainerSelection(
+        pass_env=normalized(pass_env),
+        compose_env=normalized((*config.compose_env, *compose_pass_env)),
+    )
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
@@ -668,8 +743,14 @@ def _execute_dev_command(
     _write_onboard_banner(stdout)
     args.reload = not args.no_reload
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
-    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    env["STUDIO_AUTH_LOCAL_DEV"] = "true"
+    env = _resolve_host_environment_plan(
+        build_host_environment_plan(
+            config_path=config_path,
+            env_file=args.env_file,
+            cwd=cwd,
+            role="dev",
+        )
+    )
     command = build_uvicorn_command(
         host=args.host,
         port=args.port,
@@ -854,39 +935,14 @@ def build_container_env(
     config_path: Path,
     env_file: str | None,
     cwd: Path,
-    pass_env: frozenset[str] = frozenset(),
-    compose_env: frozenset[str] = frozenset(),
 ) -> dict[str, str]:
-    config = _load_cli_config(config_path)
-    cli_dotenv = _resolve_path(env_file, cwd=cwd) if env_file else None
-    container_manifest = _container_config_path(config_path=config_path, cwd=cwd)
-    try:
-        resolved = resolve_environment(
-            EnvironmentPlan(
-                config_path=config_path,
-                config_dotenv=config.env_file,
-                config_mapping=config.env_mapping,
-                auth_path=config.auth_path,
-                cli_dotenv=cli_dotenv,
-                launch_environment=dict(os.environ),
-                command_assignments=(
-                    CommandDerivedAssignment(
-                        targets=frozenset({EnvironmentTarget.APP_CONTAINER}),
-                        values={"AGENTSEEK_GRAPHS": container_manifest},
-                        reason="container manifest path",
-                    ),
-                ),
-                explicit_names=pass_env,
-            ),
-            APP_CONTAINER_POLICY,
-        )
-        env = dict(
-            select_application_payload(
-                resolved, ContainerSelection(pass_env=pass_env, compose_env=compose_env)
-            )
-        )
-    except (DotenvFileError, ValueError) as exc:
-        raise CliError(str(exc)) from exc
+    env = build_runtime_env(
+        config_path=config_path,
+        env_file=env_file,
+        cwd=cwd,
+        base_env=_ambient_container_env(),
+    )
+    env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
     auth_module_path = env.get("AUTH_MODULE_PATH")
     if auth_module_path:
         env["AUTH_MODULE_PATH"] = _containerize_symbol_reference(
@@ -1087,18 +1143,11 @@ def _execute_up_command(
         )
 
     image = args.image
-    config = _load_cli_config(config_path)
-    selection = ContainerSelection(
-        pass_env=frozenset(args.pass_env),
-        compose_env=frozenset((*config.compose_env, *args.compose_pass_env)),
-    )
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
     container_env = build_container_env(
         config_path=config_path,
         env_file=args.env_file,
         cwd=cwd,
-        pass_env=selection.pass_env,
-        compose_env=selection.compose_env,
     )
     if not image:
         image = f"agentseek-up:{args.port}"

@@ -208,6 +208,123 @@ def test_explicit_pass_env_allows_ambient_reference_and_export(tmp_path: Path) -
     assert dict(payload) == {"AMBIENT_ONLY": "secret", "RESULT": "secret"}
 
 
+def test_later_resolved_dotenv_binding_clears_earlier_unresolved_reference(
+    tmp_path: Path,
+) -> None:
+    resolved = resolve_environment(
+        _plan(tmp_path, config_dotenv="VALUE=${MISSING}\nVALUE=ok\n"),
+        APP_CONTAINER_POLICY,
+    )
+
+    assert resolved.values["VALUE"] == "ok"
+    assert "VALUE" not in resolved.unresolved_references
+
+
+def test_windows_container_interpolation_matches_explicit_name_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    resolved = resolve_environment(
+        _plan(
+            tmp_path,
+            config_dotenv="RESULT=${openai_api_key}\n",
+            launch={"OpenAI_Api_Key": "value"},
+        ),
+        APP_CONTAINER_POLICY,
+        platform="win32",
+    )
+
+    assert resolved.values["RESULT"] == "value"
+    assert dict(
+        select_application_payload(
+            resolved,
+            ContainerSelection(pass_env=frozenset(), compose_env=frozenset()),
+            platform="win32",
+        )
+    ) == {"OPENAI_API_KEY": "value", "RESULT": "value"}
+
+
+def test_windows_rejects_two_spellings_of_a_launch_environment_name(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ContainerPolicyError, match="Path.*PATH"):
+        resolve_environment(
+            _plan(tmp_path, launch={"Path": "one", "PATH": "two"}),
+            APP_CONTAINER_POLICY,
+            platform="win32",
+        )
+
+
+def test_windows_launch_assignment_replaces_lower_source_case_insensitively(
+    tmp_path: Path,
+) -> None:
+    resolved = resolve_environment(
+        _plan(
+            tmp_path,
+            config_dotenv="OPENAI_API_KEY=dotenv\n",
+            launch={"OpenAI_Api_Key": "launch"},
+        ),
+        APP_CONTAINER_POLICY,
+        platform="win32",
+    )
+
+    assert dict(
+        select_application_payload(
+            resolved,
+            ContainerSelection(pass_env=frozenset(), compose_env=frozenset()),
+            platform="win32",
+        )
+    ) == {"OPENAI_API_KEY": "launch"}
+
+
+def test_windows_rejects_application_control_collision_across_spellings() -> None:
+    with pytest.raises(ContainerPolicyError, match="Path"):
+        select_compose_payload(
+            application_payload={"Path": "application-value"},
+            selected_names=frozenset({"PATH"}),
+            docker_control={"PATH": "control-value"},
+            platform="win32",
+        )
+
+
+def test_cli_builders_construct_target_scoped_command_assignments(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import (
+        build_container_command_assignments,
+        build_host_environment_plan,
+    )
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text('{"graphs":{"chat":"chat.graph:graph"}}', encoding="utf-8")
+    host_plan = build_host_environment_plan(
+        config_path=config_path,
+        env_file=None,
+        cwd=tmp_path,
+        base_env={},
+        role="dev",
+    )
+    host = resolve_environment(host_plan, HOST_RUNTIME_POLICY)
+    omitted = build_container_command_assignments(
+        config_path=config_path, cwd=tmp_path, postgres_uri=None
+    )
+    explicit = build_container_command_assignments(
+        config_path=config_path, cwd=tmp_path, postgres_uri="postgresql://db"
+    )
+
+    assert host.values["AGENTSEEK_GRAPHS"] == str(config_path)
+    assert host.values["STUDIO_AUTH_LOCAL_DEV"] == "true"
+    assert [dict(item.values) for item in omitted] == [
+        {"AGENTSEEK_GRAPHS": "/deps/agent/langgraph.json"}
+    ]
+    assert [dict(item.values) for item in explicit] == [
+        {"AGENTSEEK_GRAPHS": "/deps/agent/langgraph.json"},
+        {
+            "METADATA_DB_URL": "postgresql://db",
+            "METADATA_DB_BACKEND": "postgresql",
+        },
+    ]
+
+
 def test_missing_explicit_pass_env_is_an_error() -> None:
     with pytest.raises(ContainerPolicyError, match="MISSING"):
         select_application_payload(
@@ -223,12 +340,15 @@ def test_application_registry_contains_every_settings_field() -> None:
 
 
 def test_provider_registry_matches_documented_exact_snapshot() -> None:
-    assert {
+    assert APPLICATION_COMPATIBILITY_KEYS == {
         "AGENTSEEK_API_BASE",
         "AGENTSEEK_API_KEY",
+        "AGENTSEEK_GRAPHS",
         "AGENTSEEK_MODEL",
         "AGENTSEEK_MODEL_API_KEY",
         "AGENTSEEK_MODEL_PROVIDER",
+        "APP_NAME",
+        "AUTH_MODULE_PATH",
         "OPENAI_API_BASE",
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
@@ -251,7 +371,34 @@ def test_provider_registry_matches_documented_exact_snapshot() -> None:
         "VLM_API_KEY",
         "VLM_BASE_URL",
         "SILICONFLOW_API_KEY",
-    } <= APPLICATION_COMPATIBILITY_KEYS
+        "EXECUTOR_BACKEND",
+        "METADATA_DB_BACKEND",
+        "METADATA_DB_URL",
+        "OCEANBASE_DB_NAME",
+        "OCEANBASE_HOST",
+        "OCEANBASE_PASSWORD",
+        "OCEANBASE_PORT",
+        "OCEANBASE_USER",
+        "PORT",
+        "REDIS_RUN_PROCESSING_KEY",
+        "REDIS_RUN_QUEUE_KEY",
+        "REDIS_SCHEDULER_LOCK_KEY",
+        "REDIS_SCHEDULER_LOCK_TTL_SECONDS",
+        "REDIS_STREAM_MAXLEN",
+        "REDIS_STREAM_TTL_SECONDS",
+        "REDIS_URL",
+        "REDIS_WORKER_LOCK_KEY",
+        "REDIS_WORKER_LOCK_TTL_SECONDS",
+        "REDIS_WORKER_POLL_TIMEOUT_SECONDS",
+        "SCHEDULER_CLAIM_LIMIT",
+        "SCHEDULER_POLL_INTERVAL_SECONDS",
+        "SCHEDULER_STARTED_TICK_STALE_AFTER_SECONDS",
+        "SEEKDB_EMBED",
+        "SEEKDB_EMBED_DIR",
+        "SEEKDB_URL",
+        "STUDIO_AUTH_LOCAL_DEV",
+        "WORKER_CONCURRENT_JOBS",
+    }
 
 
 def test_docker_control_environment_is_exact_for_linux_darwin_and_win32(

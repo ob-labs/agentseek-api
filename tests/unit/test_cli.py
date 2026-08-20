@@ -42,6 +42,55 @@ def test_up_parser_collects_explicit_container_and_compose_names() -> None:
     assert args.compose_pass_env == ["TOKEN"]
 
 
+def test_up_parses_pass_env_without_forwarding_it_to_live_docker_execution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("ARBITRARY_HOST_SECRET", "must-not-reach-docker-run")
+    capture = _RunCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--pass-env",
+            "ARBITRARY_HOST_SECRET",
+        ],
+        runner=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    assert "ARBITRARY_HOST_SECRET" not in _docker_env_from_run_command(capture.calls[1])
+
+
+def test_container_selection_combines_normalized_config_and_cli_compose_names(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import build_container_selection
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"compose_env":[" TOKEN ","FROM_CONFIG"]}',
+        encoding="utf-8",
+    )
+
+    selection = build_container_selection(
+        config_path=config_path,
+        pass_env=[" PASS_ENV "],
+        compose_pass_env=[" TOKEN ", "FROM_CLI"],
+    )
+
+    assert selection.pass_env == frozenset({"PASS_ENV"})
+    assert selection.compose_env == frozenset({"TOKEN", "FROM_CONFIG", "FROM_CLI"})
+
+
 @dataclass
 class _RunCapture:
     calls: list[list[str]] | None = None

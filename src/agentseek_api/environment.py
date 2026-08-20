@@ -121,6 +121,20 @@ class ContainerPolicyError(ValueError):
     pass
 
 
+class _WindowsEnvironment(dict[str, str | None]):
+    """Case-insensitive lookup while retaining the documented source spelling."""
+
+    def get(self, key: str, default: str | None = None) -> str | None:
+        value = super().get(key, None)
+        if value is not None or key in self:
+            return value
+        normalized = key.casefold()
+        for candidate, candidate_value in self.items():
+            if candidate.casefold() == normalized:
+                return candidate_value
+        return default
+
+
 def _source_name(path: Path) -> str:
     return str(path)
 
@@ -138,6 +152,7 @@ def _resolve_document(
     *,
     ambient: Mapping[str, str],
     source_kind: Literal["config-dotenv", "cli-dotenv"],
+    platform: str,
 ) -> tuple[
     dict[str, str | None],
     dict[str, EnvironmentOrigin],
@@ -145,12 +160,15 @@ def _resolve_document(
     dict[str, frozenset[str]],
     tuple[EnvironmentDiagnostic, ...],
 ]:
-    context: dict[str, str | None] = dict(ambient)
+    context: dict[str, str | None]
+    if platform == "win32":
+        context = _WindowsEnvironment(ambient)
+    else:
+        context = dict(ambient)
     values: dict[str, str | None] = {}
     origins: dict[str, EnvironmentOrigin] = {}
     declared: set[str] = set()
     unresolved: dict[str, frozenset[str]] = {}
-    diagnostics: list[EnvironmentDiagnostic] = []
     for binding in document:
         if binding.key is None:
             continue
@@ -174,16 +192,16 @@ def _resolve_document(
         declared.add(binding.key)
         if missing:
             unresolved[binding.key] = missing
-            diagnostics.extend(
-                EnvironmentDiagnostic(
-                    "unresolved-reference",
-                    binding.key,
-                    _source_name(document.path),
-                    binding.line,
-                )
-                for _ in missing
-            )
-    return values, origins, declared, unresolved, tuple(diagnostics)
+        else:
+            unresolved.pop(binding.key, None)
+    diagnostics = tuple(
+        EnvironmentDiagnostic(
+            "unresolved-reference", key, _source_name(document.path), origins[key].line
+        )
+        for key, names in unresolved.items()
+        for _ in names
+    )
+    return values, origins, declared, unresolved, diagnostics
 
 
 def _check_windows_duplicates(
@@ -202,6 +220,22 @@ def _check_windows_duplicates(
         seen[normalized] = name
 
 
+def _check_windows_names(
+    names: set[str] | frozenset[str] | list[str], *, label: str, platform: str
+) -> None:
+    if platform != "win32":
+        return
+    seen: dict[str, str] = {}
+    for name in names:
+        normalized = name.casefold()
+        previous = seen.get(normalized)
+        if previous is not None and previous != name:
+            raise ContainerPolicyError(
+                f"{label} contains duplicate Windows environment name '{previous}' and '{name}'."
+            )
+        seen[normalized] = name
+
+
 def _merge_values(
     destination: dict[str, str],
     origins: dict[str, EnvironmentOrigin],
@@ -209,10 +243,25 @@ def _merge_values(
     values: Mapping[str, str | None],
     value_origins: Mapping[str, EnvironmentOrigin],
     value_unresolved: Mapping[str, frozenset[str]],
+    *,
+    platform: str,
 ) -> None:
     for key, value in values.items():
         if value is None:
             continue
+        if platform == "win32":
+            previous = next(
+                (
+                    candidate
+                    for candidate in destination
+                    if candidate.casefold() == key.casefold()
+                ),
+                None,
+            )
+            if previous is not None and previous != key:
+                destination.pop(previous)
+                origins.pop(previous, None)
+                unresolved.pop(previous, None)
         destination[key] = value
         origins[key] = value_origins[key]
         if key in value_unresolved:
@@ -226,10 +275,18 @@ def _allowed_ambient(
     *,
     policy: ResolutionPolicy,
     eligible_names: set[str],
+    platform: str,
 ) -> dict[str, str]:
     if policy.interpolation_scope is NameScope.ALL:
         return dict(launch)
     if policy.interpolation_scope is NameScope.CONTAINER_ELIGIBLE:
+        if platform == "win32":
+            normalized = {name.casefold() for name in eligible_names}
+            return {
+                key: value
+                for key, value in launch.items()
+                if key.casefold() in normalized
+            }
         return {key: value for key, value in launch.items() if key in eligible_names}
     return {}
 
@@ -258,6 +315,17 @@ def resolve_environment(
         documents.append((parse_dotenv_document(plan.config_dotenv), "config-dotenv"))
     if plan.cli_dotenv is not None:
         documents.append((parse_dotenv_document(plan.cli_dotenv), "cli-dotenv"))
+    _check_windows_names(
+        list(plan.explicit_names),
+        label="explicit environment selection",
+        platform=platform,
+    )
+    for document, _ in documents:
+        _check_windows_names(
+            [binding.key for binding in document if binding.key is not None],
+            label="dotenv document",
+            platform=platform,
+        )
 
     eligible_names = set(plan.explicit_names)
     eligible_names.update(plan.config_mapping)
@@ -271,7 +339,10 @@ def resolve_environment(
         eligible_names.update(APPLICATION_COMPATIBILITY_KEYS)
 
     ambient = _allowed_ambient(
-        plan.launch_environment, policy=policy, eligible_names=eligible_names
+        plan.launch_environment,
+        policy=policy,
+        eligible_names=eligible_names,
+        platform=platform,
     )
     final: dict[str, str] = {}
     origins: dict[str, EnvironmentOrigin] = {}
@@ -288,9 +359,17 @@ def resolve_environment(
             document_declared,
             document_unresolved,
             document_diagnostics,
-        ) = _resolve_document(document, ambient=ambient, source_kind=source_kind)
+        ) = _resolve_document(
+            document, ambient=ambient, source_kind=source_kind, platform=platform
+        )
         _merge_values(
-            final, origins, unresolved, values, document_origins, document_unresolved
+            final,
+            origins,
+            unresolved,
+            values,
+            document_origins,
+            document_unresolved,
+            platform=platform,
         )
         declared.update(document_declared)
         diagnostics.extend(document_diagnostics)
@@ -303,7 +382,15 @@ def resolve_environment(
         )
         for key in mapping_values
     }
-    _merge_values(final, origins, unresolved, mapping_values, mapping_origins, {})
+    _merge_values(
+        final,
+        origins,
+        unresolved,
+        mapping_values,
+        mapping_origins,
+        {},
+        platform=platform,
+    )
     declared.update(mapping_values)
 
     if plan.auth_path is not None:
@@ -320,6 +407,7 @@ def resolve_environment(
                 )
             },
             {},
+            platform=platform,
         )
         declared.add("AUTH_MODULE_PATH")
 
@@ -332,9 +420,17 @@ def resolve_environment(
             document_declared,
             document_unresolved,
             document_diagnostics,
-        ) = _resolve_document(document, ambient=ambient, source_kind=source_kind)
+        ) = _resolve_document(
+            document, ambient=ambient, source_kind=source_kind, platform=platform
+        )
         _merge_values(
-            final, origins, unresolved, values, document_origins, document_unresolved
+            final,
+            origins,
+            unresolved,
+            values,
+            document_origins,
+            document_unresolved,
+            platform=platform,
         )
         declared.update(document_declared)
         diagnostics.extend(document_diagnostics)
@@ -342,11 +438,12 @@ def resolve_environment(
     if policy.assignment_scope is NameScope.ALL:
         launch_values = dict(plan.launch_environment)
     elif policy.assignment_scope is NameScope.CONTAINER_ELIGIBLE:
-        launch_values = {
-            key: value
-            for key, value in plan.launch_environment.items()
-            if key in eligible_names
-        }
+        launch_values = _allowed_ambient(
+            plan.launch_environment,
+            policy=policy,
+            eligible_names=eligible_names,
+            platform=platform,
+        )
     else:
         launch_values = {}
     _merge_values(
@@ -356,6 +453,7 @@ def resolve_environment(
         launch_values,
         {key: EnvironmentOrigin("launch", "launch") for key in launch_values},
         {},
+        platform=platform,
     )
 
     for assignment in plan.command_assignments:
@@ -374,6 +472,7 @@ def resolve_environment(
                 for key in assignment.values
             },
             {},
+            platform=platform,
         )
 
     if policy.unresolved == "error":
