@@ -435,6 +435,13 @@ def test_cli_docker_smoke_asserts_the_canonical_candidate_filename() -> None:
     assert 'dockerfile.index("agentseek-api-0.3.0.whl[embedded]")' not in text
 
 
+def test_cli_docker_smoke_launches_from_the_generated_project() -> None:
+    text = CLI_DOCKER_SCRIPT.read_text(encoding="utf-8")
+
+    assert 'cd "$PROJECT_DIR"' in text
+    assert 'uv run --project "$ROOT_DIR" agentseek-api up' in text
+
+
 def test_cli_docker_failure_tail_is_bounded_and_redacts_application_values(
     tmp_path: Path,
 ) -> None:

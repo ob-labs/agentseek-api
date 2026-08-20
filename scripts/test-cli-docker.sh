@@ -313,11 +313,14 @@ if [[ -n "$EXISTING_CONTAINER" ]]; then
   exit 1
 fi
 CONTAINER_OWNED=1
-if ! uv run agentseek-api up \
-  --config "$PROJECT_DIR/launch.json" \
-  --image "$IMAGE_TAG" \
-  --port 8123 \
-  --recreate >"$TMP_DIR/up.log" 2>&1; then
+if ! (
+  cd "$PROJECT_DIR"
+  uv run --project "$ROOT_DIR" agentseek-api up \
+    --config launch.json \
+    --image "$IMAGE_TAG" \
+    --port 8123 \
+    --recreate
+) >"$TMP_DIR/up.log" 2>&1; then
   print_up_log
   print_logs
   exit 1
