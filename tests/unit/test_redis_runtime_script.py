@@ -1,6 +1,17 @@
 from pathlib import Path
 
 
+def test_redis_runtime_builds_image_from_exact_candidate_wheel() -> None:
+    script = Path("scripts/test-redis-runtime.sh").read_text()
+
+    assert "uv run agentseek-api build" not in script
+    assert 'uv build --wheel --out-dir "$CANDIDATE_DIR"' in script
+    assert "agentseek_api-0.3.0-*.whl" in script
+    assert "candidate_runtime_artifact" in script
+    assert "runtime_artifact=artifact" in script
+    assert 'rm -rf -- "$CANDIDATE_DIR"' in script
+
+
 def test_redis_runtime_runs_live_queue_ownership_tests() -> None:
     script = Path("scripts/test-redis-runtime.sh").read_text()
 
@@ -56,7 +67,9 @@ def test_redis_runtime_orders_probes_with_only_required_worker_restarts() -> Non
     assert "print_logs >&2" in script
 
 
-def test_redis_runtime_logs_concurrency_suite_timing_without_polluting_probe_json() -> None:
+def test_redis_runtime_logs_concurrency_suite_timing_without_polluting_probe_json() -> (
+    None
+):
     script = Path("scripts/test-redis-runtime.sh").read_text()
 
     assert "WORKER_CONCURRENCY_SUITE_STARTED_SECONDS=$SECONDS" in script

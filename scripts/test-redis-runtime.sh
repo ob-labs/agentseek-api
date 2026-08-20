@@ -19,6 +19,7 @@ OCEANBASE_DOCKER_MODE="${OCEANBASE_DOCKER_MODE:-mini}"
 STATE_DIR="${STATE_DIR:-$ROOT_DIR/.tmp/redis-runtime}"
 RESUME_STATE_FILE="$STATE_DIR/resume-state.json"
 SHUTDOWN_STATE_FILE=""
+CANDIDATE_DIR=""
 REDIS_WORKER_LOCK_KEY="${REDIS_WORKER_LOCK_KEY:-agentseek:worker:active}"
 WORKER_CONCURRENT_JOBS="${WORKER_CONCURRENT_JOBS:-10}"
 
@@ -33,6 +34,9 @@ cleanup() {
   docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
   if [[ -n "$SHUTDOWN_STATE_FILE" ]]; then
     rm -f "$SHUTDOWN_STATE_FILE" || true
+  fi
+  if [[ -n "$CANDIDATE_DIR" && -d "$CANDIDATE_DIR" ]]; then
+    rm -rf -- "$CANDIDATE_DIR" || true
   fi
   exit "$status"
 }
@@ -343,7 +347,43 @@ docker network create "$NETWORK_NAME" >/dev/null
 mkdir -p "$STATE_DIR"
 SHUTDOWN_STATE_FILE="$(mktemp "$STATE_DIR/shutdown-state.XXXXXX")"
 
-uv run agentseek-api build --config "$CONFIG_PATH" -t "$IMAGE_TAG"
+CANDIDATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentseek-redis-candidate.XXXXXX")"
+if ! uv build --wheel --out-dir "$CANDIDATE_DIR"; then
+  echo "Candidate runtime wheel build failed." >&2
+  exit 1
+fi
+CANDIDATE_WHEELS=("$CANDIDATE_DIR"/agentseek_api-0.3.0-*.whl)
+if [[ "${#CANDIDATE_WHEELS[@]}" -ne 1 || ! -f "${CANDIDATE_WHEELS[0]}" ]]; then
+  echo "Candidate runtime wheel selection failed." >&2
+  exit 1
+fi
+CANDIDATE_WHEEL="${CANDIDATE_WHEELS[0]}"
+
+uv run python - "$CONFIG_PATH" "$IMAGE_TAG" "$CANDIDATE_WHEEL" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import sys
+from pathlib import Path
+
+from agentseek_api.cli import main
+from agentseek_api.container_build import candidate_runtime_artifact
+
+config = Path(sys.argv[1])
+image = sys.argv[2]
+wheel = Path(sys.argv[3])
+artifact = candidate_runtime_artifact(
+    wheel,
+    hashlib.sha256(wheel.read_bytes()).hexdigest(),
+)
+raise SystemExit(
+    main(
+        ("build", "--config", str(config), "-t", image),
+        cwd=Path.cwd(),
+        runtime_artifact=artifact,
+    )
+)
+PY
 
 start_backend
 
