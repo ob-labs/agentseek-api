@@ -31,6 +31,7 @@ from agentseek_api.container_build import (
     materialize_build_bundle,
     plan_container_image,
     plan_generated_up_auth,
+    render_build_dockerfile,
 )
 from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.docker_runtime import (
@@ -40,10 +41,12 @@ from agentseek_api.docker_runtime import (
     SubprocessTransport,
     build_compose_invocation,
     build_docker_control_invocation,
+    build_image_invocation,
     build_docker_query_invocation,
     build_docker_run_invocation,
     encode_compose_environment,
     require_supported_compose,
+    require_supported_buildx,
 )
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
 from agentseek_api.environment import (
@@ -97,7 +100,6 @@ __all__ = [
     "main",
     "register_subcommands",
     "run_namespace",
-    "write_dockerfile",
 ]
 
 _CONTAINER_ENV_PREFIXES = (
@@ -940,98 +942,6 @@ def _containerize_symbol_reference(reference: str, *, cwd: Path) -> str:
     return reference
 
 
-def _resolve_dependency_path(dependency: str, *, config_path: Path) -> Path:
-    dependency_path = Path(dependency).expanduser()
-    if dependency_path.is_absolute():
-        return dependency_path.resolve()
-    return (config_path.parent / dependency_path).resolve()
-
-
-def _is_local_dependency(dependency: str) -> bool:
-    return (
-        dependency == "."
-        or dependency.startswith(".")
-        or "/" in dependency
-        or "\\" in dependency
-    )
-
-
-def _dependency_install_command(*, dependency_path: Path, cwd: Path) -> str | None:
-    container_path = _container_config_path(config_path=dependency_path, cwd=cwd)
-    if (dependency_path / "pyproject.toml").exists() or (
-        dependency_path / "setup.py"
-    ).exists():
-        return f"pip install --no-cache-dir {container_path}"
-    if (dependency_path / "requirements.txt").exists():
-        return f"pip install --no-cache-dir -r {container_path}/requirements.txt"
-    return None
-
-
-def _find_installable_project_root(*, start: Path, cwd: Path) -> Path:
-    start_resolved = start.resolve()
-    cwd_resolved = cwd.resolve()
-    for candidate in [start_resolved, *start_resolved.parents]:
-        if candidate == cwd_resolved or cwd_resolved in candidate.parents:
-            if (
-                (candidate / "pyproject.toml").exists()
-                or (candidate / "setup.py").exists()
-                or (candidate / "requirements.txt").exists()
-            ):
-                return candidate
-        if candidate == cwd_resolved:
-            break
-    return start_resolved
-
-
-def _root_install_command(*, project_root: Path, cwd: Path) -> str | None:
-    container_path = _container_config_path(config_path=project_root, cwd=cwd)
-    if (project_root / "pyproject.toml").exists() or (
-        project_root / "setup.py"
-    ).exists():
-        return f"pip install --no-cache-dir {container_path}"
-    if (project_root / "requirements.txt").exists():
-        return f"pip install --no-cache-dir -r {container_path}/requirements.txt"
-    return None
-
-
-def _docker_dependency_plan(
-    *, config: CliConfig, config_path: Path, cwd: Path
-) -> tuple[list[str], list[str]]:
-    pythonpath_entries = ["/deps/agent"]
-    install_commands: list[str] = []
-    seen_pythonpath: set[str] = set()
-    seen_install_commands: set[str] = set()
-
-    for dependency in config.dependencies:
-        if _is_local_dependency(dependency):
-            dependency_path = _resolve_dependency_path(
-                dependency, config_path=config_path
-            )
-            container_path = _container_config_path(
-                config_path=dependency_path, cwd=cwd
-            )
-            if container_path not in seen_pythonpath:
-                pythonpath_entries.append(container_path)
-                seen_pythonpath.add(container_path)
-            install_command = _dependency_install_command(
-                dependency_path=dependency_path, cwd=cwd
-            )
-            if (
-                install_command is not None
-                and install_command not in seen_install_commands
-            ):
-                install_commands.append(install_command)
-                seen_install_commands.add(install_command)
-            continue
-
-        install_command = f"pip install --no-cache-dir {dependency}"
-        if install_command not in seen_install_commands:
-            install_commands.append(install_command)
-            seen_install_commands.add(install_command)
-
-    return pythonpath_entries, install_commands
-
-
 def _ambient_container_env() -> dict[str, str]:
     return {
         key: value
@@ -1093,80 +1003,6 @@ def _validate_base_image(base_image: str) -> None:
     )
 
 
-def render_dockerfile(
-    *, config_path: Path, cwd: Path, base_image_override: str | None = None
-) -> str:
-    config = _load_cli_config(config_path)
-    project_root = _find_installable_project_root(start=config_path.parent, cwd=cwd)
-    container_config = _container_config_path(config_path=config_path, cwd=cwd)
-    pythonpath_entries, dependency_install_commands = _docker_dependency_plan(
-        config=config,
-        config_path=config_path,
-        cwd=cwd,
-    )
-    root_install_command = _root_install_command(project_root=project_root, cwd=cwd)
-    if (
-        root_install_command is not None
-        and root_install_command not in dependency_install_commands
-    ):
-        dependency_install_commands.append(root_install_command)
-    base_image = (
-        base_image_override
-        or config.base_image
-        or _default_base_image(
-            python_version=config.python_version,
-            image_distro=config.image_distro,
-        )
-    )
-    _validate_base_image(base_image)
-    pip_install_prefix = ""
-    if config.pip_config_file is not None:
-        pip_config_path = _container_config_path(
-            config_path=config.pip_config_file, cwd=cwd
-        )
-        pip_install_prefix = f"PIP_CONFIG_FILE={pip_config_path} "
-    return "\n".join(
-        [
-            f"FROM {base_image}",
-            "",
-            "ENV PYTHONDONTWRITEBYTECODE=1",
-            "ENV PYTHONUNBUFFERED=1",
-            f"ENV PYTHONPATH={':'.join(pythonpath_entries)}",
-            "",
-            "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*",
-            "",
-            "WORKDIR /deps/agent",
-            "COPY . /deps/agent",
-            *[
-                f"RUN {pip_install_prefix}{command}"
-                for command in dependency_install_commands
-            ],
-            *config.dockerfile_lines,
-            f"ENV AGENTSEEK_GRAPHS={container_config}",
-            f"EXPOSE {DEFAULT_API_PORT}",
-            f'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "{DEFAULT_API_PORT}"]',
-            "",
-        ]
-    )
-
-
-def write_dockerfile(
-    *,
-    config_path: Path,
-    save_path: Path,
-    cwd: Path,
-    base_image_override: str | None = None,
-) -> Path:
-    save_path.parent.mkdir(parents=True, exist_ok=True)
-    save_path.write_text(
-        render_dockerfile(
-            config_path=config_path, cwd=cwd, base_image_override=base_image_override
-        ),
-        encoding="utf-8",
-    )
-    return save_path
-
-
 def _execute_dockerfile_command(
     args: argparse.Namespace,
     *,
@@ -1179,7 +1015,14 @@ def _execute_dockerfile_command(
         raise CliError(
             f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
         )
-    _load_cli_config(config_path)
+    config = _load_cli_config(config_path)
+    _validate_base_image(
+        config.base_image
+        or _default_base_image(
+            python_version=config.python_version,
+            image_distro=config.image_distro,
+        )
+    )
     save_path = _resolve_path(args.save_path, cwd=cwd)
     plan = plan_container_image(
         config_path=config_path,
@@ -1187,9 +1030,7 @@ def _execute_dockerfile_command(
         runtime_artifact=runtime_artifact,
         invocation_cwd=cwd,
     )
-    dockerfile_bytes = render_dockerfile(config_path=config_path, cwd=cwd).encode(
-        "utf-8"
-    )
+    dockerfile_bytes = render_build_dockerfile(plan)
     bundle = materialize_build_bundle(
         plan,
         dockerfile_bytes=dockerfile_bytes,
@@ -1211,22 +1052,21 @@ def _execute_build_command(
         raise CliError(
             f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
         )
-    _load_cli_config(config_path)
+    config = _load_cli_config(config_path)
+    _validate_base_image(
+        config.base_image
+        or _default_base_image(
+            python_version=config.python_version,
+            image_distro=config.image_distro,
+        )
+    )
     build_plan = plan_container_image(
         config_path=config_path,
         dotenv_paths=_planner_dotenv_paths(args.env_file, cwd=cwd),
         runtime_artifact=runtime_artifact,
         invocation_cwd=cwd,
     )
-    dockerfile_bytes = render_dockerfile(config_path=config_path, cwd=cwd).encode(
-        "utf-8"
-    )
-    command = ["docker", "build"]
-    if args.platform:
-        command.extend(["--platform", args.platform])
-    if args.pull:
-        command.append("--pull")
-    command.extend(["-t", args.tag, "-f", "Dockerfile", "-"])
+    dockerfile_bytes = render_build_dockerfile(build_plan)
     environment_plan = build_host_environment_plan(
         config_path=config_path,
         env_file=args.env_file,
@@ -1239,12 +1079,23 @@ def _execute_build_command(
             dockerfile_bytes=dockerfile_bytes,
             output_root=output_root,
         )
-        invocation = build_docker_control_invocation(
-            argv=tuple(command),
+        invocation = build_image_invocation(
+            bundle,
+            plan=build_plan,
             docker_control=docker_control_environment(environment_plan),
-            cwd=cwd,
-            stdin_bytes=bundle.archive_bytes(),
+            tag=args.tag,
+            platform=args.platform,
+            pull=args.pull,
         )
+        try:
+            require_supported_buildx(
+                transport=process_transport,
+                docker_control=docker_control_environment(environment_plan),
+                cwd=cwd,
+                plan=build_plan,
+            )
+        except DockerRuntimeError as exc:
+            raise CliError(str(exc)) from exc
         return process_transport(invocation).returncode
 
 
@@ -1324,6 +1175,15 @@ def _execute_up_command(
                 "Custom-image auth cannot reference a host file; bake the module into the image and use an importable package reference."
             )
     else:
+        config = _load_cli_config(config_path)
+        _validate_base_image(
+            args.base_image
+            or config.base_image
+            or _default_base_image(
+                python_version=config.python_version,
+                image_distro=config.image_distro,
+            )
+        )
         generated_plan = plan_container_image(
             config_path=config_path,
             dotenv_paths=_planner_dotenv_paths(args.env_file, cwd=cwd),
@@ -1337,11 +1197,7 @@ def _execute_up_command(
             application_payload.pop("AUTH_MODULE_PATH", None)
         else:
             application_payload["AUTH_MODULE_PATH"] = auth_patch.value
-        generated_dockerfile_bytes = render_dockerfile(
-            config_path=config_path,
-            cwd=cwd,
-            base_image_override=args.base_image,
-        ).encode("utf-8")
+        generated_dockerfile_bytes = render_build_dockerfile(generated_plan)
 
     compose_path: Path | None = None
     compose_payload: dict[str, str] = {}
@@ -1372,22 +1228,28 @@ def _execute_up_command(
         assert generated_plan is not None
         assert generated_dockerfile_bytes is not None
         image = f"agentseek-up:{args.port}"
-        build_command = ["docker", "build"]
-        if args.pull:
-            build_command.append("--pull")
-        build_command.extend(["-t", image, "-f", "Dockerfile", "-"])
         with private_directory(prefix="agentseek-build-") as output_root:
             bundle = materialize_build_bundle(
                 generated_plan,
                 dockerfile_bytes=generated_dockerfile_bytes,
                 output_root=output_root,
             )
-            build_invocation = build_docker_control_invocation(
-                argv=tuple(build_command),
+            build_invocation = build_image_invocation(
+                bundle,
+                plan=generated_plan,
                 docker_control=docker_control,
-                cwd=cwd,
-                stdin_bytes=bundle.archive_bytes(),
+                tag=image,
+                pull=args.pull,
             )
+            try:
+                require_supported_buildx(
+                    transport=process_transport,
+                    docker_control=docker_control,
+                    cwd=cwd,
+                    plan=generated_plan,
+                )
+            except DockerRuntimeError as exc:
+                raise CliError(str(exc)) from exc
             build_exit_code = process_transport(build_invocation).returncode
         if build_exit_code != 0:
             return build_exit_code

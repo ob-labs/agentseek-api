@@ -7,6 +7,7 @@ import os
 import tarfile
 import tempfile
 import zipfile
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,7 @@ import agentseek_api.container_build as container_build
 from agentseek_api.container_build import (
     PUBLISHED_RUNTIME_ARTIFACT,
     AuthPayloadPatch,
+    ContainerBuildError,
     FinalAuthSelection,
     InstallActionKind,
     RuntimeArtifactSource,
@@ -26,9 +28,252 @@ from agentseek_api.container_build import (
     materialize_build_bundle,
     plan_container_image,
     plan_generated_up_auth,
+    render_build_dockerfile,
+    validate_dependency_specification,
 )
 from agentseek_api.environment import EnvironmentOrigin
-from tests.container_plan_helpers import make_graph_project
+from tests.container_plan_helpers import (
+    build_plan_fixture,
+    make_graph_project,
+    package_only_build_plan_fixture,
+    read_archive_member,
+)
+
+
+def test_dockerfile_uses_manifest_labels_and_buildkit_pip_secret(
+    tmp_path: Path,
+) -> None:
+    plan = build_plan_fixture(tmp_path)
+    dockerfile = render_build_dockerfile(plan)
+    text = dockerfile.decode("utf-8")
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=dockerfile,
+        output_root=tmp_path / "bundle",
+    )
+    assert "COPY app /deps/agent" in text
+    assert "COPY manifest.v1.json /opt/agentseek/manifest.v1.json" in text
+    assert "COPY runtime-constraints.txt /opt/agentseek/runtime-constraints.txt" in text
+    assert "org.agentseek.environment-contract=preloaded-v1" in text
+    assert "org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json" in text
+    assert "org.agentseek.runtime-distribution=agentseek-api" in text
+    assert "org.agentseek.runtime-version=0.3.0" in text
+    assert "agentseek-api[embedded]==0.3.0" in text
+    assert 'python", "-m", "pip", "check' in text
+    assert "importlib.metadata" in text
+    assert "sysconfig.get_paths" in text
+    assert "--mount=type=secret,id=pip_config,target=/etc/pip.conf" in text
+    assert "pip.conf" not in "\n".join(
+        line for line in text.splitlines() if line.startswith("COPY")
+    )
+    assert "ENTRYPOINT []" in text
+    assert (
+        '"serve", "--environment-mode", "preloaded-v1", "--host", '
+        '"0.0.0.0", "--port", "2024"' in text
+    )
+    assert bundle.dockerfile.read_bytes() == dockerfile
+    assert (
+        next(
+            item.sha256
+            for item in bundle.inventory
+            if item.relative_path == "Dockerfile"
+        )
+        == hashlib.sha256(dockerfile).hexdigest()
+    )
+    assert read_archive_member(bundle.archive_bytes(), "Dockerfile") == dockerfile
+
+
+def test_package_only_plan_does_not_copy_missing_app_directory(
+    tmp_path: Path,
+) -> None:
+    plan = package_only_build_plan_fixture(tmp_path)
+    dockerfile = render_build_dockerfile(plan)
+    text = dockerfile.decode("utf-8")
+
+    assert "COPY app /deps/agent" not in text
+    assert "WORKDIR /deps/agent" in text
+    materialize_build_bundle(
+        plan,
+        dockerfile_bytes=dockerfile,
+        output_root=tmp_path / "package-only-bundle",
+    )
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "https://user:password@example.invalid/pkg.whl",
+        "package @ https://user:password@example.invalid/pkg.whl",
+        "git+https://token@example.invalid/repo.git",
+        "package @ git+https://user%40name:secret@example.invalid/repo.git",
+    ],
+)
+def test_dependency_url_credentials_are_rejected(requirement: str) -> None:
+    with pytest.raises(ContainerBuildError, match="pip_config_file"):
+        validate_dependency_specification(requirement)
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "https://example.invalid/pkg.whl",
+        "package @ https://example.invalid/pkg.whl",
+        "package @ https://example.invalid/pkg.whl#sha256=" + "a" * 64,
+        "package @ https://example.invalid/pkg.whl#sha256="
+        + "B" * 64
+        + "&subdirectory=python/pkg",
+        "ordinary-package[extra]>=1; python_version >= '3.12'",
+        "./local dependency",
+        "../local",
+        "C:\\workspace\\local",
+    ],
+)
+def test_dependency_specification_accepts_v1_inputs(requirement: str) -> None:
+    validate_dependency_specification(requirement)
+
+
+@pytest.mark.parametrize(
+    "requirement",
+    [
+        "http://example.invalid/pkg.whl",
+        "file:///tmp/pkg.whl",
+        "git+file:///tmp/repo",
+        "git+https://example.invalid/repo.git",
+        "ftp://example.invalid/pkg.whl",
+        "ssh://example.invalid/repo",
+        "hg+ssh://example.invalid/repo",
+        "git@example.invalid:repo.git",
+        "custom+scheme://example.invalid/pkg",
+        "https://example.invalid/pkg.whl?token=secret",
+        "https://example.invalid/pkg.whl?%74oken=secret",
+        "https://example.invalid/pkg.whl%3Fauth=secret",
+        "https://example.invalid/pkg.whl#token=secret",
+        "https://example.invalid/pkg.whl#sha256=bad",
+        "https://example.invalid/pkg.whl#sha256=" + "a" * 64 + "&sha256=" + "b" * 64,
+        "https://example.invalid/pkg.whl#subdirectory=../escape",
+        "https://example.invalid/pkg.whl#subdirectory=not/./normalized",
+        "https://example.invalid/pkg.whl#subdirectory=wheel%26token=secret",
+        "https://example.invalid/pkg.whl%23token=secret",
+    ],
+)
+def test_dependency_specification_rejects_non_v1_urls(requirement: str) -> None:
+    with pytest.raises(ContainerBuildError, match="pip_config_file"):
+        validate_dependency_specification(requirement)
+
+
+def test_external_pip_config_is_identity_only_secret_source(tmp_path: Path) -> None:
+    project = make_graph_project(tmp_path)
+    external = tmp_path / "private-pip.conf"
+    external.write_text("password=external-canary\n", encoding="utf-8")
+    config = project / "agentseek.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["pip_config_file"] = str(external)
+    config.write_text(json.dumps(payload), encoding="utf-8")
+
+    plan = plan_container_image(config_path=config)
+
+    assert plan.pip_config_file == external
+    assert plan.pip_config_identity is not None
+    assert external not in (
+        source.source_path for source in plan.selected_sources.values()
+    )
+    assert "external-canary" not in repr(plan)
+
+
+@pytest.mark.parametrize("kind", ["missing", "symlink", "directory", "unreadable"])
+def test_pip_config_requires_readable_regular_nonsymlink_file(
+    tmp_path: Path, kind: str
+) -> None:
+    project = make_graph_project(tmp_path)
+    pip_config = tmp_path / "pip.conf"
+    if kind == "symlink":
+        target = tmp_path / "target.conf"
+        target.write_text("[global]\n", encoding="utf-8")
+        pip_config.symlink_to(target)
+    elif kind == "directory":
+        pip_config.mkdir()
+    elif kind == "unreadable":
+        pip_config.write_text("[global]\n", encoding="utf-8")
+        pip_config.chmod(0)
+    config = project / "agentseek.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["pip_config_file"] = str(pip_config)
+    config.write_text(json.dumps(payload), encoding="utf-8")
+
+    try:
+        with pytest.raises(ContainerBuildError, match="readable regular file"):
+            plan_container_image(config_path=config)
+    finally:
+        if kind == "unreadable":
+            pip_config.chmod(0o600)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFO is POSIX-only")
+def test_pip_config_rejects_special_file_without_opening_it(tmp_path: Path) -> None:
+    project = make_graph_project(tmp_path)
+    pip_config = tmp_path / "pip.conf"
+    os.mkfifo(pip_config)
+    config = project / "agentseek.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["pip_config_file"] = str(pip_config)
+    config.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError, match="readable regular file"):
+        plan_container_image(config_path=config)
+
+
+def test_renderer_preserves_plan_fields_and_authoritative_order(tmp_path: Path) -> None:
+    plan = build_plan_fixture(tmp_path)
+    plan = replace(
+        plan,
+        base_image="python:3.13-slim-bookworm",
+        python_version="3.13",
+        image_distro="bookworm",
+        dockerfile_lines=('RUN ["python", "-c", "print(\'trusted\')"]',),
+    )
+
+    text = render_build_dockerfile(plan).decode("utf-8")
+
+    assert "FROM python:3.13-slim-bookworm" in text
+    assert '# agentseek-python-version="3.13"' in text
+    assert '# agentseek-image-distro="bookworm"' in text
+    user_install = text.index("/deps/agent")
+    custom = text.index("print('trusted')")
+    runtime_install = text.rindex("agentseek-api[embedded]==0.3.0")
+    manifest = text.index("COPY manifest.v1.json")
+    labels = text.index("LABEL org.agentseek.environment-contract")
+    assert user_install < custom < runtime_install < manifest < labels
+
+
+def test_renderer_json_escapes_install_operands_and_candidate_source(
+    tmp_path: Path,
+) -> None:
+    project = make_graph_project(tmp_path)
+    local = project / "local dependency"
+    local.mkdir()
+    (local / "requirements.txt").write_text("httpx>=0.27\n", encoding="utf-8")
+    config = project / "agentseek.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["dependencies"] = [
+        "./local dependency",
+        "package @ https://example.invalid/pkg.whl#sha256=" + "a" * 64,
+    ]
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    wheel = project / "candidate runtime.whl"
+    digest = _write_candidate_wheel(wheel)
+    plan = plan_container_image(
+        config_path=config,
+        runtime_artifact=candidate_runtime_artifact(wheel, digest),
+    )
+
+    text = render_build_dockerfile(plan).decode("utf-8")
+
+    assert '"--requirement", "/deps/agent/local dependency/requirements.txt"' in text
+    assert '"package @ https://example.invalid/pkg.whl#sha256=' in text
+    assert 'COPY ["runtime/candidate runtime.whl", "/opt/agentseek/runtime/' in text
+    assert text.index("candidate runtime.whl") < text.index(
+        "agentseek-api-0.3.0.whl[embedded]"
+    )
 
 
 def test_bundle_excludes_env_and_records_only_selected_regular_files(

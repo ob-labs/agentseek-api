@@ -74,6 +74,21 @@ def main() -> None:
         )
         assert version.stdout.strip() == "1.0.0"
 
+        packaging_version = subprocess.run(
+            [
+                str(python),
+                "-c",
+                (
+                    "import importlib.metadata; "
+                    "print(importlib.metadata.version('packaging'))"
+                ),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert packaging_version.stdout.strip() == "24.0"
+
         cli_env = dict(os.environ)
         cli_env.pop("PYTHONPATH", None)
         cli_env["PORT"] = "not-an-integer"

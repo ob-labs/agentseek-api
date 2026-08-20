@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping
@@ -14,10 +16,12 @@ from types import MappingProxyType
 from typing import Protocol
 
 from agentseek_api.container_policy import select_compose_payload
+from agentseek_api.container_build import ContainerBuildBundle, ContainerBuildPlan
 from agentseek_api.environment import ContainerPolicyError
 
 DEFAULT_CONTROL_QUERY_TIMEOUT_SECONDS = 10.0
 MINIMUM_COMPOSE_VERSION = (2, 24, 0)
+MINIMUM_BUILDX_VERSION = (0, 12, 0)
 IMAGE_COMPATIBILITY_FORMAT = (
     "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]"
 )
@@ -47,6 +51,16 @@ class ProcessInvocation:
             self, "environment", MappingProxyType(dict(self.environment))
         )
         object.__setattr__(self, "cwd", Path(self.cwd))
+
+
+@dataclass(frozen=True, kw_only=True)
+class BuildImageInvocation(ProcessInvocation):
+    stdin_bytes: bytes = field(repr=False)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        if not self.stdin_bytes:
+            raise ContainerPolicyError("Docker image build input must not be empty.")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -212,6 +226,67 @@ def build_docker_query_invocation(
         cwd=cwd,
         stdin_bytes=None,
         timeout_seconds=timeout_seconds,
+    )
+
+
+def _pip_config_identity(status: os.stat_result) -> tuple[int, int, int, int]:
+    return (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns)
+
+
+def validate_pip_config_identity(plan: ContainerBuildPlan) -> None:
+    if plan.pip_config_file is None:
+        return
+    try:
+        status = plan.pip_config_file.lstat()
+    except OSError as exc:
+        raise DockerRuntimeError(
+            "The pip config identity changed before build."
+        ) from exc
+    if (
+        stat.S_ISLNK(status.st_mode)
+        or not stat.S_ISREG(status.st_mode)
+        or plan.pip_config_identity is None
+        or _pip_config_identity(status) != plan.pip_config_identity
+    ):
+        raise DockerRuntimeError("The pip config identity changed before build.")
+
+
+def build_image_invocation(
+    bundle: ContainerBuildBundle,
+    *,
+    plan: ContainerBuildPlan,
+    docker_control: Mapping[str, str],
+    tag: str | None = None,
+    platform: str | None = None,
+    pull: bool = False,
+) -> BuildImageInvocation:
+    """Freeze a Buildx invocation whose only build context is verified tar stdin."""
+
+    archive = bundle.archive_bytes()
+    validate_pip_config_identity(plan)
+    argv = ["docker", "buildx", "build", "--load", "--file", "Dockerfile"]
+    if platform:
+        argv.extend(("--platform", platform))
+    if pull:
+        argv.append("--pull")
+    if tag:
+        argv.extend(("--tag", tag))
+    if plan.pip_config_file is not None:
+        source = str(plan.pip_config_file)
+        argv.extend(("--secret", f"id=pip_config,src={source}"))
+    argv.append("-")
+    immutable_argv = tuple(argv)
+    _validate_argv(immutable_argv)
+    environment = {
+        name: value
+        for name, value in _validated_environment(docker_control).items()
+        if name != "DOCKER_BUILDKIT"
+    }
+    return BuildImageInvocation(
+        argv=immutable_argv,
+        environment=environment,
+        cwd=plan.invocation_cwd,
+        stdin_bytes=archive,
     )
 
 
@@ -394,6 +469,44 @@ def require_buildx_available(result: ProcessResult) -> None:
         raise DockerRuntimeError("Docker Buildx builder is unavailable.")
 
 
+def require_supported_buildx(
+    *,
+    transport: ProcessTransport,
+    docker_control: Mapping[str, str],
+    cwd: Path,
+    plan: ContainerBuildPlan | None = None,
+) -> tuple[int, int, int]:
+    """Require a usable Buildx plugin before any side-effecting build call."""
+
+    version_query = build_docker_query_invocation(
+        argv=("docker", "buildx", "version"),
+        docker_control=docker_control,
+        cwd=cwd,
+    )
+    version_text = parse_buildx_version_result(transport(version_query))
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version_text)
+    if match is None:  # pragma: no cover - parser already enforces this
+        raise DockerRuntimeError(
+            "Docker Buildx version query returned an invalid result."
+        )
+    version = tuple(int(component) for component in match.groups())
+    prerelease = "-" in version_text
+    if version < MINIMUM_BUILDX_VERSION or (
+        version == MINIMUM_BUILDX_VERSION and prerelease
+    ):
+        required = ".".join(str(component) for component in MINIMUM_BUILDX_VERSION)
+        raise DockerRuntimeError(f"Docker Buildx {required} or newer is required.")
+    inspect_query = build_docker_query_invocation(
+        argv=("docker", "buildx", "inspect"),
+        docker_control=docker_control,
+        cwd=cwd,
+    )
+    require_buildx_available(transport(inspect_query))
+    if plan is not None:
+        validate_pip_config_identity(plan)
+    return version
+
+
 def _parse_string_or_argv(value: object) -> tuple[str, ...] | str | None:
     if value is None or isinstance(value, str):
         return value
@@ -431,6 +544,7 @@ def parse_image_compatibility_result(result: ProcessResult) -> DockerImageConfig
 
 
 __all__ = [
+    "BuildImageInvocation",
     "ControlQueryInvocation",
     "DEFAULT_CONTROL_QUERY_TIMEOUT_SECONDS",
     "DockerRunInvocation",
@@ -438,12 +552,14 @@ __all__ = [
     "DockerRuntimeError",
     "LegacyRunnerAdapter",
     "IMAGE_COMPATIBILITY_FORMAT",
+    "MINIMUM_BUILDX_VERSION",
     "MINIMUM_COMPOSE_VERSION",
     "ProcessInvocation",
     "ProcessResult",
     "ProcessTransport",
     "SubprocessTransport",
     "build_docker_control_invocation",
+    "build_image_invocation",
     "build_compose_invocation",
     "build_docker_query_invocation",
     "build_docker_run_invocation",
@@ -452,6 +568,8 @@ __all__ = [
     "parse_compose_version_result",
     "parse_image_compatibility_result",
     "require_buildx_available",
+    "require_supported_buildx",
     "require_supported_compose",
+    "validate_pip_config_identity",
     "validate_environment_name",
 ]

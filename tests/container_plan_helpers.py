@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import io
 import os
 import re
 import subprocess
+import tarfile
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,6 +13,13 @@ from types import MappingProxyType
 from typing import AbstractSet
 
 from agentseek_api.environment import ResolvedEnvironment
+from agentseek_api.container_build import (
+    ContainerBuildBundle,
+    ContainerBuildPlan,
+    materialize_build_bundle,
+    plan_container_image,
+    render_build_dockerfile,
+)
 
 
 def make_graph_project(root: Path) -> Path:
@@ -24,6 +33,54 @@ def make_graph_project(root: Path) -> Path:
         encoding="utf-8",
     )
     return project
+
+
+def build_plan_fixture(root: Path) -> ContainerBuildPlan:
+    project = make_graph_project(root)
+    pip_config = project / "pip.conf"
+    pip_config.write_text(
+        "[global]\nindex-url = https://packages.example.invalid/simple\n",
+        encoding="utf-8",
+    )
+    config = project / "agentseek.json"
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["pip_config_file"] = "./pip.conf"
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    return plan_container_image(config_path=config)
+
+
+def package_only_build_plan_fixture(root: Path) -> ContainerBuildPlan:
+    project = root / "package-only"
+    project.mkdir()
+    config = project / "agentseek.json"
+    config.write_text(
+        json.dumps(
+            {
+                "graphs": {"chat": "installed.graph:graph"},
+                "dependencies": ["installed-package>=1"],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return plan_container_image(config_path=config)
+
+
+def bundle_fixture(root: Path) -> ContainerBuildBundle:
+    plan = build_plan_fixture(root)
+    dockerfile = render_build_dockerfile(plan)
+    return materialize_build_bundle(
+        plan,
+        dockerfile_bytes=dockerfile,
+        output_root=root / "bundle",
+    )
+
+
+def read_archive_member(archive: bytes, name: str) -> bytes:
+    with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as context:
+        member = context.extractfile(name)
+        if member is None:
+            raise KeyError(name)
+        return member.read()
 
 
 @dataclass(frozen=True)

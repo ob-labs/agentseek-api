@@ -4,6 +4,7 @@ import argparse
 import hashlib
 import importlib
 import io
+import json
 import signal
 import tarfile
 import tomllib
@@ -16,6 +17,7 @@ from pydantic import ValidationError
 
 from agentseek_api import __version__
 from agentseek_api.docker_runtime import (
+    BuildImageInvocation,
     ControlQueryInvocation,
     DockerRunInvocation,
     ProcessInvocation,
@@ -135,12 +137,26 @@ class _ProcessCapture:
         self.calls.append(invocation)
         if invocation.argv == ("docker", "compose", "version", "--short"):
             return ProcessResult(returncode=0, stdout=b"2.40.3\n")
+        if invocation.argv == ("docker", "buildx", "version"):
+            return ProcessResult(
+                returncode=0,
+                stdout=b"github.com/docker/buildx v0.14.0 deadbeef\n",
+            )
         return_code = 0
         if invocation.argv[:3] == ("docker", "container", "inspect"):
             return_code = 0 if self.container_exists else 1
         if self.return_codes is not None:
             return_code = self.return_codes.get(invocation.argv, return_code)
         return ProcessResult(returncode=return_code)
+
+
+def _captured_image_build(capture: _ProcessCapture) -> BuildImageInvocation:
+    assert capture.calls is not None
+    return next(
+        invocation
+        for invocation in capture.calls
+        if isinstance(invocation, BuildImageInvocation)
+    )
 
 
 class _EncodingTextStream:
@@ -1277,6 +1293,7 @@ def test_package_exposes_library_and_cli_entrypoints() -> None:
 
     assert project_config["name"] == "agentseek-api"
     assert project_config["scripts"]["agentseek-api"] == "agentseek_api.cli:main"
+    assert "packaging>=24.0" in project_config["dependencies"]
     assert project_config["optional-dependencies"]["embedded"]
     assert any(
         "langchain-oceanbase" in dep
@@ -1375,17 +1392,12 @@ def test_dockerfile_command_writes_langgraph_compatible_runtime_file(
     assert (output_root / "context" / "manifest.v1.json").is_file()
     assert (output_root / "context" / "app" / "chat" / "graph.py").is_file()
     assert "FROM python:3.12-slim" in content
-    assert (
-        "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
-        in content
-    )
     assert "WORKDIR /deps/agent" in content
-    assert "COPY . /deps/agent" in content
-    assert "ENV PYTHONPATH=/deps/agent" in content
-    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" in content
+    assert "COPY app /deps/agent" in content
+    assert "COPY manifest.v1.json /opt/agentseek/manifest.v1.json" in content
+    assert "LABEL org.agentseek.environment-contract=preloaded-v1" in content
     assert (
-        'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]'
-        in content
+        '"serve", "--environment-mode", "preloaded-v1", "--host", "0.0.0.0"' in content
     )
 
 
@@ -1410,9 +1422,10 @@ def test_dockerfile_command_prefers_agentseek_json_without_explicit_flag(
     exit_code = main(["dockerfile", str(dockerfile_path)], cwd=tmp_path)
 
     assert exit_code == 0
-    content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
-    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/agentseek.json" in content
-    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" not in content
+    manifest = json.loads(
+        (dockerfile_path / "context" / "manifest.v1.json").read_text(encoding="utf-8")
+    )
+    assert manifest["graphs"] == {"chat": "chat.graph:graph"}
 
 
 def test_dockerfile_command_honors_base_image_python_and_custom_lines(
@@ -1464,9 +1477,10 @@ version = "0.1.0"
     content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
     assert "FROM python:3.13-slim-bookworm" in content
     assert "RUN echo custom-step" in content
-    assert (
-        "RUN PIP_CONFIG_FILE=/deps/agent/pip.conf pip install --no-cache-dir /deps/agent"
-        in content
+    assert "--mount=type=secret,id=pip_config,target=/etc/pip.conf" in content
+    assert '"/deps/agent"' in content
+    assert "pip.conf" not in "\n".join(
+        line for line in content.splitlines() if line.startswith("COPY")
     )
 
 
@@ -1510,19 +1524,12 @@ version = "0.1.0"
 
     assert exit_code == 0
     content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
+    assert '"/deps/agent/sample_project/local_pkg"' in content
     assert (
-        "ENV PYTHONPATH=/deps/agent:/deps/agent/sample_project:/deps/agent/sample_project/local_pkg:/deps/agent/sample_project/reqs"
-        in content
+        '"--requirement", "/deps/agent/sample_project/reqs/requirements.txt"' in content
     )
-    assert (
-        "RUN pip install --no-cache-dir /deps/agent/sample_project/local_pkg" in content
-    )
-    assert (
-        "RUN pip install --no-cache-dir -r /deps/agent/sample_project/reqs/requirements.txt"
-        in content
-    )
-    assert "RUN pip install --no-cache-dir httpx" in content
-    assert "RUN pip install --no-cache-dir ." not in content
+    assert '"httpx"' in content
+    assert '"."' not in content
 
 
 def test_dockerfile_command_skips_root_install_when_root_is_not_installable(
@@ -1553,8 +1560,8 @@ def test_dockerfile_command_skips_root_install_when_root_is_not_installable(
 
     assert exit_code == 0
     content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
-    assert "ENV PYTHONPATH=/deps/agent:/deps/agent/src" in content
-    assert "RUN pip install --no-cache-dir ." not in content
+    assert "COPY app /deps/agent" in content
+    assert '"/deps/agent/src"' not in content
 
 
 def test_dockerfile_command_uses_manifest_project_root_not_invocation_root(
@@ -1600,8 +1607,8 @@ version = "0.1.0"
 
     assert exit_code == 0
     content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
-    assert "RUN pip install --no-cache-dir /deps/agent/apps/agent" in content
-    assert "RUN pip install --no-cache-dir /deps/agent\n" not in content
+    assert "COPY app /deps/agent" in content
+    assert '"/deps/agent/apps/agent"' not in content
 
 
 def test_dockerfile_command_installs_nearest_ancestor_project_for_nested_manifest(
@@ -1642,11 +1649,11 @@ version = "0.1.0"
 
     assert exit_code == 0
     content = (dockerfile_path / "context" / "Dockerfile").read_text(encoding="utf-8")
-    assert "RUN pip install --no-cache-dir /deps/agent" in content
-    assert (
-        "RUN pip install --no-cache-dir /deps/agent/examples/docker_ci_auth"
-        not in content
+    assert '"/deps/agent"' not in content
+    manifest = json.loads(
+        (dockerfile_path / "context" / "manifest.v1.json").read_text(encoding="utf-8")
     )
+    assert manifest["dependencies"] == ["/deps/agent/examples"]
 
 
 def test_build_command_plans_docker_build_from_generated_dockerfile(
@@ -1672,18 +1679,24 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
 
     assert exit_code == 0
     assert capture.calls is not None
-    invocation = capture.calls[0]
-    assert type(invocation) is ProcessInvocation
+    assert [call.argv for call in capture.calls[:2]] == [
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+    ]
+    invocation = capture.calls[2]
+    assert isinstance(invocation, BuildImageInvocation)
     assert "AGENTSEEK_GRAPHS" not in invocation.environment
     assert invocation.argv == (
         "docker",
+        "buildx",
         "build",
+        "--load",
+        "--file",
+        "Dockerfile",
         "--platform",
         "linux/amd64,linux/arm64",
-        "-t",
+        "--tag",
         "agentseek:test",
-        "-f",
-        "Dockerfile",
         "-",
     )
     assert invocation.stdin_bytes is not None
@@ -1698,17 +1711,67 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
         "app/chat/__init__.py",
         "app/chat/graph.py",
     } <= members
+    assert "COPY app /deps/agent" in generated
+    assert "agentseek-api[embedded]==0.3.0" in generated
+    assert "org.agentseek.environment-contract=preloaded-v1" in generated
     assert (
-        "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
-        in generated
-    )
-    assert "ENV PYTHONPATH=/deps/agent" in generated
-    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" in generated
-    assert (
-        'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]'
-        in generated
+        'CMD ["python", "-m", "agentseek_api.cli", "serve", "--environment-mode", '
+        '"preloaded-v1", "--host", "0.0.0.0", "--port", "2024"]' in generated
     )
     assert not (tmp_path / ".agentseek").exists()
+
+
+def test_build_command_rejects_unavailable_buildx_before_build(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    capture = _ProcessCapture(return_codes={("docker", "buildx", "inspect"): 1})
+    stderr = io.StringIO()
+
+    exit_code = main(
+        ["build", "-t", "agentseek:test"],
+        process_transport=capture,
+        cwd=tmp_path,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert capture.calls is not None
+    assert [call.argv for call in capture.calls] == [
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+    ]
+    assert "builder is unavailable" in stderr.getvalue()
+
+
+def test_build_command_carries_pip_config_only_as_buildkit_secret(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    pip_config = tmp_path / "pip.conf"
+    pip_config.write_text("password=cli-pip-canary\n", encoding="utf-8")
+    payload = json.loads(config.read_text(encoding="utf-8"))
+    payload["pip_config_file"] = "./pip.conf"
+    config.write_text(json.dumps(payload), encoding="utf-8")
+    capture = _ProcessCapture()
+
+    exit_code = main(
+        ["build", "-t", "agentseek:test"],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    build = _captured_image_build(capture)
+    assert build.argv[-3:] == (
+        "--secret",
+        f"id=pip_config,src={pip_config}",
+        "-",
+    )
+    assert "cli-pip-canary" not in " ".join(build.argv)
+    assert b"cli-pip-canary" not in build.stdin_bytes
 
 
 def test_build_excludes_cli_dotenv_even_through_local_dependency_tree(
@@ -1729,7 +1792,7 @@ def test_build_excludes_cli_dotenv_even_through_local_dependency_tree(
 
     assert exit_code == 0
     assert capture.calls is not None
-    archive_bytes = capture.calls[0].stdin_bytes
+    archive_bytes = _captured_image_build(capture).stdin_bytes
     assert archive_bytes is not None
     assert b"cli-dotenv-canary" not in archive_bytes
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
@@ -1763,7 +1826,7 @@ def test_candidate_runtime_injection_changes_copied_build_artifact(
 
     assert exit_code == 0
     assert capture.calls is not None
-    archive_bytes = capture.calls[0].stdin_bytes
+    archive_bytes = _captured_image_build(capture).stdin_bytes
     assert archive_bytes is not None
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
         copied = archive.extractfile(f"runtime/{wheel.name}")
@@ -1805,14 +1868,16 @@ def test_generated_up_uses_final_auth_selection_and_sanitized_build_stdin(
 
     assert exit_code == 0
     assert capture.calls is not None
-    build = capture.calls[0]
+    build = _captured_image_build(capture)
     assert build.argv == (
         "docker",
+        "buildx",
         "build",
-        "-t",
-        "agentseek-up:8123",
-        "-f",
+        "--load",
+        "--file",
         "Dockerfile",
+        "--tag",
+        "agentseek-up:8123",
         "-",
     )
     assert build.stdin_bytes is not None
@@ -2642,23 +2707,29 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0].argv == (
+    assert [call.argv for call in capture.calls[:2]] == [
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+    ]
+    assert capture.calls[2].argv == (
         "docker",
+        "buildx",
         "build",
-        "-t",
-        "agentseek-up:8124",
-        "-f",
+        "--load",
+        "--file",
         "Dockerfile",
+        "--tag",
+        "agentseek-up:8124",
         "-",
     )
-    assert capture.calls[0].stdin_bytes is not None
-    assert capture.calls[1].argv == (
+    assert capture.calls[2].stdin_bytes is not None
+    assert capture.calls[3].argv == (
         "docker",
         "container",
         "inspect",
         "agentseek-up-8124",
     )
-    assert capture.calls[2].argv[:9] == (
+    assert capture.calls[4].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -2669,8 +2740,8 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
         "-p",
         "8124:2024",
     )
-    assert capture.calls[2].argv[-1] == "agentseek-up:8124"
-    for invocation in capture.calls[:2]:
+    assert capture.calls[4].argv[-1] == "agentseek-up:8124"
+    for invocation in capture.calls[:4]:
         assert "METADATA_DB_URL" not in invocation.environment
         assert "postgresql://postgres:postgres@db/agentseek" not in " ".join(
             invocation.argv
@@ -2727,13 +2798,13 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[1].argv == (
+    assert capture.calls[3].argv == (
         "docker",
         "container",
         "inspect",
         "agentseek-up-8123",
     )
-    assert capture.calls[2].argv[:9] == (
+    assert capture.calls[4].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -2744,7 +2815,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
         "-p",
         "8123:2024",
     )
-    assert capture.calls[2].argv[-1] == "agentseek-up:8123"
+    assert capture.calls[4].argv[-1] == "agentseek-up:8123"
     container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/auth.py:backend"
@@ -2863,7 +2934,7 @@ def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> No
 
     assert exit_code == 0
     assert capture.calls is not None
-    archive_bytes = capture.calls[0].stdin_bytes
+    archive_bytes = _captured_image_build(capture).stdin_bytes
     assert archive_bytes is not None
     with tarfile.open(fileobj=io.BytesIO(archive_bytes), mode="r:") as archive:
         dockerfile_file = archive.extractfile("Dockerfile")
@@ -2905,12 +2976,14 @@ def test_up_command_returns_build_failure_without_running_container(
     _write_basic_langgraph_config(tmp_path)
     build_argv = (
         "docker",
+        "buildx",
         "build",
-        "--pull",
-        "-t",
-        "agentseek-up:8125",
-        "-f",
+        "--load",
+        "--file",
         "Dockerfile",
+        "--pull",
+        "--tag",
+        "agentseek-up:8125",
         "-",
     )
     capture = _ProcessCapture(return_codes={build_argv: 9})
@@ -2923,7 +2996,11 @@ def test_up_command_returns_build_failure_without_running_container(
 
     assert exit_code == 9
     assert capture.calls is not None
-    assert [call.argv for call in capture.calls] == [build_argv]
+    assert [call.argv for call in capture.calls] == [
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+        build_argv,
+    ]
 
 
 def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) -> None:

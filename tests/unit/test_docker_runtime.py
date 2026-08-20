@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 from agentseek_api.docker_runtime import (
+    MINIMUM_BUILDX_VERSION,
     MINIMUM_COMPOSE_VERSION,
+    BuildImageInvocation,
     ControlQueryInvocation,
     IMAGE_COMPATIBILITY_FORMAT,
     DockerRuntimeError,
@@ -15,6 +18,7 @@ from agentseek_api.docker_runtime import (
     ProcessInvocation,
     ProcessResult,
     SubprocessTransport,
+    build_image_invocation,
     build_docker_control_invocation,
     build_compose_invocation,
     build_docker_query_invocation,
@@ -24,14 +28,196 @@ from agentseek_api.docker_runtime import (
     parse_compose_version_result,
     parse_image_compatibility_result,
     require_buildx_available,
+    require_supported_buildx,
     require_supported_compose,
+)
+from agentseek_api.container_build import (
+    materialize_build_bundle,
+    render_build_dockerfile,
 )
 from agentseek_api.environment import ContainerPolicyError
 from tests.container_plan_helpers import (
+    build_plan_fixture,
     decode_with_supported_compose,
     docker_compose_available,
     docker_daemon_available,
 )
+
+
+def test_build_image_invocation_uses_stdin_buildx_and_secret(tmp_path: Path) -> None:
+    plan = build_plan_fixture(tmp_path)
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=render_build_dockerfile(plan),
+        output_root=tmp_path / "bundle",
+    )
+    invocation = build_image_invocation(
+        bundle,
+        plan=plan,
+        docker_control={"PATH": "/usr/bin", "DOCKER_BUILDKIT": "0"},
+        tag="agentseek:test",
+        platform="linux/amd64",
+        pull=True,
+    )
+    assert isinstance(invocation, BuildImageInvocation)
+    assert invocation.argv == (
+        "docker",
+        "buildx",
+        "build",
+        "--load",
+        "--file",
+        "Dockerfile",
+        "--platform",
+        "linux/amd64",
+        "--pull",
+        "--tag",
+        "agentseek:test",
+        "--secret",
+        f"id=pip_config,src={plan.pip_config_file}",
+        "-",
+    )
+    assert invocation.environment == {"PATH": "/usr/bin"}
+    assert invocation.stdin_bytes == bundle.archive_bytes()
+    assert b"packages.example.invalid" not in invocation.stdin_bytes
+    assert "packages.example.invalid" not in repr(invocation)
+
+
+def test_dockerfile_and_build_omit_pip_secret_when_not_configured(
+    tmp_path: Path,
+) -> None:
+    plan = replace(build_plan_fixture(tmp_path), pip_config_file=None)
+    dockerfile = render_build_dockerfile(plan)
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=dockerfile,
+        output_root=tmp_path / "bundle-no-pip-secret",
+    )
+    invocation = build_image_invocation(bundle, plan=plan, docker_control={})
+    assert b"type=secret,id=pip_config" not in dockerfile
+    assert "--secret" not in invocation.argv
+    assert "None" not in invocation.argv
+
+
+def test_build_image_invocation_requires_stdin_bytes(tmp_path: Path) -> None:
+    with pytest.raises(TypeError):
+        BuildImageInvocation(argv=("docker",), environment={}, cwd=tmp_path)  # type: ignore[call-arg]
+
+
+def test_require_supported_buildx_uses_two_bounded_queries(tmp_path: Path) -> None:
+    plan = build_plan_fixture(tmp_path)
+    calls: list[ProcessInvocation] = []
+
+    def transport(invocation: ProcessInvocation) -> ProcessResult:
+        calls.append(invocation)
+        if invocation.argv == ("docker", "buildx", "version"):
+            return ProcessResult(
+                returncode=0,
+                stdout=b"github.com/docker/buildx v0.12.0 deadbeef\n",
+            )
+        return ProcessResult(returncode=0)
+
+    assert MINIMUM_BUILDX_VERSION == (0, 12, 0)
+    assert require_supported_buildx(
+        transport=transport,
+        docker_control={"PATH": "/usr/bin"},
+        cwd=tmp_path,
+        plan=plan,
+    ) == (0, 12, 0)
+    assert [call.argv for call in calls] == [
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+    ]
+    assert all(isinstance(call, ControlQueryInvocation) for call in calls)
+    assert all("--bootstrap" not in call.argv for call in calls)
+
+
+@pytest.mark.parametrize(
+    ("version_result", "inspect_result", "match"),
+    [
+        (ProcessResult(returncode=1), ProcessResult(returncode=0), "version query"),
+        (
+            ProcessResult(
+                returncode=0, stdout=b"github.com/docker/buildx v0.11.2 deadbeef\n"
+            ),
+            ProcessResult(returncode=0),
+            "0.12.0 or newer",
+        ),
+        (
+            ProcessResult(
+                returncode=0, stdout=b"github.com/docker/buildx v0.12.0-rc.1 deadbeef\n"
+            ),
+            ProcessResult(returncode=0),
+            "0.12.0 or newer",
+        ),
+        (
+            ProcessResult(
+                returncode=0, stdout=b"github.com/docker/buildx v0.14.0 deadbeef\n"
+            ),
+            ProcessResult(returncode=1),
+            "builder is unavailable",
+        ),
+    ],
+)
+def test_require_supported_buildx_fails_before_build(
+    tmp_path: Path,
+    version_result: ProcessResult,
+    inspect_result: ProcessResult,
+    match: str,
+) -> None:
+    calls: list[ProcessInvocation] = []
+
+    def transport(invocation: ProcessInvocation) -> ProcessResult:
+        calls.append(invocation)
+        return version_result if len(calls) == 1 else inspect_result
+
+    with pytest.raises(DockerRuntimeError, match=match):
+        require_supported_buildx(transport=transport, docker_control={}, cwd=tmp_path)
+    assert all(call.argv[:3] != ("docker", "buildx", "build") for call in calls)
+
+
+def test_pip_config_swap_before_build_invocation_is_rejected(tmp_path: Path) -> None:
+    plan = build_plan_fixture(tmp_path)
+    bundle = materialize_build_bundle(
+        plan,
+        dockerfile_bytes=render_build_dockerfile(plan),
+        output_root=tmp_path / "bundle",
+    )
+    assert plan.pip_config_file is not None
+    replacement = tmp_path / "replacement.conf"
+    replacement.write_text("password=swapped\n", encoding="utf-8")
+    replacement.replace(plan.pip_config_file)
+    with pytest.raises(DockerRuntimeError, match="pip config identity changed"):
+        build_image_invocation(bundle, plan=plan, docker_control={})
+
+
+def test_pip_config_swap_during_buildx_probes_is_rejected(tmp_path: Path) -> None:
+    plan = build_plan_fixture(tmp_path)
+    assert plan.pip_config_file is not None
+    calls: list[ProcessInvocation] = []
+
+    def transport(invocation: ProcessInvocation) -> ProcessResult:
+        calls.append(invocation)
+        if len(calls) == 1:
+            replacement = tmp_path / "replacement.conf"
+            replacement.write_text("password=swapped\n", encoding="utf-8")
+            replacement.replace(plan.pip_config_file)
+            return ProcessResult(
+                returncode=0,
+                stdout=b"github.com/docker/buildx v0.14.0 deadbeef\n",
+            )
+        return ProcessResult(returncode=0)
+
+    with pytest.raises(DockerRuntimeError, match="pip config identity changed"):
+        require_supported_buildx(
+            transport=transport,
+            docker_control={},
+            cwd=tmp_path,
+            plan=plan,
+        )
+    assert [call.argv for call in calls] == [
+        ("docker", "buildx", "version"),
+        ("docker", "buildx", "inspect"),
+    ]
 
 
 SPECIAL_VALUES = {

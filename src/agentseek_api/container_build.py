@@ -20,11 +20,12 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Literal, TypeAlias
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from packaging.requirements import InvalidRequirement, Requirement
 from packaging.version import Version
 
+from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
 from agentseek_api.environment import EnvironmentOrigin
 from agentseek_api.secure_temp import (
@@ -347,6 +348,9 @@ class ContainerBuildPlan:
     project_root_identity: tuple[int, int] = field(repr=False)
     invocation_cwd: Path = field(repr=False)
     excluded_paths: frozenset[Path] = field(default_factory=frozenset, repr=False)
+    pip_config_identity: tuple[int, int, int, int] | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -560,6 +564,40 @@ def _safe_directory(path: Path, *, project_root: Path, purpose: str) -> Path:
             f"The {purpose} source selects excluded VCS metadata."
         )
     return resolved
+
+
+def _pip_config_source(path: Path) -> tuple[Path, tuple[int, int, int, int]]:
+    """Freeze an external secret carrier's identity without reading its contents."""
+
+    try:
+        raw = path.absolute()
+        status = raw.lstat()
+        if stat.S_ISLNK(status.st_mode) or not stat.S_ISREG(status.st_mode):
+            raise ContainerBuildError("The pip config must be a readable regular file.")
+        if os.name != "nt" and status.st_mode & 0o444 == 0:
+            raise ContainerBuildError("The pip config must be a readable regular file.")
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        descriptor = os.open(raw, flags)
+    except ContainerBuildError:
+        raise
+    except OSError as exc:
+        raise ContainerBuildError(
+            "The pip config must be a readable regular file."
+        ) from exc
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or _file_identity(opened) != _file_identity(
+            status
+        ):
+            raise ContainerBuildError(
+                "The pip config identity changed during planning."
+            )
+        identity = _file_identity(opened)
+    finally:
+        os.close(descriptor)
+    return raw.resolve(strict=True), identity
 
 
 def _container_path(relative: Path) -> str:
@@ -1189,31 +1227,125 @@ def _parse_auth(raw: object) -> tuple[AuthPolicyManifestV1 | None, str | None]:
 
 
 def _dependency_is_local(value: str) -> bool:
-    if value.startswith(("https://", "http://")) or " @ https://" in value:
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return True
+    try:
+        Requirement(value)
+    except InvalidRequirement:
+        pass
+    else:
         return False
-    return value == "." or value.startswith(".") or "/" in value or "\\" in value
+    if re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value) or re.match(
+        r"^[^/@\s]+@[^/:\s]+:", value
+    ):
+        return False
+    return (
+        value in {".", ".."}
+        or value.startswith(("./", "../", "/", "~", ".\\", "..\\"))
+        or "/" in value
+        or "\\" in value
+    )
+
+
+def _dependency_error(message: str) -> ContainerBuildError:
+    return ContainerBuildError(
+        f"{message}; use pip_config_file for private dependencies."
+    )
+
+
+def _validate_dependency_fragment(fragment: str) -> None:
+    if not fragment:
+        return
+    seen: set[str] = set()
+    for component in fragment.split("&"):
+        raw_name, separator, raw_value = component.partition("=")
+        if not separator:
+            raise _dependency_error("Dependency URL fragment components are invalid")
+        name = unquote(raw_name)
+        value = unquote(raw_value)
+        if name in seen or any(
+            ord(character) < 0x20 or ord(character) == 0x7F
+            for character in name + value
+        ):
+            raise _dependency_error("Dependency URL fragment components are invalid")
+        if re.search(
+            r"(?i)(?:^|[?&#;/])(?:token|auth|password|passwd|secret|credential|api[_-]?key)=",
+            value,
+        ):
+            raise _dependency_error(
+                "Dependency URL fragment contains credential-like data"
+            )
+        seen.add(name)
+        if name == "sha256":
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", value):
+                raise _dependency_error("Dependency URL sha256 fragment is invalid")
+            continue
+        if name == "subdirectory":
+            normalized = value.replace("\\", "/")
+            path = PurePosixPath(normalized)
+            if (
+                not normalized
+                or normalized.startswith("/")
+                or any(part in {"", ".", ".."} for part in normalized.split("/"))
+                or path.as_posix() != normalized
+            ):
+                raise _dependency_error(
+                    "Dependency URL subdirectory fragment must be normalized and relative"
+                )
+            continue
+        raise _dependency_error("Dependency URL fragment component is not supported")
+
+
+def validate_dependency_specification(value: str) -> None:
+    """Validate the V1 dependency grammar without disclosing the operand."""
+
+    if _dependency_is_local(value):
+        return
+    try:
+        requirement = Requirement(value)
+    except InvalidRequirement:
+        requirement = None
+    candidate = requirement.url if requirement is not None else None
+    if candidate is None and re.match(r"^[A-Za-z][A-Za-z0-9+.-]*:", value):
+        candidate = value
+    if candidate is None:
+        if requirement is not None:
+            return
+        raise ContainerBuildError("A dependency is not valid PEP 508 or HTTPS.")
+
+    decoded_candidate = unquote(candidate)
+    if any(
+        ord(character) < 0x20 or ord(character) == 0x7F
+        for character in decoded_candidate
+    ):
+        raise _dependency_error("Dependency URL contains a control character")
+    try:
+        parsed = urlsplit(candidate)
+        decoded = urlsplit(decoded_candidate)
+        credentials_present = any(
+            part is not None
+            for part in (
+                parsed.username,
+                parsed.password,
+                decoded.username,
+                decoded.password,
+            )
+        )
+    except ValueError as exc:
+        raise _dependency_error("Dependency URL is invalid") from exc
+    if credentials_present:
+        raise _dependency_error("Dependency URLs cannot contain credentials")
+    if parsed.query or decoded.query:
+        raise _dependency_error("Dependency URL query parameters are not permitted")
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise _dependency_error("Dependency URLs must use direct HTTPS artifacts")
+    _validate_dependency_fragment(parsed.fragment)
+    if decoded.fragment != parsed.fragment:
+        _validate_dependency_fragment(decoded.fragment)
 
 
 def _validate_requirement_url(value: str) -> None:
-    candidate = value.split(" @ ", 1)[-1].strip()
-    if candidate.startswith(("http://", "https://")):
-        parsed = urlsplit(candidate)
-        if (
-            parsed.scheme != "https"
-            or parsed.username is not None
-            or parsed.password is not None
-        ):
-            raise ContainerBuildError(
-                "Dependency URLs must use HTTPS without embedded credentials; use pip_config_file."
-            )
-        if parsed.query:
-            raise ContainerBuildError(
-                "Dependency URL query parameters are not permitted; use pip_config_file."
-            )
-        if parsed.fragment and not re.fullmatch(
-            r"sha256=[0-9a-fA-F]{64}", parsed.fragment
-        ):
-            raise ContainerBuildError("Dependency URL fragments are not supported.")
+    validate_dependency_specification(value)
 
 
 def _check_runtime_requirement(text: str, *, location: str) -> None:
@@ -1515,15 +1647,14 @@ def plan_container_image(
         resolved_dotenv.append(path.resolve())
     raw_pip = payload.get("pip_config_file")
     pip_path: Path | None = None
+    pip_identity: tuple[int, int, int, int] | None = None
     if raw_pip is not None:
-        if not isinstance(raw_pip, str):
-            raise ContainerBuildError("pip_config_file must be a string.")
+        if not isinstance(raw_pip, str) or not raw_pip.strip():
+            raise ContainerBuildError("pip_config_file must be a non-empty string.")
         pip_candidate = Path(raw_pip).expanduser()
         if not pip_candidate.is_absolute():
             pip_candidate = reference_base / pip_candidate
-        pip_path = _safe_regular(
-            pip_candidate, project_root=project_root, purpose="pip config"
-        )
+        pip_path, pip_identity = _pip_config_source(pip_candidate)
     candidate_source: Path | None = None
     if runtime_artifact.source is RuntimeArtifactSource.CANDIDATE_WHEEL:
         assert runtime_artifact.candidate_wheel is not None
@@ -1692,7 +1823,17 @@ def plan_container_image(
         isinstance(line, str) for line in raw_lines
     ):
         raise ContainerBuildError("dockerfile_lines must be an array of strings.")
-    base = base_image_override or raw_base or f"python:{raw_python}-slim"
+    if base_image_override or raw_base:
+        base = base_image_override or raw_base
+        assert base is not None
+    elif raw_distro in {"", "debian"}:
+        base = f"python:{raw_python}-slim"
+    elif raw_distro in {"bookworm", "bullseye"}:
+        base = f"python:{raw_python}-slim-{raw_distro}"
+    else:
+        raise ContainerBuildError(
+            "image_distro is unsupported without an explicit base_image."
+        )
     manifest = ContainerRuntimeManifestV1(
         schema_version=1,
         runtime=RuntimeManifestV1(
@@ -1719,6 +1860,7 @@ def plan_container_image(
         project_root_identity=_directory_identity(project_root.lstat()),
         invocation_cwd=resolved_invocation_cwd,
         excluded_paths=excluded,
+        pip_config_identity=pip_identity,
     )
 
 
@@ -1769,6 +1911,167 @@ def plan_generated_up_auth(
     )
     rewritten = f"{_container_path(source.relative_to(plan.project_root))}:{symbol}"
     return replace(plan, selected_sources=selected), AuthPayloadPatch(rewritten)
+
+
+def _docker_exec_run(argv: Sequence[str], *, pip_secret: bool = False) -> str:
+    mount = (
+        "--mount=type=secret,id=pip_config,target=/etc/pip.conf " if pip_secret else ""
+    )
+    return f"RUN {mount}{json.dumps(list(argv), ensure_ascii=False)}"
+
+
+def _pip_install_argv(action: InstallAction) -> tuple[str, ...] | None:
+    base = (
+        "python",
+        "-m",
+        "pip",
+        "install",
+        "--no-cache-dir",
+        "--constraint",
+        "/opt/agentseek/runtime-constraints.txt",
+    )
+    if action.kind is InstallActionKind.PROJECT:
+        return (*base, action.operand)
+    if action.kind is InstallActionKind.REQUIREMENTS:
+        return (*base, "--requirement", action.operand)
+    if action.kind is InstallActionKind.PEP508:
+        return (*base, action.operand)
+    if action.kind is InstallActionKind.SOURCE_ONLY:
+        return None
+    raise ContainerBuildError("The build plan contains an unsupported install action.")
+
+
+def _candidate_destination(plan: ContainerBuildPlan) -> str | None:
+    if plan.runtime_artifact.source is not RuntimeArtifactSource.CANDIDATE_WHEEL:
+        return None
+    candidates = [
+        destination
+        for destination, source in plan.selected_sources.items()
+        if SourceReason.RUNTIME_ARTIFACT in source.reasons
+    ]
+    if len(candidates) != 1 or not candidates[0].startswith("runtime/"):
+        raise ContainerBuildError(
+            "The candidate runtime artifact selection is invalid."
+        )
+    return candidates[0]
+
+
+def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
+    """Render final Dockerfile bytes using only the immutable build plan."""
+
+    if (
+        not plan.base_image
+        or any(character.isspace() for character in plan.base_image)
+        or "\0" in plan.base_image
+    ):
+        raise ContainerBuildError("The build plan base image is invalid.")
+    has_app = any(
+        destination == "app" or destination.startswith("app/")
+        for destination in plan.selected_sources
+    )
+    pip_secret = plan.pip_config_file is not None
+    candidate_source = _candidate_destination(plan)
+    artifact = plan.runtime_artifact
+    manifest_sha256 = hashlib.sha256(plan.manifest.to_json_bytes()).hexdigest()
+
+    lines = [
+        "# syntax=docker/dockerfile:1.7",
+        f"FROM {plan.base_image}",
+        f"# agentseek-python-version={json.dumps(plan.python_version)}",
+        f"# agentseek-image-distro={json.dumps(plan.image_distro)}",
+        "ENV PYTHONDONTWRITEBYTECODE=1",
+        "ENV PYTHONUNBUFFERED=1",
+        "WORKDIR /deps/agent",
+    ]
+    if has_app:
+        lines.append("COPY app /deps/agent")
+    lines.append("COPY runtime-constraints.txt /opt/agentseek/runtime-constraints.txt")
+    if candidate_source is not None:
+        lines.append(
+            "COPY "
+            + json.dumps(
+                [candidate_source, "/opt/agentseek/runtime/agentseek-api-0.3.0.whl"],
+                ensure_ascii=False,
+            )
+        )
+
+    for action in plan.install_actions:
+        argv = _pip_install_argv(action)
+        if argv is not None:
+            lines.append(_docker_exec_run(argv, pip_secret=pip_secret))
+    lines.extend(plan.dockerfile_lines)
+
+    if candidate_source is not None:
+        assert artifact.candidate_sha256 is not None
+        candidate_check = (
+            "import hashlib,pathlib;"
+            "p=pathlib.Path('/opt/agentseek/runtime/agentseek-api-0.3.0.whl');"
+            f"assert hashlib.sha256(p.read_bytes()).hexdigest()=='{artifact.candidate_sha256}'"
+        )
+        lines.append(_docker_exec_run(("python", "-c", candidate_check)))
+        runtime_operand = "/opt/agentseek/runtime/agentseek-api-0.3.0.whl[embedded]"
+    else:
+        runtime_operand = artifact.requirement
+    lines.append(
+        _docker_exec_run(
+            (
+                "python",
+                "-m",
+                "pip",
+                "install",
+                "--no-cache-dir",
+                "--constraint",
+                "/opt/agentseek/runtime-constraints.txt",
+                runtime_operand,
+            ),
+            pip_secret=pip_secret,
+        )
+    )
+    lines.append("COPY manifest.v1.json /opt/agentseek/manifest.v1.json")
+    manifest_check = (
+        "import hashlib,json,pathlib;"
+        "p=pathlib.Path('/opt/agentseek/manifest.v1.json');raw=p.read_bytes();"
+        "doc=json.loads(raw);canonical=(json.dumps(doc,ensure_ascii=False,sort_keys=True,"
+        "separators=(',',':'),allow_nan=False)+'\\n').encode();"
+        f"assert raw==canonical and hashlib.sha256(raw).hexdigest()=='{manifest_sha256}'"
+    )
+    lines.append(_docker_exec_run(("python", "-c", manifest_check)))
+    lines.append(_docker_exec_run(("python", "-m", "pip", "check")))
+    runtime_check = (
+        "import importlib.metadata,pathlib,sys,sysconfig,agentseek_api.cli;"
+        f"assert importlib.metadata.version('agentseek-api')=='{artifact.version}';"
+        "module=pathlib.Path(agentseek_api.cli.__file__).resolve();"
+        "roots={pathlib.Path(value).resolve() for key,value in sysconfig.get_paths().items() "
+        "if key in {'purelib','platlib'}};"
+        "assert roots and any(module.is_relative_to(root) for root in roots);"
+        "assert sys.version_info[:2]>=(3,12)"
+    )
+    lines.append(_docker_exec_run(("python", "-c", runtime_check)))
+    lines.extend(
+        (
+            "LABEL org.agentseek.environment-contract=preloaded-v1",
+            "LABEL org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json",
+            f"LABEL org.agentseek.runtime-distribution={artifact.distribution}",
+            f"LABEL org.agentseek.runtime-version={artifact.version}",
+            "ENTRYPOINT []",
+            "CMD "
+            + json.dumps(
+                [
+                    "python",
+                    "-m",
+                    "agentseek_api.cli",
+                    "serve",
+                    "--environment-mode",
+                    "preloaded-v1",
+                    "--host",
+                    "0.0.0.0",
+                    "--port",
+                    str(DEFAULT_API_PORT),
+                ]
+            ),
+        )
+    )
+    return ("\n".join(lines) + "\n").encode("utf-8")
 
 
 def _write_file(path: Path, data: bytes) -> None:
@@ -2284,4 +2587,6 @@ __all__ = [
     "materialize_build_bundle",
     "plan_container_image",
     "plan_generated_up_auth",
+    "render_build_dockerfile",
+    "validate_dependency_specification",
 ]
