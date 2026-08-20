@@ -262,7 +262,7 @@ agentseek-api <command> [arguments]
 uv run agentseek-api dev
 uv run agentseek-api serve --config ./langgraph.json --port 8080
 uv run agentseek-api worker --config ./langgraph.json
-uv run agentseek-api dockerfile --config ./langgraph.json ./Dockerfile.agentseek
+uv run agentseek-api dockerfile --config ./langgraph.json ./agentseek-build-bundle
 uv run agentseek-api build --config ./langgraph.json -t agentseek-api:dev
 uv run agentseek-api up --config ./langgraph.json --port 8123 --wait
 uv run agentseek-api version
@@ -289,9 +289,17 @@ uv run agentseek-api version
 - `build`
   - 使用 `-t, --tag` 设置镜像 tag
   - 支持 `--platform`、`--pull`、`--no-pull`
+- `dockerfile`
+  - 输出完整的私有构建 bundle 目录，其中包含生成的 `Dockerfile`、净化后的
+    runtime manifest 与选中的项目文件；输出参数必须是新目录，而不是单个
+    Dockerfile 文件路径
 - `up`
   - 支持 `--wait`、`--image`、`--base-image`、`--postgres-uri`、
     `--recreate`、`--no-recreate`
+  - `--pass-env NAME` 显式选择一个已解析的应用变量，通过名称继承方式交给
+    直接 Docker carrier，变量值不会进入 argv
+  - `--compose-pass-env NAME` 显式选择一个已解析的应用变量交给 Compose；
+    配置文件中的 `compose_env` 提供同样的选择能力
 
 部分仿照 LangGraph CLI 的参数会为了命令兼容性被解析，但当对应运行时
 行为还未实现时会被直接拒绝。对于 mock、内存或 tunnel 化的本地工作流，
@@ -371,6 +379,34 @@ Redis 实例同时运行。
 - `http.disable_a2a`：关闭 A2A 端点及 agent-card 发现路由
 - `base_image`、`python_version`、`image_distro`、`pip_config_file`、
   `dockerfile_lines`：Docker 构建自定义字段
+- `build_include`：额外复制到净化构建 bundle 中的受信任普通文件或目录树
+- `compose_env`：允许通过显式 Compose dotenv carrier 的、已完成解析的应用
+  环境变量名称
+
+### 0.3.0 容器迁移
+
+`preloaded-v1` 是不兼容旧行为、失败即关闭的容器边界。宿主机只解析一次
+应用配置。生成的镜像只接收显式选择的运行时 payload；宿主机环境、dotenv
+文件、包仓库凭证和未选择的 Compose 值都不会进入构建上下文或镜像层。
+`--pass-env` 与 `--compose-pass-env` 只应接收可信输入：它们授权变量跨越指定
+运行时边界，并不允许变量进入镜像构建。
+
+`build_include` 同样属于可信输入声明，必须审查每条路径。带凭证的 Python
+仓库配置应使用 `pip_config_file`，CLI 会将其作为 BuildKit pip secret 挂载，
+不会复制到上下文。`dockerfile` 命令现在输出 Docker 实际消费的完整 bundle
+目录，而不是单独的 Dockerfile。
+
+自定义镜像必须提供以下四个精确标签：
+
+- `org.agentseek.environment-contract=preloaded-v1`
+- `org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json`
+- `org.agentseek.runtime-distribution=agentseek-api`
+- `org.agentseek.runtime-version=0.3.0`
+
+manifest、已安装 distribution、entrypoint 与标签必须一致。系统不提供旧镜像
+回退：传给 `up --image` 前必须完成迁移与校验；否则应继续用旧 launcher 配合
+旧镜像。Train A 已达成版本为 API 0.2.3、templates 0.1.3、AgentSeek 0.1.3；
+后续 Train B 的 template/catalog 与 AgentSeek 版本计划为 0.1.4。
 
 CLI 层会尽量容忍 LangGraph 在端点级别使用的配置键，例如 `http` 与
 `api_version`。Store 配置会被 HTTP Store API 以及注入的 LangGraph

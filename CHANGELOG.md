@@ -27,6 +27,20 @@ Notable changes to AgentSeek API are documented in this file.
 - Custom images must publish the `preloaded-v1` environment-contract, runtime
   manifest, distribution, and version labels; older images must keep using the
   older launcher until migrated.
+- `dockerfile` now writes a complete build-bundle directory. Declare only
+  reviewed project paths with `build_include`; credentialed `pip_config_file`
+  input is delivered as a BuildKit secret rather than copied into the bundle.
+- Container application values cross only an explicit runtime boundary:
+  `--pass-env` selects the direct Docker carrier, while `compose_env` and
+  `--compose-pass-env` select the private Compose dotenv carrier. All are
+  trusted-input declarations and none authorize values to enter the build.
+- Custom images must provide the exact `org.agentseek.environment-contract`,
+  `org.agentseek.runtime-manifest`, `org.agentseek.runtime-distribution`, and
+  `org.agentseek.runtime-version` labels and matching manifest/runtime state.
+  There is no legacy-image fallback.
+- Release Train A shipped API 0.2.3, templates 0.1.3, and AgentSeek 0.1.3. The
+  planned dependent Train B template/catalog and AgentSeek follow-ups are
+  0.1.4; those consumer changes remain separate release gates.
 
 ## 0.2.3 - 2026-08-17
 

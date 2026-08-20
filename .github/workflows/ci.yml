@@ -92,6 +92,8 @@ jobs:
           tests/unit/test_runtime_entrypoint.py
           tests/unit/test_process_supervisor.py
           tests/unit/test_sqlite_checkpointer.py
+          tests/unit/test_container_policy.py
+          tests/unit/test_secure_temp.py
           tests/integration/test_cli_runtime_processes.py
           tests/integration/test_metadata_db_config.py
           -q
@@ -130,9 +132,15 @@ jobs:
         run: uv run python scripts/test_cli_embed_serve_smoke.py
 
   cli-docker-runtime:
-    name: CLI Docker Runtime
+    name: CLI Docker Runtime (Compose ${{ matrix.compose-version }})
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compose-version:
+          - runner-current
+          - v2.24.0
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -146,6 +154,18 @@ jobs:
 
       - name: Sync dependencies
         run: uv sync --dev
+
+      - name: Install Compose floor
+        if: matrix.compose-version == 'v2.24.0'
+        uses: docker/setup-compose-action@2fe291b7677a45ee1269ec56a42604c143505e7e # v1
+        with:
+          version: v2.24.0
+
+      - name: Record Compose version
+        run: docker compose version --short
+
+      - name: Container environment boundary
+        run: uv run python scripts/test_container_env_boundary.py
 
       - name: CLI Docker smoke
         run: make test-cli-docker
