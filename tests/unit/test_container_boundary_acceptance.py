@@ -442,6 +442,12 @@ def test_cli_docker_smoke_launches_from_the_generated_project() -> None:
     assert 'uv run --project "$ROOT_DIR" agentseek-api up' in text
 
 
+def test_cli_docker_smoke_selects_the_baked_custom_auth_module() -> None:
+    text = CLI_DOCKER_SCRIPT.read_text(encoding="utf-8")
+
+    assert '"auth": {"path": "auth_backend:HeaderAuthBackend"}' in text
+
+
 def test_cli_docker_failure_tail_is_bounded_and_redacts_application_values(
     tmp_path: Path,
 ) -> None:

@@ -162,6 +162,7 @@ cat >"$PROJECT_DIR/launch.json" <<'JSON'
 {
   "dependencies": [],
   "graphs": {"external_hello": "./graph.py:build_graph"},
+  "auth": {"path": "auth_backend:HeaderAuthBackend"},
   "env": "application.env"
 }
 JSON
