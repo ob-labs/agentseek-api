@@ -21,6 +21,7 @@ from agentseek_api.container_policy import (
     ContainerSelection,
     docker_control_environment,
     select_application_payload,
+    select_compose_payload,
 )
 from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.docker_runtime import (
@@ -28,9 +29,12 @@ from agentseek_api.docker_runtime import (
     LegacyRunnerAdapter,
     ProcessTransport,
     SubprocessTransport,
+    build_compose_invocation,
     build_docker_control_invocation,
     build_docker_query_invocation,
     build_docker_run_invocation,
+    encode_compose_environment,
+    require_supported_compose,
 )
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
 from agentseek_api.environment import (
@@ -45,6 +49,11 @@ from agentseek_api.process_supervisor import (
     ForwardingSignalGuard,
     ProcessSupervisionError,
     _ForwardedSignal,
+)
+from agentseek_api.secure_temp import (
+    SecureArtifactError,
+    private_artifact,
+    sweep_expired_artifacts,
 )
 
 DEFAULT_CLI_NAME = "agentseek-api"
@@ -1238,6 +1247,32 @@ def _execute_up_command(
     application_payload = _resolve_application_container_payload(
         environment_plan, selection=selection, cwd=cwd
     )
+
+    compose_path: Path | None = None
+    compose_payload: dict[str, str] = {}
+    encoded_compose: bytes | None = None
+    if args.docker_compose:
+        compose_path = _resolve_path(args.docker_compose, cwd=cwd)
+        if not compose_path.exists():
+            raise CliError(f"Docker compose file '{compose_path}' does not exist.")
+        compose_payload = dict(
+            select_compose_payload(
+                application_payload=application_payload,
+                selected_names=selection.compose_env,
+                docker_control=docker_control,
+            )
+        )
+        require_supported_compose(
+            transport=process_transport,
+            docker_control=docker_control,
+            cwd=cwd,
+        )
+        sweep_expired_artifacts(
+            prefix="agentseek-compose-",
+            older_than_seconds=24 * 60 * 60,
+        )
+        encoded_compose = encode_compose_environment(compose_payload).encode("utf-8")
+
     if not image:
         image = f"agentseek-up:{args.port}"
         generated_dockerfile = write_dockerfile(
@@ -1256,12 +1291,6 @@ def _execute_up_command(
         build_exit_code = process_transport(build_invocation).returncode
         if build_exit_code != 0:
             return build_exit_code
-
-    compose_path: Path | None = None
-    if args.docker_compose:
-        compose_path = _resolve_path(args.docker_compose, cwd=cwd)
-        if not compose_path.exists():
-            raise CliError(f"Docker compose file '{compose_path}' does not exist.")
 
     container_name = _container_name_for_port(args.port)
     if args.recreate:
@@ -1282,13 +1311,21 @@ def _execute_up_command(
         )
 
     if compose_path is not None:
-        compose_command = ["docker", "compose", "-f", str(compose_path), "up", "-d"]
-        if args.recreate:
-            compose_command.append("--force-recreate")
-        compose_invocation = build_docker_control_invocation(
-            argv=tuple(compose_command), docker_control=docker_control, cwd=cwd
-        )
-        compose_exit_code = process_transport(compose_invocation).returncode
+        assert encoded_compose is not None
+        with private_artifact(
+            prefix="agentseek-compose-",
+            contents=encoded_compose,
+        ) as env_path:
+            compose_invocation = build_compose_invocation(
+                compose_file=compose_path,
+                env_file=env_path,
+                docker_control=docker_control,
+                application_payload=application_payload,
+                selected_names=selection.compose_env,
+                cwd=cwd,
+                recreate=args.recreate,
+            )
+            compose_exit_code = process_transport(compose_invocation).returncode
         if compose_exit_code != 0:
             return compose_exit_code
 
@@ -1472,7 +1509,12 @@ def run_namespace(
                 args, process_transport=docker_transport, cwd=workdir
             )
         raise CliError(f"Unsupported command '{command}'.")
-    except (CliError, ContainerPolicyError, DockerRuntimeError) as exc:
+    except (
+        CliError,
+        ContainerPolicyError,
+        DockerRuntimeError,
+        SecureArtifactError,
+    ) as exc:
         err.write(f"{exc}\n")
         return 2
 

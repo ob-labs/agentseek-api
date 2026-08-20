@@ -13,9 +13,11 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
+from agentseek_api.container_policy import select_compose_payload
 from agentseek_api.environment import ContainerPolicyError
 
 DEFAULT_CONTROL_QUERY_TIMEOUT_SECONDS = 10.0
+MINIMUM_COMPOSE_VERSION = (2, 24, 0)
 IMAGE_COMPATIBILITY_FORMAT = (
     "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]"
 )
@@ -25,6 +27,7 @@ _COMPOSE_VERSION = re.compile(rf"^v?(?P<version>{_SEMANTIC_VERSION})$")
 _BUILDX_VERSION = re.compile(
     rf"^github\.com/docker/buildx v?(?P<version>{_SEMANTIC_VERSION})(?:\s+\S.*)?$"
 )
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 class DockerRuntimeError(RuntimeError):
@@ -212,6 +215,100 @@ def build_docker_query_invocation(
     )
 
 
+def validate_environment_name(name: str) -> None:
+    if not _ENVIRONMENT_NAME.fullmatch(name):
+        raise ContainerPolicyError("Compose environment name is invalid.")
+
+
+def encode_compose_environment(values: Mapping[str, str]) -> str:
+    """Encode values with the one supported literal Compose dotenv grammar."""
+
+    lines: list[str] = []
+    for name, value in sorted(values.items()):
+        validate_environment_name(name)
+        if "\x00" in value or any(
+            ord(character) < 0x20 and character not in "\n\r\t" for character in value
+        ):
+            raise DockerRuntimeError(
+                f"Compose value for {name} contains an unsupported control."
+            )
+        literal = (
+            value.replace("\\", "\\\\")
+            .replace('"', '\\"')
+            .replace("$", "$$")
+            .replace("\n", "\\n")
+            .replace("\r", "\\r")
+            .replace("\t", "\\t")
+        )
+        lines.append(f'{name}="{literal}"')
+    return "\n".join(lines) + "\n"
+
+
+def build_compose_invocation(
+    *,
+    compose_file: Path,
+    env_file: Path,
+    docker_control: Mapping[str, str],
+    application_payload: Mapping[str, str],
+    selected_names: frozenset[str],
+    cwd: Path,
+    recreate: bool = False,
+    platform: str = sys.platform,
+) -> ProcessInvocation:
+    """Build an explicit-env-file Compose invocation with no carrier values."""
+
+    select_compose_payload(
+        application_payload=application_payload,
+        selected_names=selected_names,
+        docker_control=docker_control,
+        platform=platform,
+    )
+    argv = [
+        "docker",
+        "compose",
+        "--env-file",
+        str(env_file),
+        "-f",
+        str(compose_file),
+        "up",
+        "-d",
+    ]
+    if recreate:
+        argv.append("--force-recreate")
+    return build_docker_control_invocation(
+        argv=tuple(argv), docker_control=docker_control, cwd=cwd
+    )
+
+
+def require_supported_compose(
+    *,
+    transport: ProcessTransport,
+    docker_control: Mapping[str, str],
+    cwd: Path,
+) -> tuple[int, int, int]:
+    """Reject old or unavailable Compose before private artifacts are created."""
+
+    query = build_docker_query_invocation(
+        argv=("docker", "compose", "version", "--short"),
+        docker_control=docker_control,
+        cwd=cwd,
+    )
+    version_text = parse_compose_version_result(transport(query))
+    match = re.match(r"^(\d+)\.(\d+)\.(\d+)", version_text)
+    if match is None:
+        raise DockerRuntimeError(
+            "Docker Compose version query returned an invalid result."
+        )
+    version = tuple(int(component) for component in match.groups())
+    prerelease = "-" in version_text
+    if version < MINIMUM_COMPOSE_VERSION or (
+        version == MINIMUM_COMPOSE_VERSION and prerelease
+    ):
+        required = ".".join(str(component) for component in MINIMUM_COMPOSE_VERSION)
+        raise DockerRuntimeError(f"Docker Compose {required} or newer is required.")
+    return version
+
+
 @dataclass(frozen=True)
 class SubprocessTransport:
     def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
@@ -341,15 +438,20 @@ __all__ = [
     "DockerRuntimeError",
     "LegacyRunnerAdapter",
     "IMAGE_COMPATIBILITY_FORMAT",
+    "MINIMUM_COMPOSE_VERSION",
     "ProcessInvocation",
     "ProcessResult",
     "ProcessTransport",
     "SubprocessTransport",
     "build_docker_control_invocation",
+    "build_compose_invocation",
     "build_docker_query_invocation",
     "build_docker_run_invocation",
+    "encode_compose_environment",
     "parse_buildx_version_result",
     "parse_compose_version_result",
     "parse_image_compatibility_result",
     "require_buildx_available",
+    "require_supported_compose",
+    "validate_environment_name",
 ]

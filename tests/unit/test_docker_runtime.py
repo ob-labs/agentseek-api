@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from agentseek_api.docker_runtime import (
+    MINIMUM_COMPOSE_VERSION,
     ControlQueryInvocation,
     IMAGE_COMPATIBILITY_FORMAT,
     DockerRuntimeError,
@@ -15,14 +16,209 @@ from agentseek_api.docker_runtime import (
     ProcessResult,
     SubprocessTransport,
     build_docker_control_invocation,
+    build_compose_invocation,
     build_docker_query_invocation,
     build_docker_run_invocation,
+    encode_compose_environment,
     parse_buildx_version_result,
     parse_compose_version_result,
     parse_image_compatibility_result,
     require_buildx_available,
+    require_supported_compose,
 )
 from agentseek_api.environment import ContainerPolicyError
+from tests.container_plan_helpers import (
+    decode_with_supported_compose,
+    docker_compose_available,
+    docker_daemon_available,
+)
+
+
+SPECIAL_VALUES = {
+    "DOLLAR": "${DOCKER_HOST}",
+    "LONE_DOLLAR": "$",
+    "HASH": "value # literal",
+    "EQUALS": "a=b",
+    "QUOTES": "single' double\" slash\\",
+    "TRAILING_SLASH": "trailing\\",
+    "SLASH_QUOTE": 'slash-before-\\"quote',
+    "MULTILINE": "line one\nline two\rline three\tend",
+    "UNICODE": "雪",
+    "EMPTY": "",
+}
+
+
+def test_compose_encoder_uses_one_literal_double_quoted_codec() -> None:
+    encoded = encode_compose_environment(SPECIAL_VALUES)
+
+    assert 'DOLLAR="$${DOCKER_HOST}"' in encoded
+    assert 'LONE_DOLLAR="$$"' in encoded
+    assert 'HASH="value # literal"' in encoded
+    assert 'EQUALS="a=b"' in encoded
+    assert 'TRAILING_SLASH="trailing\\\\"' in encoded
+    assert 'SLASH_QUOTE="slash-before-\\\\\\"quote"' in encoded
+    assert 'MULTILINE="line one\\nline two\\rline three\\tend"' in encoded
+    assert encoded.endswith("\n")
+    assert "line one\nline two" not in encoded
+
+
+@pytest.mark.parametrize(("name", "value"), SPECIAL_VALUES.items())
+def test_compose_encoder_round_trips_config_oracle(
+    name: str, value: str, tmp_path: Path
+) -> None:
+    if not docker_compose_available(cwd=tmp_path):
+        pytest.skip("requires Docker Compose 2.24 or newer")
+    decoded = decode_with_supported_compose(
+        encode_compose_environment({name: value}), tmp_path=tmp_path
+    )
+
+    assert decoded.substitution[name] == value
+    assert decoded.rendered[name] == value.replace("$", "$$")
+
+
+def test_compose_encoder_round_trips_real_container_without_second_interpolation(
+    tmp_path: Path,
+) -> None:
+    if not docker_compose_available(cwd=tmp_path) or not docker_daemon_available(
+        cwd=tmp_path
+    ):
+        pytest.skip("requires a Docker daemon")
+
+    decoded = decode_with_supported_compose(
+        encode_compose_environment(SPECIAL_VALUES),
+        tmp_path=tmp_path,
+        run_service=True,
+    )
+
+    assert dict(decoded.substitution) == SPECIAL_VALUES
+    assert dict(decoded.runtime) == SPECIAL_VALUES
+
+
+@pytest.mark.parametrize("value", ["nul\0value", "control\x01value"])
+def test_compose_encoder_rejects_unrepresentable_values_without_echoing_them(
+    value: str,
+) -> None:
+    with pytest.raises(DockerRuntimeError) as exc_info:
+        encode_compose_environment({"PRIVATE_TOKEN": value})
+
+    assert "PRIVATE_TOKEN" in str(exc_info.value)
+    assert value not in str(exc_info.value)
+
+
+def test_compose_invocation_is_explicit_control_only_and_value_redacted(
+    tmp_path: Path,
+) -> None:
+    env_file = tmp_path / "agentseek-compose-private"
+    compose_file = tmp_path / "compose.yaml"
+
+    invocation = build_compose_invocation(
+        compose_file=compose_file,
+        env_file=env_file,
+        docker_control={"DOCKER_HOST": "unix:///private/docker.sock"},
+        application_payload={"TOKEN": "compose-secret"},
+        selected_names=frozenset({"TOKEN"}),
+        cwd=tmp_path,
+        recreate=True,
+    )
+
+    assert invocation.argv == (
+        "docker",
+        "compose",
+        "--env-file",
+        str(env_file),
+        "-f",
+        str(compose_file),
+        "up",
+        "-d",
+        "--force-recreate",
+    )
+    assert dict(invocation.environment) == {
+        "DOCKER_HOST": "unix:///private/docker.sock"
+    }
+    assert "compose-secret" not in repr(invocation)
+    assert "compose-secret" not in " ".join(invocation.argv)
+
+
+@pytest.mark.parametrize(
+    ("application_payload", "selected_names", "docker_control", "message"),
+    [
+        ({}, frozenset({"MISSING"}), {}, "not present"),
+        (
+            {"DOCKER_HOST": "application"},
+            frozenset({"DOCKER_HOST"}),
+            {"DOCKER_HOST": "control"},
+            "collides",
+        ),
+    ],
+)
+def test_compose_invocation_rejects_missing_names_and_control_collisions(
+    tmp_path: Path,
+    application_payload: dict[str, str],
+    selected_names: frozenset[str],
+    docker_control: dict[str, str],
+    message: str,
+) -> None:
+    with pytest.raises(ContainerPolicyError, match=message):
+        build_compose_invocation(
+            compose_file=tmp_path / "compose.yaml",
+            env_file=tmp_path / "private.env",
+            docker_control=docker_control,
+            application_payload=application_payload,
+            selected_names=selected_names,
+            cwd=tmp_path,
+        )
+
+
+def test_require_supported_compose_uses_bounded_control_only_query(
+    tmp_path: Path,
+) -> None:
+    calls: list[ProcessInvocation] = []
+
+    def transport(invocation: ProcessInvocation) -> ProcessResult:
+        calls.append(invocation)
+        return ProcessResult(returncode=0, stdout=b"v2.24.0\n")
+
+    assert MINIMUM_COMPOSE_VERSION == (2, 24, 0)
+    assert require_supported_compose(
+        transport=transport,
+        docker_control={"PATH": "/usr/bin"},
+        cwd=tmp_path,
+    ) == (2, 24, 0)
+    assert len(calls) == 1
+    query = calls[0]
+    assert isinstance(query, ControlQueryInvocation)
+    assert query.argv == ("docker", "compose", "version", "--short")
+    assert dict(query.environment) == {"PATH": "/usr/bin"}
+    assert query.timeout_seconds > 0
+
+
+def test_require_supported_compose_rejects_old_version_value_free(
+    tmp_path: Path,
+) -> None:
+    def transport(_invocation: ProcessInvocation) -> ProcessResult:
+        return ProcessResult(returncode=0, stdout=b"2.23.3\n")
+
+    with pytest.raises(DockerRuntimeError) as exc_info:
+        require_supported_compose(
+            transport=transport,
+            docker_control={},
+            cwd=tmp_path,
+        )
+
+    assert "2.24.0" in str(exc_info.value)
+    assert "2.23.3" not in str(exc_info.value)
+
+
+def test_require_supported_compose_rejects_minimum_prerelease(tmp_path: Path) -> None:
+    def transport(_invocation: ProcessInvocation) -> ProcessResult:
+        return ProcessResult(returncode=0, stdout=b"2.24.0-rc.1\n")
+
+    with pytest.raises(DockerRuntimeError, match="2.24.0 or newer"):
+        require_supported_compose(
+            transport=transport,
+            docker_control={},
+            cwd=tmp_path,
+        )
 
 
 def test_docker_run_uses_names_in_argv_and_values_only_in_carrier(

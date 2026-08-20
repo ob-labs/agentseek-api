@@ -130,6 +130,8 @@ class _ProcessCapture:
         if self.calls is None:
             self.calls = []
         self.calls.append(invocation)
+        if invocation.argv == ("docker", "compose", "version", "--short"):
+            return ProcessResult(returncode=0, stdout=b"2.40.3\n")
         return_code = 0
         if invocation.argv[:3] == ("docker", "container", "inspect"):
             return_code = 0 if self.container_exists else 1
@@ -2122,22 +2124,171 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
     assert capture.calls is not None
     assert capture.calls[0].argv == (
         "docker",
+        "compose",
+        "version",
+        "--short",
+    )
+    assert capture.calls[1].argv == (
+        "docker",
         "rm",
         "-f",
         "agentseek-up-8123",
     )
-    assert capture.calls[1].argv == (
+    compose_invocation = capture.calls[2]
+    assert compose_invocation.argv[:3] == (
         "docker",
         "compose",
+        "--env-file",
+    )
+    assert compose_invocation.argv[4:] == (
         "-f",
         str(compose_path.resolve()),
         "up",
         "-d",
         "--force-recreate",
     )
-    assert capture.calls[2].argv[-1] == "agentseek:test"
-    for invocation in capture.calls[:2]:
-        assert "AGENTSEEK_GRAPHS" not in invocation.environment
+    assert capture.calls[3].argv[-1] == "agentseek:test"
+    for invocation in capture.calls:
+        assert "AGENTSEEK_GRAPHS" not in invocation.environment or isinstance(
+            invocation, DockerRunInvocation
+        )
+
+
+def test_up_compose_uses_selected_literal_artifact_and_ignores_ambient_controls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},'
+        '"env":{"TOKEN":"${HOSTILE} # literal"},'
+        '"compose_env":["TOKEN"]}',
+        encoding="utf-8",
+    )
+    compose_path = tmp_path / "compose.yaml"
+    compose_path.write_text(
+        'services:\n  db:\n    image: busybox\n    environment:\n      TOKEN: "${TOKEN}"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / ".env").write_text("TOKEN=project-dotenv-canary\n", encoding="utf-8")
+    monkeypatch.setenv("COMPOSE_FILE", "hostile.yaml")
+    monkeypatch.setenv("COMPOSE_ENV_FILES", "hostile.env")
+    monkeypatch.setenv("HOSTILE", "ambient-canary")
+
+    class ContentCapture(_ProcessCapture):
+        compose_contents: bytes | None = None
+
+        def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
+            if invocation.argv[:3] == ("docker", "compose", "--env-file"):
+                self.compose_contents = Path(invocation.argv[3]).read_bytes()
+            return super().__call__(invocation)
+
+    capture = ContentCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--docker-compose",
+            str(compose_path),
+            "--recreate",
+        ],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    compose = next(
+        call
+        for call in capture.calls
+        if call.argv[:3] == ("docker", "compose", "--env-file")
+    )
+    artifact = Path(compose.argv[3])
+    assert not artifact.exists()
+    assert "COMPOSE_FILE" not in compose.environment
+    assert "COMPOSE_ENV_FILES" not in compose.environment
+    assert "HOSTILE" not in compose.environment
+    assert "project-dotenv-canary" not in " ".join(compose.argv)
+    assert capture.compose_contents == b'TOKEN="$${HOSTILE} # literal"\n'
+
+
+def test_up_compose_artifact_is_removed_after_compose_failure(tmp_path: Path) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    compose_path = tmp_path / "compose.yaml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    artifact_paths: list[Path] = []
+
+    class FailureCapture(_ProcessCapture):
+        def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
+            result = super().__call__(invocation)
+            if invocation.argv[:3] == ("docker", "compose", "--env-file"):
+                artifact = Path(invocation.argv[3])
+                assert artifact.exists()
+                artifact_paths.append(artifact)
+                return ProcessResult(returncode=19)
+            return result
+
+    capture = FailureCapture()
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--docker-compose",
+            str(compose_path),
+            "--recreate",
+        ],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 19
+    assert len(artifact_paths) == 1
+    assert not artifact_paths[0].exists()
+    assert capture.calls is not None
+    assert not any(isinstance(call, DockerRunInvocation) for call in capture.calls)
+
+
+def test_up_rejects_missing_compose_selection_before_build_or_artifact(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = tmp_path / "langgraph.json"
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"compose_env":["MISSING"]}',
+        encoding="utf-8",
+    )
+    compose_path = tmp_path / "compose.yaml"
+    compose_path.write_text("services: {}\n", encoding="utf-8")
+    capture = _ProcessCapture()
+    stderr = io.StringIO()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--docker-compose",
+            str(compose_path),
+        ],
+        process_transport=capture,
+        cwd=tmp_path,
+        stderr=stderr,
+    )
+
+    assert exit_code == 2
+    assert capture.calls is None
+    assert "not present in application payload" in stderr.getvalue()
 
 
 def test_up_command_rejects_missing_docker_compose_file(tmp_path: Path) -> None:
@@ -2193,7 +2344,8 @@ def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
     assert exit_code == 2
     assert capture.calls is not None
     assert [call.argv for call in capture.calls] == [
-        ("docker", "container", "inspect", "agentseek-up-8123")
+        ("docker", "compose", "version", "--short"),
+        ("docker", "container", "inspect", "agentseek-up-8123"),
     ]
     assert "already exists" in stderr.getvalue()
     assert "--recreate" in stderr.getvalue()

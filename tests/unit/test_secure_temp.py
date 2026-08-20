@@ -1,0 +1,176 @@
+from __future__ import annotations
+
+import os
+import stat
+import time
+from pathlib import Path
+
+import pytest
+
+import agentseek_api.secure_temp as secure_temp
+from agentseek_api.secure_temp import (
+    SecureArtifactError,
+    private_artifact,
+    private_directory,
+    sweep_expired_artifacts,
+)
+
+POSIX_ONLY = pytest.mark.skipif(os.name == "nt", reason="requires POSIX metadata")
+
+
+@POSIX_ONLY
+def test_private_artifact_is_user_only_and_removed_after_failure(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(RuntimeError, match="subprocess failed"):
+        with private_artifact(
+            tmp_root=tmp_path,
+            prefix="agentseek-compose-",
+            contents=b"TOKEN='sentinel'\n",
+        ) as path:
+            assert path.read_bytes() == b"TOKEN='sentinel'\n"
+            assert stat.S_IMODE(path.stat().st_mode) == 0o600
+            assert path.stat().st_uid == os.getuid()
+            raise RuntimeError("subprocess failed")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@POSIX_ONLY
+def test_private_directory_is_user_only_and_removed_with_contents(
+    tmp_path: Path,
+) -> None:
+    with private_directory(tmp_root=tmp_path, prefix="agentseek-build-") as path:
+        assert stat.S_IMODE(path.stat().st_mode) == 0o700
+        assert path.stat().st_uid == os.getuid()
+        (path / "inventory.json").write_text("{}", encoding="utf-8")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@POSIX_ONLY
+def test_private_artifact_fails_closed_when_mode_cannot_be_proved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def reject_mode(_fd: int, _path: Path) -> os.stat_result:
+        raise SecureArtifactError("Could not prove exclusive access.")
+
+    monkeypatch.setattr(secure_temp, "_verify_open_posix", reject_mode)
+
+    with pytest.raises(SecureArtifactError, match="exclusive access"):
+        with private_artifact(
+            tmp_root=tmp_path,
+            prefix="agentseek-compose-",
+            contents=b"private",
+        ):
+            pytest.fail("an unverified path must never be exposed")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@POSIX_ONLY
+def test_private_artifact_fails_closed_when_owner_cannot_be_proved(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(secure_temp, "_current_uid", lambda: os.getuid() + 1)
+
+    with pytest.raises(SecureArtifactError, match="exclusive access"):
+        with private_artifact(
+            tmp_root=tmp_path,
+            prefix="agentseek-compose-",
+            contents=b"private",
+        ):
+            pytest.fail("an unverified path must never be exposed")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+@POSIX_ONLY
+def test_private_artifact_rejects_symlink_temporary_root(tmp_path: Path) -> None:
+    real_root = tmp_path / "real"
+    real_root.mkdir()
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(real_root, target_is_directory=True)
+
+    with pytest.raises(SecureArtifactError, match="temporary root"):
+        with private_artifact(
+            tmp_root=linked_root,
+            prefix="agentseek-compose-",
+            contents=b"private",
+        ):
+            pytest.fail("a symlink root must never be used")
+
+
+@POSIX_ONLY
+def test_private_artifact_fails_closed_on_symlink_substitution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    replacement_target = tmp_path / "replacement-target"
+    replacement_target.write_bytes(b"must-not-read")
+    original_verify = secure_temp._verify_closed_posix
+
+    def substitute(path: Path, expected: os.stat_result) -> None:
+        path.unlink()
+        path.symlink_to(replacement_target)
+        original_verify(path, expected)
+
+    monkeypatch.setattr(secure_temp, "_verify_closed_posix", substitute)
+
+    with pytest.raises(SecureArtifactError, match="exclusive access"):
+        with private_artifact(
+            tmp_root=tmp_path,
+            prefix="agentseek-compose-",
+            contents=b"private",
+        ):
+            pytest.fail("a substituted path must never be exposed")
+
+    links = [path for path in tmp_path.iterdir() if path.is_symlink()]
+    assert len(links) == 1
+    assert replacement_target.read_bytes() == b"must-not-read"
+
+
+@POSIX_ONLY
+def test_sweep_removes_only_owned_private_old_regular_artifacts(
+    tmp_path: Path,
+) -> None:
+    old_private = tmp_path / "agentseek-compose-old"
+    old_private.write_bytes(b"old")
+    old_private.chmod(0o600)
+    old_public = tmp_path / "agentseek-compose-public"
+    old_public.write_bytes(b"public")
+    old_public.chmod(0o644)
+    recent = tmp_path / "agentseek-compose-recent"
+    recent.write_bytes(b"recent")
+    recent.chmod(0o600)
+    symlink = tmp_path / "agentseek-compose-link"
+    symlink.symlink_to(old_private)
+    old = time.time() - 48 * 60 * 60
+    os.utime(old_private, (old, old))
+    os.utime(old_public, (old, old))
+    os.utime(symlink, (old, old), follow_symlinks=False)
+
+    removed = sweep_expired_artifacts(
+        tmp_root=tmp_path,
+        prefix="agentseek-compose-",
+        older_than_seconds=24 * 60 * 60,
+        now=time.time(),
+    )
+
+    assert removed == (old_private,)
+    assert not old_private.exists()
+    assert old_public.exists()
+    assert recent.exists()
+    assert symlink.is_symlink()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows security APIs")
+def test_windows_private_artifact_dacl_round_trips_by_security_api(
+    tmp_path: Path,
+) -> None:
+    with private_artifact(
+        tmp_root=tmp_path,
+        prefix="agentseek-compose-",
+        contents=b"private",
+    ) as path:
+        secure_temp._verify_private_dacl(path)
+        secure_temp._verify_private_dacl(path.parent)
