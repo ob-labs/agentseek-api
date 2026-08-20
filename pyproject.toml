@@ -54,6 +54,9 @@ dev = [
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
+[tool.hatch.build]
+exclude = ["/.superpowers"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentseek_api"]
 
