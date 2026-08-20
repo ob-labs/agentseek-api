@@ -38,6 +38,20 @@ def _tar(entries: list[tuple[str, bytes]]) -> bytes:
     return output.getvalue()
 
 
+def _tar_with_standard_directory_aliases() -> bytes:
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w") as archive:
+        for name in (".", "./usr/", "./usr/share/"):
+            info = tarfile.TarInfo(name)
+            info.type = tarfile.DIRTYPE
+            archive.addfile(info)
+        payload = b"safe"
+        info = tarfile.TarInfo("./usr/share/payload.txt")
+        info.size = len(payload)
+        archive.addfile(info, io.BytesIO(payload))
+    return output.getvalue()
+
+
 def _docker_save_archive(
     *,
     layer_payloads: list[bytes],
@@ -114,6 +128,28 @@ def test_scanner_accepts_every_referenced_layer_and_no_trunc_history() -> None:
         forbidden=b"high-entropy-canary",
         history=b'{"CreatedBy":"safe"}\n',
     )
+
+
+def test_scanner_accepts_standard_root_and_directory_tar_aliases() -> None:
+    scanner = _load_scanner()
+
+    scanner.scan_image_archive(
+        _docker_save_archive(layer_payloads=[_tar_with_standard_directory_aliases()]),
+        forbidden=b"high-entropy-canary",
+        history=b'{"CreatedBy":"safe"}\n',
+    )
+
+
+def test_scanner_rejects_members_that_alias_the_same_canonical_path() -> None:
+    scanner = _load_scanner()
+    layer = _tar([("safe.txt", b"first"), ("./safe.txt", b"second")])
+
+    with pytest.raises(scanner.ImageArchiveError, match="duplicate"):
+        scanner.scan_image_archive(
+            _docker_save_archive(layer_payloads=[layer]),
+            forbidden=b"high-entropy-canary",
+            history=b'{"CreatedBy":"safe"}\n',
+        )
 
 
 def _docker_save_with_repeated_layer(layer: bytes) -> bytes:

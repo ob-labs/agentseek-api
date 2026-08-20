@@ -46,6 +46,18 @@ def _safe_name(name: str) -> bool:
     )
 
 
+def _canonical_tar_name(name: str) -> str | None:
+    if not name or "\x00" in name or name.startswith("/"):
+        return None
+    trimmed = name.rstrip("/")
+    if any(part == ".." for part in trimmed.split("/")):
+        return None
+    normalized = posixpath.normpath(trimmed)
+    if normalized == ".." or normalized.startswith("../"):
+        return None
+    return normalized
+
+
 def _json_object(payload: bytes, boundary: str) -> Mapping[str, Any]:
     try:
         value = json.loads(payload)
@@ -62,16 +74,19 @@ def _tar_files(payload: bytes, boundary: str) -> dict[str, bytes]:
     try:
         with tarfile.open(fileobj=io.BytesIO(payload), mode="r:") as archive:
             for member in archive:
-                if not _safe_name(member.name):
+                name = _canonical_tar_name(member.name)
+                if name is None or (name == "." and not member.isdir()):
                     raise ImageArchiveError(f"{boundary} member path was unsafe")
-                if member.name in names:
+                if name == ".":
+                    continue
+                if name in names:
                     raise ImageArchiveError(f"{boundary} contained duplicate members")
-                names.add(member.name)
+                names.add(name)
                 if member.isfile():
                     stream = archive.extractfile(member)
                     if stream is None:
                         raise ImageArchiveError(f"{boundary} member was unreadable")
-                    files[member.name] = stream.read()
+                    files[name] = stream.read()
     except ImageArchiveError:
         raise
     except (tarfile.TarError, OSError, EOFError) as exc:
