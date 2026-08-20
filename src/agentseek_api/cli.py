@@ -1289,6 +1289,11 @@ def _execute_up_command(
             application_payload["AUTH_MODULE_PATH"] = auth_patch.value
         generated_dockerfile_bytes = render_build_dockerfile(generated_plan)
 
+    application_payload.pop("PYTHONPATH", None)
+    application_payload.pop("PYTHONHOME", None)
+    application_payload["PYTHONSAFEPATH"] = "1"
+    application_payload["PYTHONNOUSERSITE"] = "1"
+
     compose_payload: dict[str, str] = {}
     encoded_compose: bytes | None = None
     if compose_path is not None:
@@ -1387,11 +1392,6 @@ def _execute_up_command(
         "host.docker.internal:host-gateway",
         "-p",
         f"{args.port}:{DEFAULT_API_PORT}",
-        *(
-            ()
-            if custom_image_contract is None
-            else ("--entrypoint", custom_image_contract.entrypoint_override)
-        ),
     )
     run_invocation = build_docker_run_invocation(
         base_argv=base_argv,

@@ -121,7 +121,6 @@ class DockerImageConfig:
 @dataclass(frozen=True)
 class PreloadedImageContract:
     manifest_path: str
-    entrypoint_override: str
     container_argv: tuple[str, ...]
 
 
@@ -618,19 +617,20 @@ def inspect_image_contract(
         "--port",
         str(DEFAULT_API_PORT),
     )
-    if config.entrypoint not in (
-        None,
-        (),
+    if config.entrypoint in (None, ()):
+        command = ("agentseek-api", *serve)
+    elif config.entrypoint in (
         ("agentseek-api",),
         ("python", "-m", "agentseek_api.cli"),
     ):
+        command = serve
+    else:
         raise ImageContractError(
             "The custom image entrypoint cannot receive the preloaded-v1 command."
         )
     return PreloadedImageContract(
         manifest_path=manifest_path,
-        entrypoint_override="python",
-        container_argv=("-I", "-m", "agentseek_api.cli", *serve),
+        container_argv=command,
     )
 
 

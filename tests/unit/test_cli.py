@@ -5,7 +5,9 @@ import hashlib
 import importlib
 import io
 import json
+import os
 import signal
+import subprocess
 import sys
 import tarfile
 import tomllib
@@ -2335,9 +2337,19 @@ def test_up_with_custom_image_preserves_empty_or_package_auth(
         (
             [],
             (
-                "-I",
-                "-m",
-                "agentseek_api.cli",
+                "agentseek-api",
+                "serve",
+                "--environment-mode",
+                "preloaded-v1",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "2024",
+            ),
+        ),
+        (
+            ["agentseek-api"],
+            (
                 "serve",
                 "--environment-mode",
                 "preloaded-v1",
@@ -2350,9 +2362,6 @@ def test_up_with_custom_image_preserves_empty_or_package_auth(
         (
             ["python", "-m", "agentseek_api.cli"],
             (
-                "-I",
-                "-m",
-                "agentseek_api.cli",
                 "serve",
                 "--environment-mode",
                 "preloaded-v1",
@@ -2407,14 +2416,124 @@ def test_up_custom_image_inspects_contract_and_runs_explicit_preloaded_mode(
     assert ".Config.Env" not in " ".join(inspect.argv)
     run = next(call for call in capture.calls if isinstance(call, DockerRunInvocation))
     assert run.environment["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
-    image_index = run.argv.index("agentseek:test")
-    override_index = run.argv.index("--entrypoint")
-    assert run.argv[override_index : override_index + 2] == (
-        "--entrypoint",
-        "python",
-    )
-    assert override_index < image_index
+    assert "--entrypoint" not in run.argv
     assert run.argv[-len(expected_tail) :] == expected_tail
+
+
+@pytest.mark.parametrize("custom_image", [False, True])
+def test_up_preloaded_launch_environment_overrides_or_removes_python_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    custom_image: bool,
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    canaries = {
+        "PYTHONSAFEPATH": "unsafe-safepath-canary",
+        "PYTHONNOUSERSITE": "unsafe-usersite-canary",
+        "PYTHONPATH": "unsafe-pythonpath-canary",
+        "PYTHONHOME": "unsafe-pythonhome-canary",
+    }
+    for name, value in canaries.items():
+        monkeypatch.setenv(name, value)
+    capture = _ProcessCapture()
+    arguments = ["up", "--config", str(config), "--recreate"]
+    if custom_image:
+        arguments.extend(("--image", "agentseek:test"))
+    for name in canaries:
+        arguments.extend(("--pass-env", name))
+
+    assert main(arguments, process_transport=capture, cwd=tmp_path) == 0
+
+    payload = _application_environment(capture)
+    assert payload["PYTHONSAFEPATH"] == "1"
+    assert payload["PYTHONNOUSERSITE"] == "1"
+    assert "PYTHONPATH" not in payload
+    assert "PYTHONHOME" not in payload
+    run = next(
+        call for call in capture.calls or () if isinstance(call, DockerRunInvocation)
+    )
+    rendered = repr(run)
+    assert all(value not in rendered for value in canaries.values())
+
+
+def test_custom_python_entrypoint_uses_safe_carrier_from_hostile_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    hostile = tmp_path / "hostile"
+    package = hostile / "agentseek_api"
+    package.mkdir(parents=True)
+    marker = tmp_path / "hostile-custom-image-bootstrap"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('canary')\nraise SystemExit(23)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("PYTHONPATH", str(hostile))
+    capture = _ProcessCapture(
+        image_config=(
+            {
+                "org.agentseek.environment-contract": "preloaded-v1",
+                "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
+                "org.agentseek.runtime-distribution": "agentseek-api",
+                "org.agentseek.runtime-version": "0.3.0",
+            },
+            ["python", "-m", "agentseek_api.cli"],
+            ["hostile-default"],
+        )
+    )
+
+    assert (
+        main(
+            [
+                "up",
+                "--config",
+                str(config),
+                "--image",
+                "agentseek:test",
+                "--pass-env",
+                "PYTHONPATH",
+            ],
+            process_transport=capture,
+            cwd=tmp_path,
+        )
+        == 0
+    )
+
+    run = next(
+        call for call in capture.calls or () if isinstance(call, DockerRunInvocation)
+    )
+    payload = {name: run.environment[name] for name in run.application_names}
+    environment = dict(os.environ)
+    environment.pop("PYTHONPATH", None)
+    environment.pop("PYTHONHOME", None)
+    environment.update(payload)
+    completed = subprocess.run(
+        [sys.executable, "-m", "agentseek_api.cli", "version"],
+        cwd=hostile,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert run.argv[-7:] == (
+        "serve",
+        "--environment-mode",
+        "preloaded-v1",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        "2024",
+    )
+    assert completed.returncode == 0
+    assert completed.stdout == "agentseek-api 0.3.0\n"
+    assert marker.exists() is False
 
 
 def test_up_custom_image_contract_failure_stops_after_one_read_only_query(
