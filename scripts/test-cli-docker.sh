@@ -66,7 +66,17 @@ cleanup() {
 }
 
 print_logs() {
-  docker logs "$APP_CONTAINER" || true
+  local existing=""
+  existing="$(container_id 2>/dev/null)" || return 0
+  if [[ -n "$existing" ]]; then
+    docker logs "$APP_CONTAINER" || true
+  fi
+}
+
+print_up_log() {
+  uv run python scripts/value_free_log_tail.py \
+    "$TMP_DIR/up.log" \
+    "$PROJECT_DIR/application.env" >&2 || true
 }
 
 trap cleanup EXIT
@@ -308,6 +318,7 @@ if ! uv run agentseek-api up \
   --image "$IMAGE_TAG" \
   --port 8123 \
   --recreate >"$TMP_DIR/up.log" 2>&1; then
+  print_up_log
   print_logs
   exit 1
 fi

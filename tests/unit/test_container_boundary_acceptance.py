@@ -19,6 +19,7 @@ from agentseek_api.docker_runtime import ProcessInvocation, ProcessResult
 SCRIPT = Path("scripts/test_container_env_boundary.py")
 AUTODISCOVERY_SCRIPT = Path("scripts/test_cli_config_autodiscovery.py")
 CLI_DOCKER_SCRIPT = Path("scripts/test-cli-docker.sh")
+VALUE_FREE_LOG_SCRIPT = Path("scripts/value_free_log_tail.py")
 
 
 def _load_script():
@@ -37,6 +38,17 @@ def _load_script():
 def _load_autodiscovery_script():
     spec = importlib.util.spec_from_file_location(
         "cli_config_autodiscovery", AUTODISCOVERY_SCRIPT
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_value_free_log_script():
+    spec = importlib.util.spec_from_file_location(
+        "value_free_log_tail", VALUE_FREE_LOG_SCRIPT
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -421,6 +433,31 @@ def test_cli_docker_smoke_asserts_the_canonical_candidate_filename() -> None:
 
     assert 'dockerfile.index("agentseek_api-0.3.0-py3-none-any.whl[embedded]")' in text
     assert 'dockerfile.index("agentseek-api-0.3.0.whl[embedded]")' not in text
+
+
+def test_cli_docker_failure_tail_is_bounded_and_redacts_application_values(
+    tmp_path: Path,
+) -> None:
+    module = _load_value_free_log_script()
+    private_value = "private-boundary-value"
+    credential = "registry-password"
+    log_path = tmp_path / "up.log"
+    env_path = tmp_path / "application.env"
+    log_path.write_text(
+        "x" * 20_000
+        + f"\nprefix{private_value}suffix\n"
+        + f"https://alice:{credential}@registry.invalid startup failed\n",
+        encoding="utf-8",
+    )
+    env_path.write_text(f"PRIVATE_VALUE={private_value}\n", encoding="utf-8")
+
+    diagnostic = module.value_free_log_tail(log_path, env_path)
+
+    assert len(diagnostic.encode()) <= module.MAXIMUM_TAIL_BYTES
+    assert "startup failed" in diagnostic
+    assert private_value not in diagnostic
+    assert credential not in diagnostic
+    assert "alice" not in diagnostic
 
 
 def test_cli_config_autodiscovery_emits_value_free_ci_failure_annotation(
