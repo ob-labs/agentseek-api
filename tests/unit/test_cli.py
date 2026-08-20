@@ -21,6 +21,27 @@ def test_python_dotenv_dependency_is_available() -> None:
     assert callable(dotenv_values)
 
 
+def test_up_parser_collects_explicit_container_and_compose_names() -> None:
+    from agentseek_api.cli import create_parser
+
+    args = create_parser().parse_args(
+        [
+            "up",
+            "--image",
+            "agentseek:test",
+            "--pass-env",
+            "TOKEN",
+            "--pass-env",
+            "OTHER",
+            "--compose-pass-env",
+            "TOKEN",
+        ]
+    )
+
+    assert args.pass_env == ["TOKEN", "OTHER"]
+    assert args.compose_pass_env == ["TOKEN"]
+
+
 @dataclass
 class _RunCapture:
     calls: list[list[str]] | None = None
@@ -28,7 +49,9 @@ class _RunCapture:
     env: dict[str, str] | None = None
     cwd: str | None = None
 
-    def __call__(self, command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
+    def __call__(
+        self, command: list[str], *, env: dict[str, str], cwd: str | None = None
+    ) -> int:
         if self.calls is None:
             self.calls = []
         self.calls.append(command)
@@ -510,7 +533,9 @@ def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) 
     from agentseek_api.cli import main
 
     config_path = tmp_path / "agentseek.json"
-    config_path.write_text('{"graphs":{"agentseek":"chat.graph:graph"}}', encoding="utf-8")
+    config_path.write_text(
+        '{"graphs":{"agentseek":"chat.graph:graph"}}', encoding="utf-8"
+    )
     _write_basic_langgraph_config(tmp_path)
     capture = _RunCapture()
 
@@ -532,13 +557,17 @@ def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) 
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
-def test_serve_command_falls_back_to_langgraph_json_and_runs_graph(tmp_path: Path) -> None:
+def test_serve_command_falls_back_to_langgraph_json_and_runs_graph(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     config_path = _write_basic_langgraph_config(tmp_path)
     capture = _RunCapture()
 
-    exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
+    exit_code = main(
+        ["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path
+    )
 
     assert exit_code == 0
     assert capture.command[1:] == [
@@ -570,7 +599,9 @@ def test_serve_command_uses_agentseek_graphs_env_for_manifest_named_config(
     monkeypatch.setenv("AGENTSEEK_GRAPHS", str(config_path.resolve()))
     capture = _RunCapture()
 
-    exit_code = main(["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path)
+    exit_code = main(
+        ["serve", "--host", "0.0.0.0", "--port", "3030"], runner=capture, cwd=tmp_path
+    )
 
     assert exit_code == 0
     assert capture.command[1:] == [
@@ -594,7 +625,9 @@ def test_worker_command_uses_runtime_env_and_worker_module(tmp_path: Path) -> No
     config_path = _write_basic_langgraph_config(tmp_path)
     capture = _RunCapture()
 
-    exit_code = main(["worker", "--config", str(config_path)], runner=capture, cwd=tmp_path)
+    exit_code = main(
+        ["worker", "--config", str(config_path)], runner=capture, cwd=tmp_path
+    )
 
     assert exit_code == 0
     assert capture.command is not None
@@ -607,13 +640,17 @@ def test_worker_command_uses_runtime_env_and_worker_module(tmp_path: Path) -> No
     assert capture.env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
-def test_scheduler_command_uses_runtime_env_and_scheduler_module(tmp_path: Path) -> None:
+def test_scheduler_command_uses_runtime_env_and_scheduler_module(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     config_path = _write_basic_langgraph_config(tmp_path)
     capture = _RunCapture()
 
-    exit_code = main(["scheduler", "--config", str(config_path)], runner=capture, cwd=tmp_path)
+    exit_code = main(
+        ["scheduler", "--config", str(config_path)], runner=capture, cwd=tmp_path
+    )
 
     assert exit_code == 0
     assert capture.command is not None
@@ -718,7 +755,11 @@ def test_dev_command_loads_config_env_mapping_and_auth_path(
     )
     capture = _RunCapture()
 
-    exit_code = main(["dev", "--config", str(config_path), "--no-reload"], runner=capture, cwd=tmp_path)
+    exit_code = main(
+        ["dev", "--config", str(config_path), "--no-reload"],
+        runner=capture,
+        cwd=tmp_path,
+    )
 
     assert exit_code == 0
     assert capture.env is not None
@@ -755,7 +796,14 @@ def test_dev_command_merges_config_env_file_before_cli_env_file(
     capture = _RunCapture()
 
     exit_code = main(
-        ["dev", "--config", str(config_path), "--env-file", str(cli_env), "--no-reload"],
+        [
+            "dev",
+            "--config",
+            str(config_path),
+            "--env-file",
+            str(cli_env),
+            "--no-reload",
+        ],
         runner=capture,
         cwd=tmp_path,
     )
@@ -782,7 +830,14 @@ def test_dev_command_preserves_dotenv_default_and_bare_variable_syntax(
     capture = _RunCapture()
 
     exit_code = main(
-        ["dev", "--config", str(config_path), "--env-file", str(env_file), "--no-reload"],
+        [
+            "dev",
+            "--config",
+            str(config_path),
+            "--env-file",
+            str(env_file),
+            "--no-reload",
+        ],
         runner=capture,
         cwd=tmp_path,
     )
@@ -802,8 +857,13 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
     exit_code = main(["dev", "--tunnel"], cwd=tmp_path, stderr=stderr)
 
     assert exit_code == 2
-    assert "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
-    assert "Use 'langgraph dev' for mocked or tunneled local workflows." in stderr.getvalue()
+    assert (
+        "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
+    )
+    assert (
+        "Use 'langgraph dev' for mocked or tunneled local workflows."
+        in stderr.getvalue()
+    )
 
 
 def test_dev_command_forces_local_studio_auth_after_inherited_env(
@@ -853,17 +913,25 @@ def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
 
     assert urls.api_url == "http://localhost:2024"
     assert urls.docs_url == "http://localhost:2024/docs"
-    assert urls.studio_url == "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"
+    assert (
+        urls.studio_url
+        == "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"
+    )
 
 
 def test_resolve_dev_urls_preserve_explicit_host_and_override_studio_origin() -> None:
     from agentseek_api.cli import _resolve_dev_urls
 
-    urls = _resolve_dev_urls(host="devbox.local", port=3030, studio_url="https://smith.example.com")
+    urls = _resolve_dev_urls(
+        host="devbox.local", port=3030, studio_url="https://smith.example.com"
+    )
 
     assert urls.api_url == "http://devbox.local:3030"
     assert urls.docs_url == "http://devbox.local:3030/docs"
-    assert urls.studio_url == "https://smith.example.com/studio/?baseUrl=http://devbox.local:3030"
+    assert (
+        urls.studio_url
+        == "https://smith.example.com/studio/?baseUrl=http://devbox.local:3030"
+    )
 
 
 def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) -> None:
@@ -890,7 +958,14 @@ def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) 
     stdout = io.StringIO()
 
     exit_code = cli_module._run_managed_dev_server(
-        command=["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"],
+        command=[
+            "uvicorn",
+            "agentseek_api.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "2024",
+        ],
         env={"A": "B"},
         cwd=tmp_path,
         urls=cli_module._resolve_dev_urls(host="127.0.0.1", port=2024, studio_url=None),
@@ -906,7 +981,9 @@ def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) 
     assert "API: http://localhost:2024" in output
     assert "Docs: http://localhost:2024/docs" in output
     assert "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024" in output
-    assert opened == ["https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"]
+    assert opened == [
+        "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"
+    ]
 
 
 def test_managed_dev_ascii_fallback_normalizes_non_ascii_urls_before_write(
@@ -983,7 +1060,14 @@ def test_run_managed_dev_server_honors_no_browser(tmp_path: Path) -> None:
     opened: list[str] = []
 
     exit_code = cli_module._run_managed_dev_server(
-        command=["uvicorn", "agentseek_api.main:app", "--host", "127.0.0.1", "--port", "2024"],
+        command=[
+            "uvicorn",
+            "agentseek_api.main:app",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "2024",
+        ],
         env={},
         cwd=tmp_path,
         urls=cli_module._resolve_dev_urls(host="127.0.0.1", port=2024, studio_url=None),
@@ -1004,7 +1088,9 @@ def test_dev_command_rejects_missing_explicit_config(tmp_path: Path) -> None:
 
     stderr = io.StringIO()
 
-    exit_code = main(["dev", "--config", str(tmp_path / "missing.json")], cwd=tmp_path, stderr=stderr)
+    exit_code = main(
+        ["dev", "--config", str(tmp_path / "missing.json")], cwd=tmp_path, stderr=stderr
+    )
 
     assert exit_code == 2
     assert "does not exist" in stderr.getvalue()
@@ -1025,12 +1111,17 @@ def test_version_reports_cli_and_package_versions() -> None:
 def test_release_versions_are_consistent() -> None:
     from agentseek_api import __version__
 
-    project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
-    lock_packages = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))["package"]
+    project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]
+    lock_packages = tomllib.loads(Path("uv.lock").read_text(encoding="utf-8"))[
+        "package"
+    ]
     root_package = next(
         package
         for package in lock_packages
-        if package["name"] == "agentseek-api" and package.get("source") == {"editable": "."}
+        if package["name"] == "agentseek-api"
+        and package.get("source") == {"editable": "."}
     )
 
     assert project_config["version"] == __version__
@@ -1038,12 +1129,17 @@ def test_release_versions_are_consistent() -> None:
 
 
 def test_package_exposes_library_and_cli_entrypoints() -> None:
-    project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+    project_config = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]
 
     assert project_config["name"] == "agentseek-api"
     assert project_config["scripts"]["agentseek-api"] == "agentseek_api.cli:main"
     assert project_config["optional-dependencies"]["embedded"]
-    assert any("langchain-oceanbase" in dep for dep in project_config["optional-dependencies"]["embedded"])
+    assert any(
+        "langchain-oceanbase" in dep
+        for dep in project_config["optional-dependencies"]["embedded"]
+    )
 
 
 def test_cli_module_is_importable_with_embeddable_entrypoints() -> None:
@@ -1088,7 +1184,9 @@ def test_embedded_subcommand_errors_use_registered_command_name(tmp_path: Path) 
     exit_code = cli_module.run_namespace(parsed, cwd=tmp_path, stderr=stderr)
 
     assert exit_code == 2
-    assert "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
+    assert (
+        "Unsupported option(s) for 'agentseek-api dev': --tunnel" in stderr.getvalue()
+    )
 
 
 def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
@@ -1097,7 +1195,9 @@ def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
     parser = argparse.ArgumentParser(prog="parent")
     subparsers = parser.add_subparsers(dest="tool", required=True)
     cli_module.register_subcommands(subparsers, command_name="agentseek")
-    parsed = parser.parse_args(["agentseek", "serve", "--host", "0.0.0.0", "--port", "3030"])
+    parsed = parser.parse_args(
+        ["agentseek", "serve", "--host", "0.0.0.0", "--port", "3030"]
+    )
     capture = _RunCapture()
 
     exit_code = cli_module.run_namespace(parsed, runner=capture, cwd=tmp_path)
@@ -1116,7 +1216,9 @@ def test_run_namespace_allows_parent_cli_dispatch(tmp_path: Path) -> None:
     ]
 
 
-def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: Path) -> None:
+def test_dockerfile_command_writes_langgraph_compatible_runtime_file(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
@@ -1126,16 +1228,24 @@ def test_dockerfile_command_writes_langgraph_compatible_runtime_file(tmp_path: P
 
     assert exit_code == 0
     content = dockerfile_path.read_text(encoding="utf-8")
-    assert 'FROM python:3.12-slim' in content
-    assert 'RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*' in content
-    assert 'WORKDIR /deps/agent' in content
-    assert 'COPY . /deps/agent' in content
-    assert 'ENV PYTHONPATH=/deps/agent' in content
-    assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json' in content
-    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]' in content
+    assert "FROM python:3.12-slim" in content
+    assert (
+        "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
+        in content
+    )
+    assert "WORKDIR /deps/agent" in content
+    assert "COPY . /deps/agent" in content
+    assert "ENV PYTHONPATH=/deps/agent" in content
+    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" in content
+    assert (
+        'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]'
+        in content
+    )
 
 
-def test_dockerfile_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:
+def test_dockerfile_command_prefers_agentseek_json_without_explicit_flag(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     (tmp_path / "agentseek.json").write_text(
@@ -1159,7 +1269,9 @@ def test_dockerfile_command_prefers_agentseek_json_without_explicit_flag(tmp_pat
     assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" not in content
 
 
-def test_dockerfile_command_honors_base_image_python_and_custom_lines(tmp_path: Path) -> None:
+def test_dockerfile_command_honors_base_image_python_and_custom_lines(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     package_dir = tmp_path / "chat"
@@ -1175,7 +1287,9 @@ version = "0.1.0"
         encoding="utf-8",
     )
     pip_conf = tmp_path / "pip.conf"
-    pip_conf.write_text("[global]\nindex-url = https://pypi.org/simple\n", encoding="utf-8")
+    pip_conf.write_text(
+        "[global]\nindex-url = https://pypi.org/simple\n", encoding="utf-8"
+    )
     config_path = tmp_path / "langgraph.json"
     config_path.write_text(
         """
@@ -1196,13 +1310,18 @@ version = "0.1.0"
     )
     dockerfile_path = tmp_path / "Dockerfile.agentseek"
 
-    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path
+    )
 
     assert exit_code == 0
     content = dockerfile_path.read_text(encoding="utf-8")
     assert "FROM python:3.13-slim-bookworm" in content
     assert "RUN echo custom-step" in content
-    assert "RUN PIP_CONFIG_FILE=/deps/agent/pip.conf pip install --no-cache-dir /deps/agent" in content
+    assert (
+        "RUN PIP_CONFIG_FILE=/deps/agent/pip.conf pip install --no-cache-dir /deps/agent"
+        in content
+    )
 
 
 def test_dockerfile_command_translates_manifest_dependencies(tmp_path: Path) -> None:
@@ -1222,7 +1341,9 @@ version = "0.1.0"
     )
     requirements_dir = project_dir / "reqs"
     requirements_dir.mkdir()
-    (requirements_dir / "requirements.txt").write_text("httpx==0.28.1\n", encoding="utf-8")
+    (requirements_dir / "requirements.txt").write_text(
+        "httpx==0.28.1\n", encoding="utf-8"
+    )
     config_path = project_dir / "langgraph.json"
     config_path.write_text(
         """
@@ -1237,18 +1358,30 @@ version = "0.1.0"
     )
     dockerfile_path = tmp_path / "Dockerfile.agentseek"
 
-    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path
+    )
 
     assert exit_code == 0
     content = dockerfile_path.read_text(encoding="utf-8")
-    assert "ENV PYTHONPATH=/deps/agent:/deps/agent/sample_project:/deps/agent/sample_project/local_pkg:/deps/agent/sample_project/reqs" in content
-    assert "RUN pip install --no-cache-dir /deps/agent/sample_project/local_pkg" in content
-    assert "RUN pip install --no-cache-dir -r /deps/agent/sample_project/reqs/requirements.txt" in content
+    assert (
+        "ENV PYTHONPATH=/deps/agent:/deps/agent/sample_project:/deps/agent/sample_project/local_pkg:/deps/agent/sample_project/reqs"
+        in content
+    )
+    assert (
+        "RUN pip install --no-cache-dir /deps/agent/sample_project/local_pkg" in content
+    )
+    assert (
+        "RUN pip install --no-cache-dir -r /deps/agent/sample_project/reqs/requirements.txt"
+        in content
+    )
     assert "RUN pip install --no-cache-dir httpx" in content
     assert "RUN pip install --no-cache-dir ." not in content
 
 
-def test_dockerfile_command_skips_root_install_when_root_is_not_installable(tmp_path: Path) -> None:
+def test_dockerfile_command_skips_root_install_when_root_is_not_installable(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     src_dir = tmp_path / "src"
@@ -1268,7 +1401,9 @@ def test_dockerfile_command_skips_root_install_when_root_is_not_installable(tmp_
     )
     dockerfile_path = tmp_path / "Dockerfile.agentseek"
 
-    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path
+    )
 
     assert exit_code == 0
     content = dockerfile_path.read_text(encoding="utf-8")
@@ -1276,7 +1411,9 @@ def test_dockerfile_command_skips_root_install_when_root_is_not_installable(tmp_
     assert "RUN pip install --no-cache-dir ." not in content
 
 
-def test_dockerfile_command_uses_manifest_project_root_not_invocation_root(tmp_path: Path) -> None:
+def test_dockerfile_command_uses_manifest_project_root_not_invocation_root(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     (tmp_path / "pyproject.toml").write_text(
@@ -1311,7 +1448,9 @@ version = "0.1.0"
     )
     dockerfile_path = tmp_path / "Dockerfile.agentseek"
 
-    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path
+    )
 
     assert exit_code == 0
     content = dockerfile_path.read_text(encoding="utf-8")
@@ -1319,7 +1458,9 @@ version = "0.1.0"
     assert "RUN pip install --no-cache-dir /deps/agent\n" not in content
 
 
-def test_dockerfile_command_installs_nearest_ancestor_project_for_nested_manifest(tmp_path: Path) -> None:
+def test_dockerfile_command_installs_nearest_ancestor_project_for_nested_manifest(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     (tmp_path / "pyproject.toml").write_text(
@@ -1346,15 +1487,22 @@ version = "0.1.0"
     )
     dockerfile_path = tmp_path / "Dockerfile.agentseek"
 
-    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path
+    )
 
     assert exit_code == 0
     content = dockerfile_path.read_text(encoding="utf-8")
     assert "RUN pip install --no-cache-dir /deps/agent" in content
-    assert "RUN pip install --no-cache-dir /deps/agent/examples/docker_ci_auth" not in content
+    assert (
+        "RUN pip install --no-cache-dir /deps/agent/examples/docker_ci_auth"
+        not in content
+    )
 
 
-def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Path) -> None:
+def test_build_command_plans_docker_build_from_generated_dockerfile(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
@@ -1387,10 +1535,16 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(tmp_path: Pa
     ]
     assert capture.command[-1] == "."
     generated = (tmp_path / ".agentseek" / "Dockerfile").read_text(encoding="utf-8")
-    assert 'RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*' in generated
-    assert 'ENV PYTHONPATH=/deps/agent' in generated
-    assert 'ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json' in generated
-    assert 'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]' in generated
+    assert (
+        "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
+        in generated
+    )
+    assert "ENV PYTHONPATH=/deps/agent" in generated
+    assert "ENV AGENTSEEK_GRAPHS=/deps/agent/langgraph.json" in generated
+    assert (
+        'CMD ["python", "-m", "agentseek_api.cli", "serve", "--host", "0.0.0.0", "--port", "2024"]'
+        in generated
+    )
 
 
 def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
@@ -1403,27 +1557,35 @@ def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    env = build_runtime_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={})
+    env = build_runtime_env(
+        config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={}
+    )
 
     assert env["TOKEN"] == "quoted # value\nnext"
     assert env["PLAIN"] == "value"
     assert env["AGENTSEEK_GRAPHS"] == str(config_path.resolve())
 
 
-def test_build_runtime_env_ignores_dotenv_entries_without_values(tmp_path: Path) -> None:
+def test_build_runtime_env_ignores_dotenv_entries_without_values(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import build_runtime_env
 
     config_path = _write_basic_langgraph_config(tmp_path)
     env_file = tmp_path / ".env"
     env_file.write_text("MALFORMED_LINE\nTOKEN=present\n", encoding="utf-8")
 
-    env = build_runtime_env(config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={})
+    env = build_runtime_env(
+        config_path=config_path, env_file=str(env_file), cwd=tmp_path, base_env={}
+    )
 
     assert "MALFORMED_LINE" not in env
     assert env["TOKEN"] == "present"
 
 
-def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(tmp_path: Path) -> None:
+def test_build_runtime_env_shell_values_override_config_and_cli_dotenv(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import build_runtime_env
 
     config_path = _write_basic_langgraph_config(tmp_path)
@@ -1464,7 +1626,9 @@ def test_higher_precedence_valueless_binding_keeps_lower_export(tmp_path: Path) 
     cli_env = tmp_path / "cli.env"
     cli_env.write_text("TOKEN\nRESULT=${TOKEN:-fallback}\n", encoding="utf-8")
 
-    env = build_runtime_env(config_path=config_path, env_file=str(cli_env), cwd=tmp_path, base_env={})
+    env = build_runtime_env(
+        config_path=config_path, env_file=str(cli_env), cwd=tmp_path, base_env={}
+    )
 
     assert env["TOKEN"] == "from-config"
     assert env["RESULT"] == ""
@@ -1474,20 +1638,30 @@ def test_build_runtime_env_rejects_invalid_config_env_shape(tmp_path: Path) -> N
     from agentseek_api.cli import build_runtime_env
 
     config_path = tmp_path / "langgraph.json"
-    config_path.write_text('{"graphs":{"chat":"chat.graph:graph"},"env":["bad"]}', encoding="utf-8")
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"env":["bad"]}', encoding="utf-8"
+    )
 
-    with pytest.raises(RuntimeError, match="must set 'env' to a path string or key/value object"):
-        build_runtime_env(config_path=config_path, env_file=None, cwd=tmp_path, base_env={})
+    with pytest.raises(
+        RuntimeError, match="must set 'env' to a path string or key/value object"
+    ):
+        build_runtime_env(
+            config_path=config_path, env_file=None, cwd=tmp_path, base_env={}
+        )
 
 
 def test_build_runtime_env_rejects_non_scalar_config_env_value(tmp_path: Path) -> None:
     from agentseek_api.cli import build_runtime_env
 
     config_path = tmp_path / "langgraph.json"
-    config_path.write_text('{"graphs":{"chat":"chat.graph:graph"},"env":{"BAD":[]}}', encoding="utf-8")
+    config_path.write_text(
+        '{"graphs":{"chat":"chat.graph:graph"},"env":{"BAD":[]}}', encoding="utf-8"
+    )
 
     with pytest.raises(RuntimeError, match="env mapping values must be scalar"):
-        build_runtime_env(config_path=config_path, env_file=None, cwd=tmp_path, base_env={})
+        build_runtime_env(
+            config_path=config_path, env_file=None, cwd=tmp_path, base_env={}
+        )
 
 
 def test_containerize_symbol_reference_supports_windows_drive_paths(
@@ -1496,14 +1670,18 @@ def test_containerize_symbol_reference_supports_windows_drive_paths(
     from agentseek_api import cli as cli_module
 
     expected_path = tmp_path / "auth.py"
-    monkeypatch.setattr(cli_module, "_resolve_path", lambda path_text, *, cwd: expected_path)
+    monkeypatch.setattr(
+        cli_module, "_resolve_path", lambda path_text, *, cwd: expected_path
+    )
     monkeypatch.setattr(
         cli_module,
         "_container_config_path",
         lambda *, config_path, cwd: "/deps/agent/auth.py",
     )
 
-    result = cli_module._containerize_symbol_reference(r"C:\workspace\auth.py:backend", cwd=tmp_path)
+    result = cli_module._containerize_symbol_reference(
+        r"C:\workspace\auth.py:backend", cwd=tmp_path
+    )
 
     assert result == "/deps/agent/auth.py:backend"
 
@@ -1515,13 +1693,19 @@ def test_dockerfile_command_requires_valid_config_object(tmp_path: Path) -> None
     config_path.write_text("[]", encoding="utf-8")
     stderr = io.StringIO()
 
-    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stderr=stderr,
+    )
 
     assert exit_code == 2
     assert "must contain a top-level JSON object" in stderr.getvalue()
 
 
-def test_dockerfile_command_rejects_invalid_auth_and_missing_pip_config(tmp_path: Path) -> None:
+def test_dockerfile_command_rejects_invalid_auth_and_missing_pip_config(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     config_path = tmp_path / "langgraph.json"
@@ -1539,7 +1723,11 @@ def test_dockerfile_command_rejects_invalid_auth_and_missing_pip_config(tmp_path
     )
     stderr = io.StringIO()
 
-    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stderr=stderr,
+    )
 
     assert exit_code == 2
     assert "field 'auth' must be an object" in stderr.getvalue()
@@ -1562,7 +1750,11 @@ def test_dockerfile_command_rejects_missing_pip_config_file(tmp_path: Path) -> N
     )
     stderr = io.StringIO()
 
-    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stderr=stderr,
+    )
 
     assert exit_code == 2
     assert "Pip config file" in stderr.getvalue()
@@ -1585,7 +1777,11 @@ def test_dockerfile_command_rejects_unsupported_image_distro(tmp_path: Path) -> 
     )
     stderr = io.StringIO()
 
-    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stderr=stderr,
+    )
 
     assert exit_code == 2
     assert "not supported without an explicit base_image" in stderr.getvalue()
@@ -1608,13 +1804,19 @@ def test_dockerfile_command_rejects_non_apt_base_image(tmp_path: Path) -> None:
     )
     stderr = io.StringIO()
 
-    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stderr=stderr,
+    )
 
     assert exit_code == 2
     assert "require apt-get" in stderr.getvalue()
 
 
-def test_dockerfile_command_rejects_unknown_non_debian_base_image(tmp_path: Path) -> None:
+def test_dockerfile_command_rejects_unknown_non_debian_base_image(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     config_path = tmp_path / "langgraph.json"
@@ -1631,13 +1833,19 @@ def test_dockerfile_command_rejects_unknown_non_debian_base_image(tmp_path: Path
     )
     stderr = io.StringIO()
 
-    exit_code = main(["dockerfile", "--config", str(config_path), "Dockerfile"], cwd=tmp_path, stderr=stderr)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), "Dockerfile"],
+        cwd=tmp_path,
+        stderr=stderr,
+    )
 
     assert exit_code == 2
     assert "Debian/Ubuntu-compatible" in stderr.getvalue()
 
 
-def test_dockerfile_command_allows_supported_explicit_langgraph_base_image(tmp_path: Path) -> None:
+def test_dockerfile_command_allows_supported_explicit_langgraph_base_image(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     config_path = tmp_path / "langgraph.json"
@@ -1654,7 +1862,9 @@ def test_dockerfile_command_allows_supported_explicit_langgraph_base_image(tmp_p
     )
     dockerfile_path = tmp_path / "Dockerfile.agentseek"
 
-    exit_code = main(["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path)
+    exit_code = main(
+        ["dockerfile", "--config", str(config_path), str(dockerfile_path)], cwd=tmp_path
+    )
 
     assert exit_code == 0
     content = dockerfile_path.read_text(encoding="utf-8")
@@ -1751,7 +1961,15 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
     assert exit_code == 0
     assert capture.calls is not None
     assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
-    assert capture.calls[1] == ["docker", "compose", "-f", str(compose_path.resolve()), "up", "-d", "--force-recreate"]
+    assert capture.calls[1] == [
+        "docker",
+        "compose",
+        "-f",
+        str(compose_path.resolve()),
+        "up",
+        "-d",
+        "--force-recreate",
+    ]
     assert capture.calls[2][-1] == "agentseek:test"
 
 
@@ -1779,7 +1997,9 @@ def test_up_command_rejects_missing_docker_compose_file(tmp_path: Path) -> None:
     assert "Docker compose file" in stderr.getvalue()
 
 
-def test_up_command_rejects_existing_container_before_starting_compose_sidecars(tmp_path: Path) -> None:
+def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     config_path = _write_basic_langgraph_config(tmp_path)
@@ -1788,7 +2008,9 @@ def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
     stderr = io.StringIO()
     capture = _RunCapture()
 
-    def existing_container_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
+    def existing_container_runner(
+        command: list[str], *, env: dict[str, str], cwd: str | None = None
+    ) -> int:
         capture(command, env=env, cwd=cwd)
         if command[:3] == ["docker", "container", "inspect"]:
             return 0
@@ -1815,7 +2037,9 @@ def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
     assert "--recreate" in stderr.getvalue()
 
 
-def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: Path) -> None:
+def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
@@ -1860,11 +2084,16 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(tmp_path: 
     assert capture.calls[2][-1] == "agentseek-up:8124"
     container_env = _docker_env_from_run_command(capture.calls[2])
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
-    assert container_env["METADATA_DB_URL"] == "postgresql://postgres:postgres@db/agentseek"
+    assert (
+        container_env["METADATA_DB_URL"]
+        == "postgresql://postgres:postgres@db/agentseek"
+    )
     assert container_env["METADATA_DB_BACKEND"] == "postgresql"
 
 
-def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path: Path) -> None:
+def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     package_dir = tmp_path / "chat"
@@ -1924,7 +2153,9 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(tmp_path
     assert container_env["FEATURE_FLAG"] == "True"
 
 
-def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_up_command_passes_ambient_env_into_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from agentseek_api.cli import main
 
     config_path = _write_basic_langgraph_config(tmp_path)
@@ -1949,7 +2180,9 @@ def test_up_command_passes_ambient_env_into_container(tmp_path: Path, monkeypatc
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
 
 
-def test_up_command_prefers_agentseek_json_without_explicit_flag(tmp_path: Path) -> None:
+def test_up_command_prefers_agentseek_json_without_explicit_flag(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     (tmp_path / "agentseek.json").write_text(
@@ -2035,7 +2268,9 @@ def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> No
     assert "FROM python:3.13-slim-bookworm" in dockerfile
 
 
-def test_up_command_rejects_non_apt_base_image_before_docker_build(tmp_path: Path) -> None:
+def test_up_command_rejects_non_apt_base_image_before_docker_build(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
@@ -2058,20 +2293,35 @@ def test_up_command_rejects_non_apt_base_image_before_docker_build(tmp_path: Pat
     assert "require apt-get" in stderr.getvalue()
 
 
-def test_up_command_returns_build_failure_without_running_container(tmp_path: Path) -> None:
+def test_up_command_returns_build_failure_without_running_container(
+    tmp_path: Path,
+) -> None:
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
     capture = _RunCapture()
 
-    def fail_build(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
+    def fail_build(
+        command: list[str], *, env: dict[str, str], cwd: str | None = None
+    ) -> int:
         capture(command, env=env, cwd=cwd)
         return 9 if command[:2] == ["docker", "build"] else 0
 
     exit_code = main(["up", "--port", "8125"], runner=fail_build, cwd=tmp_path)
 
     assert exit_code == 9
-    assert capture.calls == [["docker", "build", "--pull", "-t", "agentseek-up:8125", "-f", str((tmp_path / ".agentseek" / "Dockerfile").resolve()), "."]]
+    assert capture.calls == [
+        [
+            "docker",
+            "build",
+            "--pull",
+            "-t",
+            "agentseek-up:8125",
+            "-f",
+            str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
+            ".",
+        ]
+    ]
 
 
 def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) -> None:
@@ -2081,7 +2331,9 @@ def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) 
     stderr = io.StringIO()
     capture = _RunCapture()
 
-    def existing_container_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
+    def existing_container_runner(
+        command: list[str], *, env: dict[str, str], cwd: str | None = None
+    ) -> int:
         capture(command, env=env, cwd=cwd)
         if command[:3] == ["docker", "container", "inspect"]:
             return 0
@@ -2132,14 +2384,21 @@ def test_container_exists_uses_quiet_probe_for_default_runner(
     )
 
     assert exists is True
-    assert observed["command"] == ["docker", "container", "inspect", "agentseek-up-8123"]
+    assert observed["command"] == [
+        "docker",
+        "container",
+        "inspect",
+        "agentseek-up-8123",
+    ]
     kwargs = observed["kwargs"]
     assert kwargs["stdout"] is cli_module.subprocess.DEVNULL
     assert kwargs["stderr"] is cli_module.subprocess.DEVNULL
     assert kwargs["check"] is False
 
 
-def test_up_command_waits_for_http_health_when_requested(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_up_command_waits_for_http_health_when_requested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from agentseek_api import cli as cli_module
 
     config_path = _write_basic_langgraph_config(tmp_path)

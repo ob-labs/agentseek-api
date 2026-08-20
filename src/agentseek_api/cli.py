@@ -15,8 +15,20 @@ from pathlib import Path
 from typing import TextIO
 
 from agentseek_api import __version__
+from agentseek_api.container_policy import (
+    APP_CONTAINER_POLICY,
+    HOST_RUNTIME_POLICY,
+    ContainerSelection,
+    select_application_payload,
+)
 from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
+from agentseek_api.environment import (
+    CommandDerivedAssignment,
+    EnvironmentPlan,
+    EnvironmentTarget,
+    resolve_environment,
+)
 from agentseek_api.process_supervisor import (
     ForegroundChildSupervisor,
     ForwardingSignalGuard,
@@ -88,6 +100,8 @@ class CliConfig:
     image_distro: str | None = None
     pip_config_file: Path | None = None
     dockerfile_lines: list[str] = field(default_factory=list)
+    compose_env: tuple[str, ...] = ()
+    build_include: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -228,13 +242,22 @@ def _normalize_symbol_reference(reference: str, *, config_path: Path) -> str:
     if parts is None:
         return reference
     module_name, symbol_name = parts
-    if module_name.endswith(".py") or module_name.startswith(".") or "/" in module_name or "\\" in module_name:
-        resolved_module = _resolve_path_from_config(module_name, config_path=config_path)
+    if (
+        module_name.endswith(".py")
+        or module_name.startswith(".")
+        or "/" in module_name
+        or "\\" in module_name
+    ):
+        resolved_module = _resolve_path_from_config(
+            module_name, config_path=config_path
+        )
         return f"{resolved_module}:{symbol_name}"
     return reference
 
 
-def _normalize_env_mapping(raw_env: object, *, config_path: Path) -> tuple[dict[str, str], Path | None]:
+def _normalize_env_mapping(
+    raw_env: object, *, config_path: Path
+) -> tuple[dict[str, str], Path | None]:
     if raw_env is None:
         return {}, None
     if isinstance(raw_env, str):
@@ -246,61 +269,122 @@ def _normalize_env_mapping(raw_env: object, *, config_path: Path) -> tuple[dict[
         env_mapping: dict[str, str] = {}
         for key, value in raw_env.items():
             if not isinstance(key, str):
-                raise CliError(f"Config file '{config_path}' env mapping keys must be strings.")
+                raise CliError(
+                    f"Config file '{config_path}' env mapping keys must be strings."
+                )
             if isinstance(value, (str, int, float, bool)) or value is None:
                 env_mapping[key] = "" if value is None else str(value)
             else:
-                raise CliError(f"Config file '{config_path}' env mapping values must be scalar.")
+                raise CliError(
+                    f"Config file '{config_path}' env mapping values must be scalar."
+                )
         return env_mapping, None
-    raise CliError(f"Config file '{config_path}' must set 'env' to a path string or key/value object.")
+    raise CliError(
+        f"Config file '{config_path}' must set 'env' to a path string or key/value object."
+    )
+
+
+def _normalize_name_list(
+    raw_value: object, *, config_path: Path, field_name: str
+) -> tuple[str, ...]:
+    if raw_value is None:
+        return ()
+    if not isinstance(raw_value, list) or not all(
+        isinstance(name, str) and name.strip() for name in raw_value
+    ):
+        raise CliError(
+            f"Config file '{config_path}' field '{field_name}' must be an array of non-empty strings."
+        )
+    return tuple(name.strip() for name in raw_value)
 
 
 def _load_cli_config(config_path: Path) -> CliConfig:
     payload = _load_config_payload(config_path)
-    env_mapping, env_file = _normalize_env_mapping(payload.get("env"), config_path=config_path)
+    env_mapping, env_file = _normalize_env_mapping(
+        payload.get("env"), config_path=config_path
+    )
     raw_dependencies = payload.get("dependencies", [])
     if raw_dependencies is None:
         raw_dependencies = []
-    if not isinstance(raw_dependencies, list) or not all(isinstance(item, str) and item.strip() for item in raw_dependencies):
-        raise CliError(f"Config file '{config_path}' field 'dependencies' must be an array of non-empty strings.")
+    if not isinstance(raw_dependencies, list) or not all(
+        isinstance(item, str) and item.strip() for item in raw_dependencies
+    ):
+        raise CliError(
+            f"Config file '{config_path}' field 'dependencies' must be an array of non-empty strings."
+        )
 
     auth_path: str | None = None
     raw_auth = payload.get("auth")
     if raw_auth is not None:
         if not isinstance(raw_auth, dict):
-            raise CliError(f"Config file '{config_path}' field 'auth' must be an object.")
+            raise CliError(
+                f"Config file '{config_path}' field 'auth' must be an object."
+            )
         raw_auth_path = raw_auth.get("path")
         if raw_auth_path is not None:
             if not isinstance(raw_auth_path, str) or not raw_auth_path.strip():
-                raise CliError(f"Config file '{config_path}' field 'auth.path' must be a non-empty string.")
-            auth_path = _normalize_symbol_reference(raw_auth_path.strip(), config_path=config_path)
+                raise CliError(
+                    f"Config file '{config_path}' field 'auth.path' must be a non-empty string."
+                )
+            auth_path = _normalize_symbol_reference(
+                raw_auth_path.strip(), config_path=config_path
+            )
 
     raw_pip_config = payload.get("pip_config_file")
     pip_config_file: Path | None = None
     if raw_pip_config is not None:
         if not isinstance(raw_pip_config, str) or not raw_pip_config.strip():
-            raise CliError(f"Config file '{config_path}' field 'pip_config_file' must be a non-empty string.")
-        pip_config_file = _resolve_path_from_config(raw_pip_config, config_path=config_path)
+            raise CliError(
+                f"Config file '{config_path}' field 'pip_config_file' must be a non-empty string."
+            )
+        pip_config_file = _resolve_path_from_config(
+            raw_pip_config, config_path=config_path
+        )
         if not pip_config_file.exists():
             raise CliError(f"Pip config file '{pip_config_file}' does not exist.")
 
     raw_base_image = payload.get("base_image")
-    if raw_base_image is not None and (not isinstance(raw_base_image, str) or not raw_base_image.strip()):
-        raise CliError(f"Config file '{config_path}' field 'base_image' must be a non-empty string.")
+    if raw_base_image is not None and (
+        not isinstance(raw_base_image, str) or not raw_base_image.strip()
+    ):
+        raise CliError(
+            f"Config file '{config_path}' field 'base_image' must be a non-empty string."
+        )
 
     raw_python_version = payload.get("python_version")
-    if raw_python_version is not None and (not isinstance(raw_python_version, str) or not raw_python_version.strip()):
-        raise CliError(f"Config file '{config_path}' field 'python_version' must be a non-empty string.")
+    if raw_python_version is not None and (
+        not isinstance(raw_python_version, str) or not raw_python_version.strip()
+    ):
+        raise CliError(
+            f"Config file '{config_path}' field 'python_version' must be a non-empty string."
+        )
 
     raw_image_distro = payload.get("image_distro")
-    if raw_image_distro is not None and (not isinstance(raw_image_distro, str) or not raw_image_distro.strip()):
-        raise CliError(f"Config file '{config_path}' field 'image_distro' must be a non-empty string.")
+    if raw_image_distro is not None and (
+        not isinstance(raw_image_distro, str) or not raw_image_distro.strip()
+    ):
+        raise CliError(
+            f"Config file '{config_path}' field 'image_distro' must be a non-empty string."
+        )
 
     raw_dockerfile_lines = payload.get("dockerfile_lines", [])
     if raw_dockerfile_lines is None:
         raw_dockerfile_lines = []
-    if not isinstance(raw_dockerfile_lines, list) or not all(isinstance(item, str) for item in raw_dockerfile_lines):
-        raise CliError(f"Config file '{config_path}' field 'dockerfile_lines' must be an array of strings.")
+    if not isinstance(raw_dockerfile_lines, list) or not all(
+        isinstance(item, str) for item in raw_dockerfile_lines
+    ):
+        raise CliError(
+            f"Config file '{config_path}' field 'dockerfile_lines' must be an array of strings."
+        )
+
+    compose_env = _normalize_name_list(
+        payload.get("compose_env"), config_path=config_path, field_name="compose_env"
+    )
+    build_include = _normalize_name_list(
+        payload.get("build_include"),
+        config_path=config_path,
+        field_name="build_include",
+    )
 
     return CliConfig(
         dependencies=[item.strip() for item in raw_dependencies],
@@ -309,10 +393,16 @@ def _load_cli_config(config_path: Path) -> CliConfig:
         env_file=env_file,
         auth_path=auth_path,
         base_image=raw_base_image.strip() if isinstance(raw_base_image, str) else None,
-        python_version=raw_python_version.strip() if isinstance(raw_python_version, str) else None,
-        image_distro=raw_image_distro.strip() if isinstance(raw_image_distro, str) else None,
+        python_version=raw_python_version.strip()
+        if isinstance(raw_python_version, str)
+        else None,
+        image_distro=raw_image_distro.strip()
+        if isinstance(raw_image_distro, str)
+        else None,
         pip_config_file=pip_config_file,
         dockerfile_lines=list(raw_dockerfile_lines),
+        compose_env=compose_env,
+        build_include=build_include,
     )
 
 
@@ -324,31 +414,35 @@ def build_runtime_env(
     base_env: dict[str, str] | None = None,
 ) -> dict[str, str]:
     inherited = dict(os.environ if base_env is None else base_env)
-    env: dict[str, str] = {}
     config = _load_cli_config(config_path) if config_path is not None else None
-
-    if config is not None:
-        if config.env_file is not None:
-            _apply_env_layer(
-                env,
-                _read_env_layer(config.env_file, inherited=inherited),
-            )
-        env.update(config.env_mapping)
-        if config.auth_path:
-            env["AUTH_MODULE_PATH"] = config.auth_path
-
-    if env_file:
-        resolved_env_file = _resolve_path(env_file, cwd=cwd)
-        _apply_env_layer(
-            env,
-            _read_env_layer(resolved_env_file, inherited=inherited),
-        )
-
-    env.update(inherited)
-    env.pop("AGENTSEEK_GRAPHS", None)
+    cli_dotenv = _resolve_path(env_file, cwd=cwd) if env_file else None
+    assignments: tuple[CommandDerivedAssignment, ...] = ()
+    inherited.pop("AGENTSEEK_GRAPHS", None)
     if config_path is not None:
-        env["AGENTSEEK_GRAPHS"] = str(config_path)
-    return env
+        assignments = (
+            CommandDerivedAssignment(
+                targets=frozenset({EnvironmentTarget.HOST_RUNTIME}),
+                values={"AGENTSEEK_GRAPHS": str(config_path)},
+                reason="selected host config path",
+            ),
+        )
+    try:
+        resolved = resolve_environment(
+            EnvironmentPlan(
+                config_path=config_path,
+                config_dotenv=config.env_file if config is not None else None,
+                config_mapping=config.env_mapping if config is not None else {},
+                auth_path=config.auth_path if config is not None else None,
+                cli_dotenv=cli_dotenv,
+                launch_environment=inherited,
+                command_assignments=assignments,
+                explicit_names=frozenset(),
+            ),
+            HOST_RUNTIME_POLICY,
+        )
+    except DotenvFileError as exc:
+        raise CliError(str(exc)) from exc
+    return dict(resolved.values)
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
@@ -387,7 +481,9 @@ def build_scheduler_command() -> list[str]:
     ]
 
 
-def _default_runner(command: list[str], *, env: dict[str, str], cwd: str | None = None) -> int:
+def _default_runner(
+    command: list[str], *, env: dict[str, str], cwd: str | None = None
+) -> int:
     try:
         with ForwardingSignalGuard() as signals:
             child = ForegroundChildSupervisor.start(command, env=env, cwd=cwd)
@@ -471,7 +567,9 @@ def _wait_for_dev_server_ready(
     ready_urls = [f"{api_url}/ok", f"{api_url}/health"]
     while time.monotonic() < deadline:
         if process.poll() is not None:
-            raise CliError(f"Development server exited before becoming ready (exit code {process.returncode}).")
+            raise CliError(
+                f"Development server exited before becoming ready (exit code {process.returncode})."
+            )
         for ready_url in ready_urls:
             try:
                 with urllib_request.urlopen(ready_url, timeout=2.0) as response:
@@ -547,7 +645,9 @@ def _run_managed_dev_server(
                 continue
 
 
-def _execute_runtime_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
+def _execute_runtime_command(
+    args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
+) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
     command = build_uvicorn_command(
@@ -588,13 +688,17 @@ def _execute_dev_command(
     )
 
 
-def _execute_worker_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
+def _execute_worker_command(
+    args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
+) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
     return runner(build_worker_command(), env=env, cwd=str(cwd))
 
 
-def _execute_scheduler_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
+def _execute_scheduler_command(
+    args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
+) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
     return runner(build_scheduler_command(), env=env, cwd=str(cwd))
@@ -604,12 +708,18 @@ def _load_config_payload(config_path: Path) -> dict[str, object]:
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
     except Exception as exc:  # noqa: BLE001
-        raise CliError(f"Config file '{config_path}' could not be parsed as JSON: {exc}") from exc
+        raise CliError(
+            f"Config file '{config_path}' could not be parsed as JSON: {exc}"
+        ) from exc
     if not isinstance(payload, dict):
-        raise CliError(f"Config file '{config_path}' must contain a top-level JSON object.")
+        raise CliError(
+            f"Config file '{config_path}' must contain a top-level JSON object."
+        )
     graphs = payload.get("graphs")
     if not isinstance(graphs, dict) or not graphs:
-        raise CliError(f"Config file '{config_path}' must contain a non-empty 'graphs' object.")
+        raise CliError(
+            f"Config file '{config_path}' must contain a non-empty 'graphs' object."
+        )
     return payload
 
 
@@ -617,7 +727,9 @@ def _container_config_path(*, config_path: Path, cwd: Path) -> str:
     try:
         relative_path = config_path.relative_to(cwd)
     except ValueError as exc:
-        raise CliError(f"Config file '{config_path}' must live under the project root '{cwd}' for Docker builds.") from exc
+        raise CliError(
+            f"Config file '{config_path}' must live under the project root '{cwd}' for Docker builds."
+        ) from exc
     return f"/deps/agent/{relative_path.as_posix()}"
 
 
@@ -626,7 +738,12 @@ def _containerize_symbol_reference(reference: str, *, cwd: Path) -> str:
     if parts is None:
         return reference
     module_name, symbol_name = parts
-    if module_name.endswith(".py") or module_name.startswith(".") or "/" in module_name or "\\" in module_name:
+    if (
+        module_name.endswith(".py")
+        or module_name.startswith(".")
+        or "/" in module_name
+        or "\\" in module_name
+    ):
         resolved_module = _resolve_path(module_name, cwd=cwd)
         return f"{_container_config_path(config_path=resolved_module, cwd=cwd)}:{symbol_name}"
     return reference
@@ -640,12 +757,19 @@ def _resolve_dependency_path(dependency: str, *, config_path: Path) -> Path:
 
 
 def _is_local_dependency(dependency: str) -> bool:
-    return dependency == "." or dependency.startswith(".") or "/" in dependency or "\\" in dependency
+    return (
+        dependency == "."
+        or dependency.startswith(".")
+        or "/" in dependency
+        or "\\" in dependency
+    )
 
 
 def _dependency_install_command(*, dependency_path: Path, cwd: Path) -> str | None:
     container_path = _container_config_path(config_path=dependency_path, cwd=cwd)
-    if (dependency_path / "pyproject.toml").exists() or (dependency_path / "setup.py").exists():
+    if (dependency_path / "pyproject.toml").exists() or (
+        dependency_path / "setup.py"
+    ).exists():
         return f"pip install --no-cache-dir {container_path}"
     if (dependency_path / "requirements.txt").exists():
         return f"pip install --no-cache-dir -r {container_path}/requirements.txt"
@@ -670,14 +794,18 @@ def _find_installable_project_root(*, start: Path, cwd: Path) -> Path:
 
 def _root_install_command(*, project_root: Path, cwd: Path) -> str | None:
     container_path = _container_config_path(config_path=project_root, cwd=cwd)
-    if (project_root / "pyproject.toml").exists() or (project_root / "setup.py").exists():
+    if (project_root / "pyproject.toml").exists() or (
+        project_root / "setup.py"
+    ).exists():
         return f"pip install --no-cache-dir {container_path}"
     if (project_root / "requirements.txt").exists():
         return f"pip install --no-cache-dir -r {container_path}/requirements.txt"
     return None
 
 
-def _docker_dependency_plan(*, config: CliConfig, config_path: Path, cwd: Path) -> tuple[list[str], list[str]]:
+def _docker_dependency_plan(
+    *, config: CliConfig, config_path: Path, cwd: Path
+) -> tuple[list[str], list[str]]:
     pythonpath_entries = ["/deps/agent"]
     install_commands: list[str] = []
     seen_pythonpath: set[str] = set()
@@ -685,13 +813,22 @@ def _docker_dependency_plan(*, config: CliConfig, config_path: Path, cwd: Path) 
 
     for dependency in config.dependencies:
         if _is_local_dependency(dependency):
-            dependency_path = _resolve_dependency_path(dependency, config_path=config_path)
-            container_path = _container_config_path(config_path=dependency_path, cwd=cwd)
+            dependency_path = _resolve_dependency_path(
+                dependency, config_path=config_path
+            )
+            container_path = _container_config_path(
+                config_path=dependency_path, cwd=cwd
+            )
             if container_path not in seen_pythonpath:
                 pythonpath_entries.append(container_path)
                 seen_pythonpath.add(container_path)
-            install_command = _dependency_install_command(dependency_path=dependency_path, cwd=cwd)
-            if install_command is not None and install_command not in seen_install_commands:
+            install_command = _dependency_install_command(
+                dependency_path=dependency_path, cwd=cwd
+            )
+            if (
+                install_command is not None
+                and install_command not in seen_install_commands
+            ):
                 install_commands.append(install_command)
                 seen_install_commands.add(install_command)
             continue
@@ -712,17 +849,49 @@ def _ambient_container_env() -> dict[str, str]:
     }
 
 
-def build_container_env(*, config_path: Path, env_file: str | None, cwd: Path) -> dict[str, str]:
-    env = build_runtime_env(
-        config_path=config_path,
-        env_file=env_file,
-        cwd=cwd,
-        base_env=_ambient_container_env(),
-    )
-    env["AGENTSEEK_GRAPHS"] = _container_config_path(config_path=config_path, cwd=cwd)
+def build_container_env(
+    *,
+    config_path: Path,
+    env_file: str | None,
+    cwd: Path,
+    pass_env: frozenset[str] = frozenset(),
+    compose_env: frozenset[str] = frozenset(),
+) -> dict[str, str]:
+    config = _load_cli_config(config_path)
+    cli_dotenv = _resolve_path(env_file, cwd=cwd) if env_file else None
+    container_manifest = _container_config_path(config_path=config_path, cwd=cwd)
+    try:
+        resolved = resolve_environment(
+            EnvironmentPlan(
+                config_path=config_path,
+                config_dotenv=config.env_file,
+                config_mapping=config.env_mapping,
+                auth_path=config.auth_path,
+                cli_dotenv=cli_dotenv,
+                launch_environment=dict(os.environ),
+                command_assignments=(
+                    CommandDerivedAssignment(
+                        targets=frozenset({EnvironmentTarget.APP_CONTAINER}),
+                        values={"AGENTSEEK_GRAPHS": container_manifest},
+                        reason="container manifest path",
+                    ),
+                ),
+                explicit_names=pass_env,
+            ),
+            APP_CONTAINER_POLICY,
+        )
+        env = dict(
+            select_application_payload(
+                resolved, ContainerSelection(pass_env=pass_env, compose_env=compose_env)
+            )
+        )
+    except (DotenvFileError, ValueError) as exc:
+        raise CliError(str(exc)) from exc
     auth_module_path = env.get("AUTH_MODULE_PATH")
     if auth_module_path:
-        env["AUTH_MODULE_PATH"] = _containerize_symbol_reference(auth_module_path, cwd=cwd)
+        env["AUTH_MODULE_PATH"] = _containerize_symbol_reference(
+            auth_module_path, cwd=cwd
+        )
     return env
 
 
@@ -734,7 +903,9 @@ def _default_base_image(*, python_version: str | None, image_distro: str | None)
     if distro in {"bookworm", "bullseye"}:
         return f"python:{version}-slim-{distro}"
     if distro == "wolfi":
-        raise CliError("image_distro 'wolfi' is not supported without an explicit base_image.")
+        raise CliError(
+            "image_distro 'wolfi' is not supported without an explicit base_image."
+        )
     raise CliError(f"Unsupported image_distro '{image_distro}'.")
 
 
@@ -742,7 +913,9 @@ def _supports_apt_get_base_image(base_image: str) -> bool:
     normalized = base_image.strip().lower()
     if normalized.startswith(("python:", "debian:", "ubuntu:", "langchain/langgraph")):
         return "alpine" not in normalized and "wolfi" not in normalized
-    return any(marker in normalized for marker in ("debian", "ubuntu", "bookworm", "bullseye"))
+    return any(
+        marker in normalized for marker in ("debian", "ubuntu", "bookworm", "bullseye")
+    )
 
 
 def _validate_base_image(base_image: str) -> None:
@@ -754,7 +927,9 @@ def _validate_base_image(base_image: str) -> None:
     )
 
 
-def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str | None = None) -> str:
+def render_dockerfile(
+    *, config_path: Path, cwd: Path, base_image_override: str | None = None
+) -> str:
     config = _load_cli_config(config_path)
     project_root = _find_installable_project_root(start=config_path.parent, cwd=cwd)
     container_config = _container_config_path(config_path=config_path, cwd=cwd)
@@ -764,16 +939,25 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
         cwd=cwd,
     )
     root_install_command = _root_install_command(project_root=project_root, cwd=cwd)
-    if root_install_command is not None and root_install_command not in dependency_install_commands:
+    if (
+        root_install_command is not None
+        and root_install_command not in dependency_install_commands
+    ):
         dependency_install_commands.append(root_install_command)
-    base_image = base_image_override or config.base_image or _default_base_image(
-        python_version=config.python_version,
-        image_distro=config.image_distro,
+    base_image = (
+        base_image_override
+        or config.base_image
+        or _default_base_image(
+            python_version=config.python_version,
+            image_distro=config.image_distro,
+        )
     )
     _validate_base_image(base_image)
     pip_install_prefix = ""
     if config.pip_config_file is not None:
-        pip_config_path = _container_config_path(config_path=config.pip_config_file, cwd=cwd)
+        pip_config_path = _container_config_path(
+            config_path=config.pip_config_file, cwd=cwd
+        )
         pip_install_prefix = f"PIP_CONFIG_FILE={pip_config_path} "
     return "\n".join(
         [
@@ -787,7 +971,10 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
             "",
             "WORKDIR /deps/agent",
             "COPY . /deps/agent",
-            *[f"RUN {pip_install_prefix}{command}" for command in dependency_install_commands],
+            *[
+                f"RUN {pip_install_prefix}{command}"
+                for command in dependency_install_commands
+            ],
             *config.dockerfile_lines,
             f"ENV AGENTSEEK_GRAPHS={container_config}",
             f"EXPOSE {DEFAULT_API_PORT}",
@@ -797,29 +984,45 @@ def render_dockerfile(*, config_path: Path, cwd: Path, base_image_override: str 
     )
 
 
-def write_dockerfile(*, config_path: Path, save_path: Path, cwd: Path, base_image_override: str | None = None) -> Path:
+def write_dockerfile(
+    *,
+    config_path: Path,
+    save_path: Path,
+    cwd: Path,
+    base_image_override: str | None = None,
+) -> Path:
     save_path.parent.mkdir(parents=True, exist_ok=True)
     save_path.write_text(
-        render_dockerfile(config_path=config_path, cwd=cwd, base_image_override=base_image_override),
+        render_dockerfile(
+            config_path=config_path, cwd=cwd, base_image_override=base_image_override
+        ),
         encoding="utf-8",
     )
     return save_path
 
 
-def _execute_dockerfile_command(args: argparse.Namespace, *, stdout: TextIO, cwd: Path) -> int:
+def _execute_dockerfile_command(
+    args: argparse.Namespace, *, stdout: TextIO, cwd: Path
+) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
-        raise CliError(f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json.")
+        raise CliError(
+            f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
+        )
     save_path = _resolve_path(args.save_path, cwd=cwd)
     write_dockerfile(config_path=config_path, save_path=save_path, cwd=cwd)
     stdout.write(f"{save_path}\n")
     return 0
 
 
-def _execute_build_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
+def _execute_build_command(
+    args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
+) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
-        raise CliError(f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json.")
+        raise CliError(
+            f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
+        )
     generated_dockerfile = write_dockerfile(
         config_path=config_path,
         save_path=(cwd / ".agentseek" / "Dockerfile").resolve(),
@@ -874,14 +1077,29 @@ def _container_exists(
     return runner(inspect_command, env=env, cwd=str(cwd)) == 0
 
 
-def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path) -> int:
+def _execute_up_command(
+    args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
+) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
-        raise CliError(f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json.")
+        raise CliError(
+            f"No config file found in '{cwd}'. Expected agentseek.json or langgraph.json."
+        )
 
     image = args.image
+    config = _load_cli_config(config_path)
+    selection = ContainerSelection(
+        pass_env=frozenset(args.pass_env),
+        compose_env=frozenset((*config.compose_env, *args.compose_pass_env)),
+    )
     env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    container_env = build_container_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    container_env = build_container_env(
+        config_path=config_path,
+        env_file=args.env_file,
+        cwd=cwd,
+        pass_env=selection.pass_env,
+        compose_env=selection.compose_env,
+    )
     if not image:
         image = f"agentseek-up:{args.port}"
         generated_dockerfile = write_dockerfile(
@@ -947,7 +1165,9 @@ def _execute_up_command(args: argparse.Namespace, *, runner: Callable[..., int],
     if run_exit_code != 0:
         return run_exit_code
     if args.wait:
-        _wait_for_http_ready(f"http://127.0.0.1:{args.port}/health", timeout_seconds=30.0)
+        _wait_for_http_ready(
+            f"http://127.0.0.1:{args.port}/health", timeout_seconds=30.0
+        )
     return 0
 
 
@@ -993,6 +1213,8 @@ def _add_command_parsers(
     up_parser.add_argument("--base-image")
     up_parser.add_argument("--image")
     up_parser.add_argument("--postgres-uri")
+    up_parser.add_argument("--pass-env", action="append", default=[])
+    up_parser.add_argument("--compose-pass-env", action="append", default=[])
     up_parser.add_argument("--watch", action="store_true")
     up_parser.add_argument("--debugger-base-url")
     up_parser.add_argument("--debugger-port", type=int)
