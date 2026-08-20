@@ -6,6 +6,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,8 +106,14 @@ def _validate_argv(argv: tuple[str, ...]) -> None:
         raise ContainerPolicyError("Docker invocation argv contains NUL.")
 
 
-def _validated_environment(environment: Mapping[str, str]) -> dict[str, str]:
+def _validated_environment(
+    environment: Mapping[str, str],
+    *,
+    label: str = "Docker invocation environment",
+    platform: str = sys.platform,
+) -> dict[str, str]:
     validated: dict[str, str] = {}
+    windows_names: set[str] = set()
     for name, value in environment.items():
         if "\0" in name:
             raise ContainerPolicyError(
@@ -116,6 +123,13 @@ def _validated_environment(environment: Mapping[str, str]) -> dict[str, str]:
             raise ContainerPolicyError(
                 f"Docker invocation environment value for '{name}' contains NUL."
             )
+        if platform == "win32":
+            logical_name = name.casefold()
+            if logical_name in windows_names:
+                raise ContainerPolicyError(
+                    f"{label} contains duplicate Windows environment names."
+                )
+            windows_names.add(logical_name)
         validated[name] = value
     return validated
 
@@ -128,15 +142,28 @@ def build_docker_run_invocation(
     application_payload: Mapping[str, str],
     container_argv: tuple[str, ...],
     cwd: Path,
+    platform: str = sys.platform,
 ) -> DockerRunInvocation:
-    collisions = docker_control.keys() & application_payload.keys()
+    control = _validated_environment(
+        docker_control,
+        label="Docker control environment",
+        platform=platform,
+    )
+    application = _validated_environment(
+        application_payload,
+        label="Application payload",
+        platform=platform,
+    )
+    if platform == "win32":
+        control_names = {name.casefold() for name in control}
+        collisions = {name for name in application if name.casefold() in control_names}
+    else:
+        collisions = control.keys() & application.keys()
     if collisions:
         names = ", ".join(sorted(collisions))
         raise ContainerPolicyError(
             f"Application payload collides with Docker control keys: {names}"
         )
-    control = _validated_environment(docker_control)
-    application = _validated_environment(application_payload)
     argv = [*base_argv]
     for name in sorted(application):
         argv.extend(("-e", name))

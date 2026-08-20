@@ -59,6 +59,120 @@ def test_docker_run_uses_names_in_argv_and_values_only_in_carrier(
     assert "sk-$#=雪" not in " ".join(invocation.argv)
 
 
+def test_docker_run_preserves_physical_newline_only_in_carrier(
+    tmp_path: Path,
+) -> None:
+    value = "first line\nsecond line"
+
+    invocation = build_docker_run_invocation(
+        base_argv=("docker", "run", "--rm"),
+        image="agentseek:test",
+        docker_control={},
+        application_payload={"MULTILINE": value},
+        container_argv=(),
+        cwd=tmp_path,
+    )
+
+    assert invocation.environment["MULTILINE"] == value
+    assert value not in " ".join(invocation.argv)
+    assert invocation.argv == (
+        "docker",
+        "run",
+        "--rm",
+        "-e",
+        "MULTILINE",
+        "agentseek:test",
+    )
+
+
+def test_windows_docker_run_rejects_casefolded_cross_map_collision(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(
+        ContainerPolicyError,
+        match="Application payload collides with Docker control keys",
+    ):
+        build_docker_run_invocation(
+            base_argv=("docker", "run"),
+            image="agentseek:test",
+            docker_control={"Path": "control"},
+            application_payload={"PATH": "application"},
+            container_argv=(),
+            cwd=tmp_path,
+            platform="win32",
+        )
+
+
+@pytest.mark.parametrize(
+    ("docker_control", "application_payload", "message"),
+    [
+        (
+            {"Path": "first", "PATH": "second"},
+            {},
+            "Docker control environment contains duplicate Windows environment names.",
+        ),
+        (
+            {},
+            {"Token": "first", "TOKEN": "second"},
+            "Application payload contains duplicate Windows environment names.",
+        ),
+    ],
+)
+def test_windows_docker_run_rejects_casefolded_duplicates_within_map(
+    tmp_path: Path,
+    docker_control: dict[str, str],
+    application_payload: dict[str, str],
+    message: str,
+) -> None:
+    with pytest.raises(ContainerPolicyError) as exc_info:
+        build_docker_run_invocation(
+            base_argv=("docker", "run"),
+            image="agentseek:test",
+            docker_control=docker_control,
+            application_payload=application_payload,
+            container_argv=(),
+            cwd=tmp_path,
+            platform="win32",
+        )
+
+    assert str(exc_info.value) == message
+
+
+def test_linux_docker_run_keeps_case_sensitive_name_semantics(tmp_path: Path) -> None:
+    invocation = build_docker_run_invocation(
+        base_argv=("docker", "run"),
+        image="agentseek:test",
+        docker_control={"Path": "control"},
+        application_payload={"PATH": "application"},
+        container_argv=(),
+        cwd=tmp_path,
+        platform="linux",
+    )
+
+    assert invocation.environment == {"Path": "control", "PATH": "application"}
+
+
+def test_nul_collision_is_rejected_before_value_free_collision_diagnostic(
+    tmp_path: Path,
+) -> None:
+    name = "PRIVATE\0NAME"
+
+    with pytest.raises(ContainerPolicyError) as exc_info:
+        build_docker_run_invocation(
+            base_argv=("docker", "run"),
+            image="agentseek:test",
+            docker_control={name: "control"},
+            application_payload={name: "application"},
+            container_argv=(),
+            cwd=tmp_path,
+        )
+
+    message = str(exc_info.value)
+    assert message == "Docker invocation environment name contains NUL."
+    assert "\0" not in message
+    assert "PRIVATE" not in message
+
+
 def test_non_run_docker_invocation_has_only_docker_control(tmp_path: Path) -> None:
     invocation = build_docker_control_invocation(
         argv=("docker", "image", "inspect", "agentseek:test"),
