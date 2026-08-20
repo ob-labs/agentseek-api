@@ -38,6 +38,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 _PORT = "48123"
 _SUCCESS = "container boundary verification passed"
 _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_URL_USERINFO = re.compile(r"(?P<scheme>https?://)[^/@\s]+@", re.IGNORECASE)
 
 
 class BoundaryFailure(RuntimeError):
@@ -157,6 +158,40 @@ def _parse_environment(output: bytes) -> Mapping[str, str]:
     return MappingProxyType(parsed)
 
 
+def _value_free_process_tail(
+    result: ProcessResult, *, redactions: tuple[bytes, ...]
+) -> str:
+    output = result.stdout + b"\n" + result.stderr
+    for value in redactions:
+        if value:
+            output = output.replace(value, b"<redacted>")
+    text = output.decode("utf-8", errors="replace")
+    text = _URL_USERINFO.sub(r"\g<scheme><redacted>@", text)
+    normalized = " | ".join(line.strip() for line in text.splitlines() if line.strip())
+    return normalized[-800:]
+
+
+def _invocation_stage(invocation: ProcessInvocation) -> str:
+    if isinstance(invocation, BuildImageInvocation):
+        return "candidate image build"
+    if isinstance(invocation, DockerRunInvocation):
+        return "direct carrier probe"
+    argv = invocation.argv
+    if argv[:3] == ("docker", "compose", "version"):
+        return "Compose capability query"
+    if argv[:3] == ("docker", "buildx", "version"):
+        return "Buildx version query"
+    if argv[:3] == ("docker", "buildx", "inspect"):
+        return "Buildx availability query"
+    if argv[:3] == ("docker", "image", "inspect"):
+        return "image contract query"
+    if argv[:3] == ("docker", "rm", "-f"):
+        return "container cleanup"
+    if argv[:2] == ("docker", "compose"):
+        return "Compose render"
+    return "Docker control query"
+
+
 def _probe_script(names: tuple[str, ...], result_name: str) -> str:
     if Path(result_name).name != result_name or not result_name:
         raise BoundaryFailure("synthetic probe result name boundary failed")
@@ -257,6 +292,8 @@ class _EvidenceTransport:
         default_factory=lambda: MappingProxyType({}), repr=False
     )
     image: str | None = None
+    last_stage: str = "planning"
+    last_failure_detail: str = field(default="", repr=False)
 
     def _record(self, invocation: ProcessInvocation) -> None:
         digest = (
@@ -346,6 +383,7 @@ class _EvidenceTransport:
 
     def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
         self._record(invocation)
+        self.last_stage = _invocation_stage(invocation)
         if isinstance(invocation, BuildImageInvocation):
             self.build_environment = MappingProxyType(dict(invocation.environment))
             self.build_context_archive = invocation.stdin_bytes
@@ -357,6 +395,18 @@ class _EvidenceTransport:
             )
             if result.returncode == 0:
                 self._capture_image(invocation)
+            else:
+                self.last_failure_detail = _value_free_process_tail(
+                    result,
+                    redactions=(
+                        *self.forbidden_values,
+                        *(
+                            value.encode()
+                            for value in invocation.environment.values()
+                            if value
+                        ),
+                    ),
+                )
             return result
         if isinstance(invocation, DockerRunInvocation):
             if self.image is None:
@@ -385,13 +435,26 @@ class _EvidenceTransport:
             if isinstance(invocation, ControlQueryInvocation)
             else None
         )
-        return _safe_process(
+        result = _safe_process(
             invocation.argv,
             cwd=invocation.cwd,
             environment=invocation.environment,
             stdin=invocation.stdin_bytes,
             timeout=timeout,
         )
+        if result.returncode != 0:
+            self.last_failure_detail = _value_free_process_tail(
+                result,
+                redactions=(
+                    *self.forbidden_values,
+                    *(
+                        value.encode()
+                        for value in invocation.environment.values()
+                        if value
+                    ),
+                ),
+            )
+        return result
 
 
 def _build_candidate(project: Path):
@@ -586,7 +649,15 @@ def collect_boundary_evidence(
                         runtime_artifact=artifact,
                     )
                     if exit_code != 0:
-                        raise BoundaryFailure("agentseek-api up boundary failed")
+                        detail = (
+                            f": {transport.last_failure_detail}"
+                            if transport.last_failure_detail
+                            else ""
+                        )
+                        raise BoundaryFailure(
+                            "agentseek-api up failed during "
+                            f"{transport.last_stage}{detail}"
+                        )
                     if transport.image is None:
                         raise BoundaryFailure(
                             "built image boundary evidence was missing"

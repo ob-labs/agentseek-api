@@ -118,6 +118,31 @@ def test_boundary_failure_emits_value_free_github_annotation(
     ]
 
 
+def test_process_failure_tail_is_bounded_and_value_free() -> None:
+    module = _load_script()
+    forbidden = "abc"
+    credential = "tiny-password"
+    result = ProcessResult(
+        returncode=1,
+        stdout=("x" * 2_000).encode(),
+        stderr=(
+            f"prefix{forbidden}suffix "
+            f"https://alice:{credential}@registry.invalid real build error"
+        ).encode(),
+    )
+
+    diagnostic = module._value_free_process_tail(
+        result,
+        redactions=(forbidden.encode(), credential.encode()),
+    )
+
+    assert len(diagnostic) <= 800
+    assert "real build error" in diagnostic
+    assert forbidden not in diagnostic
+    assert credential not in diagnostic
+    assert "alice" not in diagnostic
+
+
 @pytest.mark.parametrize(
     "application",
     [
@@ -288,3 +313,21 @@ def test_cli_config_autodiscovery_emits_value_free_ci_failure_annotation(
     assert "build output root could not be verified private" in diagnostic
     assert credential not in diagnostic
     assert "alice" not in diagnostic
+
+
+def test_cli_config_autodiscovery_reports_post_generation_contract_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_autodiscovery_script()
+    stderr = io.StringIO()
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+
+    with contextlib.redirect_stderr(stderr), pytest.raises(SystemExit):
+        module.main([])
+
+    assert "dockerfile bundle contract was incomplete" in stderr.getvalue()

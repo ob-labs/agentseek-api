@@ -104,12 +104,18 @@ def main(argv: list[str] | None = None) -> int:
             _report_github_failure(completed.stderr)
             raise SystemExit("agentseek-api dockerfile bundle generation failed")
 
-        _dockerfile, manifest = _verify_bundle(output_path)
-        if args.config is None:
-            assert manifest["graphs"] == {"agentseek": "chat.graph:graph"}
-            assert "langgraph" not in json.dumps(manifest["graphs"])
-        else:
-            assert manifest.get("graphs")
+        try:
+            _dockerfile, manifest = _verify_bundle(output_path)
+            if args.config is None:
+                if manifest.get("graphs") != {"agentseek": "chat.graph:graph"}:
+                    raise SystemExit("auto-discovered graph manifest did not match")
+                if "langgraph" in json.dumps(manifest["graphs"]):
+                    raise SystemExit("the lower-priority graph manifest was selected")
+            elif not manifest.get("graphs"):
+                raise SystemExit("the explicit graph manifest was empty")
+        except SystemExit as exc:
+            _report_github_failure(str(exc))
+            raise
     return 0
 
 
