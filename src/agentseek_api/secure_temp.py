@@ -603,7 +603,10 @@ def _verify_windows_dacl(  # pragma: no cover - native Windows only
     try:
         user_sid = _current_user_sid()
         system_sid = _well_known_system_sid()
-        if not _sid_matches(owner, user_sid):
+        # The protected root has a strict current-user owner. Ordinary children can
+        # receive the process token's default owner on Windows, so descendants are
+        # trusted by their exact inherited user+SYSTEM DACL instead of owner SID.
+        if not descendant and not _sid_matches(owner, user_sid):
             raise _win32_error("Could not prove exclusive Windows access.")
 
         control = wintypes.WORD()

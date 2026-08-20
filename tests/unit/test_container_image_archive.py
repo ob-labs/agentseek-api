@@ -116,6 +116,51 @@ def test_scanner_accepts_every_referenced_layer_and_no_trunc_history() -> None:
     )
 
 
+def _docker_save_with_repeated_layer(layer: bytes) -> bytes:
+    reference = "shared/layer.tar"
+    manifest = json.dumps(
+        [
+            {
+                "Config": "config.json",
+                "RepoTags": ["synthetic:test"],
+                "Layers": [reference, reference],
+            }
+        ],
+        separators=(",", ":"),
+    ).encode()
+    return _tar(
+        [
+            ("manifest.json", manifest),
+            ("config.json", b'{"history":[]}'),
+            (reference, layer),
+        ]
+    )
+
+
+def test_scanner_accepts_a_reused_docker_save_layer_reference() -> None:
+    scanner = _load_scanner()
+
+    scanner.scan_image_archive(
+        _docker_save_with_repeated_layer(_tar([("safe.txt", b"safe")])),
+        forbidden=b"high-entropy-canary",
+        history=b'{"CreatedBy":"safe"}\n',
+    )
+
+
+def test_reused_docker_save_layer_reference_cannot_hide_forbidden_bytes() -> None:
+    scanner = _load_scanner()
+    canary = b"high-entropy-canary"
+
+    with pytest.raises(scanner.ImageArchiveError, match="forbidden bytes"):
+        scanner.scan_image_archive(
+            _docker_save_with_repeated_layer(
+                _tar([("payload.txt", b"prefix" + canary + b"suffix")])
+            ),
+            forbidden=canary,
+            history=b'{"CreatedBy":"safe"}\n',
+        )
+
+
 def test_scanner_accepts_an_oci_index_and_verifies_referenced_blobs() -> None:
     scanner = _load_scanner()
 

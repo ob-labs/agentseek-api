@@ -150,15 +150,16 @@ def _scan_docker_save(files: Mapping[str, bytes], forbidden: bytes) -> None:
     layer_references = entry.get("Layers")
     if not isinstance(layer_references, list) or not layer_references:
         raise ImageArchiveError("Docker save layer references were invalid")
-    references = [config_reference, *layer_references]
-    if any(not isinstance(reference, str) for reference in references) or len(
-        set(references)
-    ) != len(references):
-        raise ImageArchiveError("Docker save references were duplicated or invalid")
+    if (
+        not isinstance(config_reference, str)
+        or any(not isinstance(reference, str) for reference in layer_references)
+        or config_reference in layer_references
+    ):
+        raise ImageArchiveError("Docker save references were invalid")
     config = _require_file(files, config_reference, "Docker save config")
     _json_object(config, "Docker save config")
     _scan_forbidden(config, forbidden)
-    for reference in layer_references:
+    for reference in dict.fromkeys(layer_references):
         _scan_layer(_require_file(files, reference, "Docker save layer"), forbidden)
 
 
