@@ -220,21 +220,31 @@ def _scan_oci(files: Mapping[str, bytes], forbidden: bytes) -> None:
         files, manifests[0], _OCI_MANIFEST_MEDIA_TYPES, "OCI manifest"
     )
     manifest = _json_object(manifest_bytes, "OCI manifest")
+    config_descriptor = manifest.get("config")
     config_bytes, _ = _oci_blob(
-        files, manifest.get("config"), _OCI_CONFIG_MEDIA_TYPES, "OCI config"
+        files, config_descriptor, _OCI_CONFIG_MEDIA_TYPES, "OCI config"
     )
     _json_object(config_bytes, "OCI config")
     _scan_forbidden(config_bytes, forbidden)
     layers = manifest.get("layers")
     if not isinstance(layers, list) or not layers:
         raise ImageArchiveError("OCI layer descriptors were invalid")
-    digests: set[str] = set()
+    config_digest = (
+        config_descriptor.get("digest") if isinstance(config_descriptor, dict) else None
+    )
+    descriptors: dict[str, Mapping[str, Any]] = {}
     for descriptor in layers:
-        if not isinstance(descriptor, dict) or descriptor.get("digest") in digests:
-            raise ImageArchiveError("OCI layer references were duplicated or invalid")
+        if not isinstance(descriptor, dict):
+            raise ImageArchiveError("OCI layer references were invalid")
         digest = descriptor.get("digest")
-        if isinstance(digest, str):
-            digests.add(digest)
+        if not isinstance(digest, str) or digest == config_digest:
+            raise ImageArchiveError("OCI layer references were invalid")
+        previous = descriptors.get(digest)
+        if previous is not None:
+            if descriptor != previous:
+                raise ImageArchiveError("OCI layer references conflicted")
+            continue
+        descriptors[digest] = descriptor
         layer_bytes, media_type = _oci_blob(
             files, descriptor, set(_OCI_LAYER_ENCODINGS), "OCI layer"
         )

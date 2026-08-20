@@ -84,14 +84,21 @@ def _descriptor(payload: bytes, media_type: str) -> dict[str, object]:
     }
 
 
-def _oci_archive(*, layer: bytes, config: bytes = b'{"history":[]}') -> bytes:
+def _oci_archive(
+    *,
+    layer: bytes,
+    config: bytes = b'{"history":[]}',
+    repeat_layer: bool = False,
+) -> bytes:
     config_descriptor = _descriptor(config, "application/vnd.oci.image.config.v1+json")
     layer_descriptor = _descriptor(layer, "application/vnd.oci.image.layer.v1.tar+gzip")
     manifest = json.dumps(
         {
             "schemaVersion": 2,
             "config": config_descriptor,
-            "layers": [layer_descriptor],
+            "layers": [layer_descriptor, layer_descriptor]
+            if repeat_layer
+            else [layer_descriptor],
         },
         separators=(",", ":"),
     ).encode()
@@ -205,6 +212,34 @@ def test_scanner_accepts_an_oci_index_and_verifies_referenced_blobs() -> None:
         forbidden=b"high-entropy-canary",
         history=b'{"CreatedBy":"safe"}\n',
     )
+
+
+def test_scanner_accepts_an_identical_reused_oci_layer_descriptor() -> None:
+    scanner = _load_scanner()
+
+    scanner.scan_image_archive(
+        _oci_archive(
+            layer=gzip.compress(_tar([("safe", b"safe")])),
+            repeat_layer=True,
+        ),
+        forbidden=b"high-entropy-canary",
+        history=b'{"CreatedBy":"safe"}\n',
+    )
+
+
+def test_reused_oci_layer_descriptor_cannot_hide_forbidden_bytes() -> None:
+    scanner = _load_scanner()
+    canary = b"high-entropy-canary"
+
+    with pytest.raises(scanner.ImageArchiveError, match="forbidden bytes"):
+        scanner.scan_image_archive(
+            _oci_archive(
+                layer=gzip.compress(_tar([("safe", b"prefix" + canary)])),
+                repeat_layer=True,
+            ),
+            forbidden=canary,
+            history=b'{"CreatedBy":"safe"}\n',
+        )
 
 
 def test_scanner_rejects_an_oci_blob_digest_mismatch() -> None:
