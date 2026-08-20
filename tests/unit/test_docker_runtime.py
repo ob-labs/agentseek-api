@@ -1077,7 +1077,9 @@ def test_custom_image_requires_every_exact_preloaded_label(label: str) -> None:
         (
             [],
             (
-                "agentseek-api",
+                "-I",
+                "-m",
+                "agentseek_api.cli",
                 "serve",
                 "--environment-mode",
                 "preloaded-v1",
@@ -1090,6 +1092,9 @@ def test_custom_image_requires_every_exact_preloaded_label(label: str) -> None:
         (
             ["agentseek-api"],
             (
+                "-I",
+                "-m",
+                "agentseek_api.cli",
                 "serve",
                 "--environment-mode",
                 "preloaded-v1",
@@ -1102,6 +1107,9 @@ def test_custom_image_requires_every_exact_preloaded_label(label: str) -> None:
         (
             ["python", "-m", "agentseek_api.cli"],
             (
+                "-I",
+                "-m",
+                "agentseek_api.cli",
                 "serve",
                 "--environment-mode",
                 "preloaded-v1",
@@ -1146,7 +1154,59 @@ def test_inspect_image_contract_uses_one_exact_query_and_overrides_cmd(
     )
     assert ".Config.Env" not in " ".join(calls[0].argv)
     assert contract.manifest_path == "/opt/agentseek/manifest.v1.json"
+    assert contract.entrypoint_override == "python"
     assert contract.container_argv == expected_command
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    [[], ["agentseek-api"], ["python", "-m", "agentseek_api.cli"]],
+)
+def test_custom_image_override_ignores_hostile_workdir_and_pythonpath(
+    tmp_path: Path, entrypoint: list[str]
+) -> None:
+    contract = inspect_image_contract(
+        "agentseek:test",
+        transport=lambda _invocation: ProcessResult(
+            returncode=0,
+            stdout=json.dumps(
+                [_compatible_image_labels(), entrypoint, ["hostile-default"]]
+            ).encode(),
+        ),
+        docker_control={},
+        cwd=tmp_path,
+    )
+    module_index = contract.container_argv.index("agentseek_api.cli")
+    probe_command = [
+        contract.entrypoint_override,
+        *contract.container_argv[: module_index + 1],
+        "version",
+    ]
+    hostile = tmp_path / "hostile"
+    package = hostile / "agentseek_api"
+    package.mkdir(parents=True)
+    marker = tmp_path / "hostile-custom-image-bootstrap"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('canary')\nraise SystemExit(23)\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(hostile)
+
+    completed = subprocess.run(
+        probe_command,
+        cwd=hostile,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == "agentseek-api 0.3.0\n"
+    assert marker.exists() is False
 
 
 @pytest.mark.parametrize(

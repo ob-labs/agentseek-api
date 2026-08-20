@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import importlib.metadata
+import importlib.util
 import json
 import os
 import runpy
@@ -19,23 +20,34 @@ TARGET_MODULES = {
     "scheduler": "agentseek_api.scheduler",
 }
 
+TARGET_DISTRIBUTIONS = {
+    "uvicorn": ("uvicorn", "uvicorn", None),
+    "worker": ("agentseek-api", "agentseek_api", "0.3.0"),
+    "scheduler": ("agentseek-api", "agentseek_api", "0.3.0"),
+}
+
 
 class RuntimeBootstrapError(RuntimeError):
     pass
 
 
-def _owned_runtime_locations() -> tuple[frozenset[Path], tuple[Path, ...]]:
+def _owned_distribution_locations(
+    distribution_name: str,
+    package_name: str,
+    *,
+    expected_version: str | None,
+) -> tuple[frozenset[Path], tuple[Path, ...]]:
     try:
-        distribution = importlib.metadata.distribution("agentseek-api")
+        distribution = importlib.metadata.distribution(distribution_name)
     except importlib.metadata.PackageNotFoundError as exc:
         raise RuntimeBootstrapError from exc
-    if distribution.version != "0.3.0":
+    if expected_version is not None and distribution.version != expected_version:
         raise RuntimeBootstrapError
 
     owned_files = frozenset(
         distribution.locate_file(item).resolve()
         for item in (distribution.files or ())
-        if item.parts[:1] == ("agentseek_api",)
+        if item.parts[:1] == (package_name,)
     )
     editable_roots: tuple[Path, ...] = ()
     try:
@@ -49,8 +61,8 @@ def _owned_runtime_locations() -> tuple[frozenset[Path], tuple[Path, ...]]:
                 editable_roots = tuple(
                     candidate.resolve()
                     for candidate in (
-                        checkout / "src" / "agentseek_api",
-                        checkout / "agentseek_api",
+                        checkout / "src" / package_name,
+                        checkout / package_name,
                     )
                     if candidate.is_dir()
                 )
@@ -59,6 +71,20 @@ def _owned_runtime_locations() -> tuple[frozenset[Path], tuple[Path, ...]]:
     if not owned_files and not editable_roots:
         raise RuntimeBootstrapError
     return owned_files, editable_roots
+
+
+def _owned_runtime_locations() -> tuple[frozenset[Path], tuple[Path, ...]]:
+    return _owned_distribution_locations(
+        "agentseek-api", "agentseek_api", expected_version="0.3.0"
+    )
+
+
+def _is_owned_path(
+    path: Path, *, owned_files: frozenset[Path], editable_roots: tuple[Path, ...]
+) -> bool:
+    return path in owned_files or any(
+        path == root or root in path.parents for root in editable_roots
+    )
 
 
 def _require_distribution_owned_runtime() -> None:
@@ -72,10 +98,32 @@ def _require_distribution_owned_runtime() -> None:
         if module_file is None:
             continue
         path = Path(module_file).resolve()
-        if path in owned_files or any(
-            path == root or root in path.parents for root in editable_roots
-        ):
+        if _is_owned_path(path, owned_files=owned_files, editable_roots=editable_roots):
             continue
+        raise RuntimeBootstrapError
+
+
+def _require_trusted_target_module(target_name: str) -> None:
+    distribution_name, package_name, expected_version = TARGET_DISTRIBUTIONS[
+        target_name
+    ]
+    target_module = TARGET_MODULES[target_name]
+    owned_files, editable_roots = _owned_distribution_locations(
+        distribution_name,
+        package_name,
+        expected_version=expected_version,
+    )
+    try:
+        spec = importlib.util.find_spec(target_module)
+    except (ImportError, ModuleNotFoundError, ValueError) as exc:
+        raise RuntimeBootstrapError from exc
+    if spec is None or spec.origin is None:
+        raise RuntimeBootstrapError
+    if not _is_owned_path(
+        Path(spec.origin).resolve(),
+        owned_files=owned_files,
+        editable_roots=editable_roots,
+    ):
         raise RuntimeBootstrapError
 
 
@@ -92,9 +140,9 @@ def _activate_preloaded_runtime() -> None:
         manifest = load_container_runtime_manifest_v1(Path(manifest_value))
     except ContainerBuildError as exc:
         raise RuntimeBootstrapError from exc
-    for dependency in reversed(manifest.dependencies):
+    for dependency in manifest.dependencies:
         if dependency not in sys.path:
-            sys.path.insert(0, dependency)
+            sys.path.append(dependency)
 
 
 def _format_settings_validation_error(exc: ValidationError) -> str:
@@ -125,6 +173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             if preloaded:
                 _require_distribution_owned_runtime()
+                _require_trusted_target_module(target_name)
                 _activate_preloaded_runtime()
             importlib.import_module("agentseek_api.settings")
             if preloaded:

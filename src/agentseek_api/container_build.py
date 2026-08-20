@@ -2287,6 +2287,7 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
             + json.dumps(
                 [
                     "python",
+                    "-I",
                     "-m",
                     "agentseek_api.cli",
                     "serve",

@@ -390,6 +390,41 @@ def test_dockerfile_uses_manifest_labels_and_buildkit_pip_secret(
     assert read_archive_member(bundle.archive_bytes(), "Dockerfile") == dockerfile
 
 
+def test_generated_image_command_ignores_hostile_workdir_and_pythonpath(
+    tmp_path: Path,
+) -> None:
+    text = render_build_dockerfile(build_plan_fixture(tmp_path)).decode("utf-8")
+    command_line = next(line for line in text.splitlines() if line.startswith("CMD "))
+    command = json.loads(command_line.removeprefix("CMD "))
+    module_index = command.index("agentseek_api.cli")
+    probe_command = [*command[: module_index + 1], "version"]
+    hostile = tmp_path / "hostile"
+    package = hostile / "agentseek_api"
+    package.mkdir(parents=True)
+    marker = tmp_path / "hostile-image-bootstrap"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "cli.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('canary')\nraise SystemExit(23)\n",
+        encoding="utf-8",
+    )
+    environment = dict(os.environ)
+    environment["PYTHONPATH"] = str(hostile)
+
+    completed = subprocess.run(
+        probe_command,
+        cwd=hostile,
+        env=environment,
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout == "agentseek-api 0.3.0\n"
+    assert marker.exists() is False
+
+
 def test_package_only_plan_does_not_copy_missing_app_directory(
     tmp_path: Path,
 ) -> None:

@@ -1387,6 +1387,11 @@ def _execute_up_command(
         "host.docker.internal:host-gateway",
         "-p",
         f"{args.port}:{DEFAULT_API_PORT}",
+        *(
+            ()
+            if custom_image_contract is None
+            else ("--entrypoint", custom_image_contract.entrypoint_override)
+        ),
     )
     run_invocation = build_docker_run_invocation(
         base_argv=base_argv,

@@ -1015,6 +1015,12 @@ def test_preloaded_runtime_bootstrap_orders_trust_manifest_and_settings(
         lambda: events.append("manifest"),
     )
     monkeypatch.setattr(
+        runtime_entrypoint,
+        "_require_trusted_target_module",
+        lambda name: events.append(f"target:{name}"),
+        raising=False,
+    )
+    monkeypatch.setattr(
         runtime_entrypoint.importlib,
         "import_module",
         lambda name: events.append(f"import:{name}"),
@@ -1028,6 +1034,7 @@ def test_preloaded_runtime_bootstrap_orders_trust_manifest_and_settings(
     assert runtime_entrypoint.main(["--preloaded-v1", "worker"]) == 0
     assert events == [
         "trust",
+        "target:worker",
         "manifest",
         "import:agentseek_api.settings",
         "trust",
@@ -1049,7 +1056,41 @@ def test_preloaded_runtime_activates_only_canonical_manifest_roots(
 
     _activate_preloaded_runtime()
 
-    assert sys.path == ["/deps/agent/application", "trusted-site-packages"]
+    assert sys.path == ["trusted-site-packages", "/deps/agent/application"]
+
+
+def test_preloaded_runtime_dependency_cannot_shadow_trusted_uvicorn_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api import container_build, runtime_entrypoint
+
+    dependency = tmp_path / "dependency"
+    package = dependency / "uvicorn"
+    package.mkdir(parents=True)
+    marker = tmp_path / "hostile-uvicorn-imported"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "__main__.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('canary')\nraise SystemExit(29)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENTSEEK_GRAPHS", str(tmp_path / "manifest.v1.json"))
+    monkeypatch.setattr(
+        container_build,
+        "load_container_runtime_manifest_v1",
+        lambda _path: types.SimpleNamespace(dependencies=(str(dependency),)),
+    )
+    monkeypatch.setattr(
+        runtime_entrypoint, "_require_distribution_owned_runtime", lambda: None
+    )
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    for module_name in tuple(sys.modules):
+        if module_name == "uvicorn" or module_name.startswith("uvicorn."):
+            monkeypatch.delitem(sys.modules, module_name)
+
+    exit_code = runtime_entrypoint.main(["--preloaded-v1", "uvicorn", "--", "--help"])
+
+    assert exit_code == 0
+    assert marker.exists() is False
 
 
 def test_dev_command_accepts_langgraph_cli_flags_and_env_file(
@@ -1997,7 +2038,7 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
     assert "agentseek-api[embedded]==0.3.0" in generated
     assert "org.agentseek.environment-contract=preloaded-v1" in generated
     assert (
-        'CMD ["python", "-m", "agentseek_api.cli", "serve", "--environment-mode", '
+        'CMD ["python", "-I", "-m", "agentseek_api.cli", "serve", "--environment-mode", '
         '"preloaded-v1", "--host", "0.0.0.0", "--port", "2024"]' in generated
     )
     assert not (tmp_path / ".agentseek").exists()
@@ -2294,7 +2335,9 @@ def test_up_with_custom_image_preserves_empty_or_package_auth(
         (
             [],
             (
-                "agentseek-api",
+                "-I",
+                "-m",
+                "agentseek_api.cli",
                 "serve",
                 "--environment-mode",
                 "preloaded-v1",
@@ -2307,6 +2350,9 @@ def test_up_with_custom_image_preserves_empty_or_package_auth(
         (
             ["python", "-m", "agentseek_api.cli"],
             (
+                "-I",
+                "-m",
+                "agentseek_api.cli",
                 "serve",
                 "--environment-mode",
                 "preloaded-v1",
@@ -2361,6 +2407,13 @@ def test_up_custom_image_inspects_contract_and_runs_explicit_preloaded_mode(
     assert ".Config.Env" not in " ".join(inspect.argv)
     run = next(call for call in capture.calls if isinstance(call, DockerRunInvocation))
     assert run.environment["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
+    image_index = run.argv.index("agentseek:test")
+    override_index = run.argv.index("--entrypoint")
+    assert run.argv[override_index : override_index + 2] == (
+        "--entrypoint",
+        "python",
+    )
+    assert override_index < image_index
     assert run.argv[-len(expected_tail) :] == expected_tail
 
 
@@ -2803,7 +2856,7 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
         "-p",
         "8123:2024",
     )
-    assert capture.calls[2].argv[-9] == "agentseek:test"
+    assert "agentseek:test" in capture.calls[2].argv
     container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
     assert container_env["METADATA_DB_URL"] == "sqlite+aiosqlite:////tmp/agentseek.db"
@@ -2943,7 +2996,7 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
         "-d",
         "--force-recreate",
     )
-    assert capture.calls[4].argv[-9] == "agentseek:test"
+    assert "agentseek:test" in capture.calls[4].argv
     for invocation in capture.calls:
         assert "AGENTSEEK_GRAPHS" not in invocation.environment or isinstance(
             invocation, DockerRunInvocation
