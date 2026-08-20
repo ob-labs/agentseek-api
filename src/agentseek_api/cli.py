@@ -16,13 +16,26 @@ from typing import TextIO
 
 from agentseek_api import __version__
 from agentseek_api.container_policy import (
+    APP_CONTAINER_POLICY,
     HOST_RUNTIME_POLICY,
     ContainerSelection,
+    docker_control_environment,
+    select_application_payload,
 )
 from agentseek_api.constants import DEFAULT_API_PORT
+from agentseek_api.docker_runtime import (
+    DockerRuntimeError,
+    LegacyRunnerAdapter,
+    ProcessTransport,
+    SubprocessTransport,
+    build_docker_control_invocation,
+    build_docker_query_invocation,
+    build_docker_run_invocation,
+)
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
 from agentseek_api.environment import (
     CommandDerivedAssignment,
+    ContainerPolicyError,
     EnvironmentPlan,
     EnvironmentTarget,
     resolve_environment,
@@ -531,6 +544,55 @@ def build_container_selection(
         pass_env=normalized(pass_env),
         compose_env=normalized((*config.compose_env, *compose_pass_env)),
     )
+
+
+def _build_container_environment_plan(
+    *,
+    config_path: Path,
+    env_file: str | None,
+    cwd: Path,
+    selection: ContainerSelection,
+    postgres_uri: str | None,
+) -> EnvironmentPlan:
+    host_plan = build_host_environment_plan(
+        config_path=config_path,
+        env_file=env_file,
+        cwd=cwd,
+        role=None,
+    )
+    return EnvironmentPlan(
+        config_path=host_plan.config_path,
+        config_dotenv=host_plan.config_dotenv,
+        config_mapping=host_plan.config_mapping,
+        auth_path=host_plan.auth_path,
+        cli_dotenv=host_plan.cli_dotenv,
+        launch_environment=host_plan.launch_environment,
+        command_assignments=build_container_command_assignments(
+            config_path=config_path,
+            cwd=cwd,
+            postgres_uri=postgres_uri,
+        ),
+        explicit_names=selection.pass_env,
+    )
+
+
+def _resolve_application_container_payload(
+    plan: EnvironmentPlan,
+    *,
+    selection: ContainerSelection,
+    cwd: Path,
+) -> dict[str, str]:
+    try:
+        resolved = resolve_environment(plan, APP_CONTAINER_POLICY)
+        payload = dict(select_application_payload(resolved, selection))
+    except (ContainerPolicyError, DotenvFileError) as exc:
+        raise CliError(str(exc)) from exc
+    auth_module_path = payload.get("AUTH_MODULE_PATH")
+    if auth_module_path:
+        payload["AUTH_MODULE_PATH"] = _containerize_symbol_reference(
+            auth_module_path, cwd=cwd
+        )
+    return payload
 
 
 def build_uvicorn_command(*, host: str, port: int, reload_enabled: bool) -> list[str]:
@@ -1085,7 +1147,7 @@ def _execute_dockerfile_command(
 
 
 def _execute_build_command(
-    args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
+    args: argparse.Namespace, *, process_transport: ProcessTransport, cwd: Path
 ) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
@@ -1103,8 +1165,18 @@ def _execute_build_command(
     if args.pull:
         command.append("--pull")
     command.extend(["-t", args.tag, "-f", str(generated_dockerfile), "."])
-    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    return runner(command, env=env, cwd=str(cwd))
+    plan = build_host_environment_plan(
+        config_path=config_path,
+        env_file=args.env_file,
+        cwd=cwd,
+        role=None,
+    )
+    invocation = build_docker_control_invocation(
+        argv=tuple(command),
+        docker_control=docker_control_environment(plan),
+        cwd=cwd,
+    )
+    return process_transport(invocation).returncode
 
 
 def _container_name_for_port(port: int) -> str:
@@ -1128,26 +1200,20 @@ def _wait_for_http_ready(url: str, *, timeout_seconds: float) -> None:
 def _container_exists(
     name: str,
     *,
-    runner: Callable[..., int],
-    env: dict[str, str],
+    process_transport: ProcessTransport,
+    docker_control: dict[str, str],
     cwd: Path,
 ) -> bool:
-    inspect_command = ["docker", "container", "inspect", name]
-    if runner is _default_runner:
-        completed = subprocess.run(
-            inspect_command,
-            env=env,
-            cwd=str(cwd),
-            check=False,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        return completed.returncode == 0
-    return runner(inspect_command, env=env, cwd=str(cwd)) == 0
+    invocation = build_docker_query_invocation(
+        argv=("docker", "container", "inspect", name),
+        docker_control=docker_control,
+        cwd=cwd,
+    )
+    return process_transport(invocation).returncode == 0
 
 
 def _execute_up_command(
-    args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
+    args: argparse.Namespace, *, process_transport: ProcessTransport, cwd: Path
 ) -> int:
     config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
     if config_path is None:
@@ -1156,11 +1222,21 @@ def _execute_up_command(
         )
 
     image = args.image
-    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
-    container_env = build_container_env(
+    selection = build_container_selection(
+        config_path=config_path,
+        pass_env=args.pass_env,
+        compose_pass_env=args.compose_pass_env,
+    )
+    environment_plan = _build_container_environment_plan(
         config_path=config_path,
         env_file=args.env_file,
         cwd=cwd,
+        selection=selection,
+        postgres_uri=args.postgres_uri,
+    )
+    docker_control = dict(docker_control_environment(environment_plan))
+    application_payload = _resolve_application_container_payload(
+        environment_plan, selection=selection, cwd=cwd
     )
     if not image:
         image = f"agentseek-up:{args.port}"
@@ -1174,7 +1250,10 @@ def _execute_up_command(
         if args.pull:
             build_command.append("--pull")
         build_command.extend(["-t", image, "-f", str(generated_dockerfile), "."])
-        build_exit_code = runner(build_command, env=env, cwd=str(cwd))
+        build_invocation = build_docker_control_invocation(
+            argv=tuple(build_command), docker_control=docker_control, cwd=cwd
+        )
+        build_exit_code = process_transport(build_invocation).returncode
         if build_exit_code != 0:
             return build_exit_code
 
@@ -1186,8 +1265,18 @@ def _execute_up_command(
 
     container_name = _container_name_for_port(args.port)
     if args.recreate:
-        runner(["docker", "rm", "-f", container_name], env=env, cwd=str(cwd))
-    elif _container_exists(container_name, runner=runner, env=env, cwd=cwd):
+        remove_invocation = build_docker_control_invocation(
+            argv=("docker", "rm", "-f", container_name),
+            docker_control=docker_control,
+            cwd=cwd,
+        )
+        process_transport(remove_invocation)
+    elif _container_exists(
+        container_name,
+        process_transport=process_transport,
+        docker_control=docker_control,
+        cwd=cwd,
+    ):
         raise CliError(
             f"Container '{container_name}' already exists. Re-run with '--recreate' or remove it manually."
         )
@@ -1196,11 +1285,14 @@ def _execute_up_command(
         compose_command = ["docker", "compose", "-f", str(compose_path), "up", "-d"]
         if args.recreate:
             compose_command.append("--force-recreate")
-        compose_exit_code = runner(compose_command, env=env, cwd=str(cwd))
+        compose_invocation = build_docker_control_invocation(
+            argv=tuple(compose_command), docker_control=docker_control, cwd=cwd
+        )
+        compose_exit_code = process_transport(compose_invocation).returncode
         if compose_exit_code != 0:
             return compose_exit_code
 
-    command = [
+    base_argv = (
         "docker",
         "run",
         "--detach",
@@ -1210,20 +1302,16 @@ def _execute_up_command(
         "host.docker.internal:host-gateway",
         "-p",
         f"{args.port}:{DEFAULT_API_PORT}",
-    ]
-    for key, value in sorted(container_env.items()):
-        command.extend(["-e", f"{key}={value}"])
-    if args.postgres_uri:
-        command.extend(
-            [
-                "-e",
-                f"METADATA_DB_URL={args.postgres_uri}",
-                "-e",
-                "METADATA_DB_BACKEND=postgresql",
-            ]
-        )
-    command.append(image)
-    run_exit_code = runner(command, env=env, cwd=str(cwd))
+    )
+    run_invocation = build_docker_run_invocation(
+        base_argv=base_argv,
+        image=image,
+        docker_control=docker_control,
+        application_payload=application_payload,
+        container_argv=(),
+        cwd=cwd,
+    )
+    run_exit_code = process_transport(run_invocation).returncode
     if run_exit_code != 0:
         return run_exit_code
     if args.wait:
@@ -1324,6 +1412,7 @@ def run_namespace(
     args: argparse.Namespace,
     *,
     runner: Callable[..., int] | None = None,
+    process_transport: ProcessTransport | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     cwd: str | Path | None = None,
@@ -1331,6 +1420,9 @@ def run_namespace(
     command = args.command
     workdir = Path(cwd or Path.cwd()).resolve()
     run = runner or _default_runner
+    docker_transport = process_transport or (
+        LegacyRunnerAdapter(run) if runner is not None else SubprocessTransport()
+    )
     out = stdout or sys.stdout
     err = stderr or sys.stderr
 
@@ -1362,7 +1454,9 @@ def run_namespace(
         if command == "dockerfile":
             return _execute_dockerfile_command(args, stdout=out, cwd=workdir)
         if command == "build":
-            return _execute_build_command(args, runner=run, cwd=workdir)
+            return _execute_build_command(
+                args, process_transport=docker_transport, cwd=workdir
+            )
         if command == "up":
             _reject_unsupported_options(
                 args,
@@ -1374,9 +1468,11 @@ def run_namespace(
                     "verbose",
                 ),
             )
-            return _execute_up_command(args, runner=run, cwd=workdir)
+            return _execute_up_command(
+                args, process_transport=docker_transport, cwd=workdir
+            )
         raise CliError(f"Unsupported command '{command}'.")
-    except CliError as exc:
+    except (CliError, ContainerPolicyError, DockerRuntimeError) as exc:
         err.write(f"{exc}\n")
         return 2
 
@@ -1386,6 +1482,7 @@ def main(
     *,
     prog: str | None = None,
     runner: Callable[..., int] | None = None,
+    process_transport: ProcessTransport | None = None,
     stdout: TextIO | None = None,
     stderr: TextIO | None = None,
     cwd: str | Path | None = None,
@@ -1394,7 +1491,14 @@ def main(
         prog = _infer_cli_name() if argv is None else DEFAULT_CLI_NAME
     parser = create_parser(prog=prog)
     args = parser.parse_args(list(argv) if argv is not None else None)
-    return run_namespace(args, runner=runner, stdout=stdout, stderr=stderr, cwd=cwd)
+    return run_namespace(
+        args,
+        runner=runner,
+        process_transport=process_transport,
+        stdout=stdout,
+        stderr=stderr,
+        cwd=cwd,
+    )
 
 
 if __name__ == "__main__":

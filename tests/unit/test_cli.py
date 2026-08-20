@@ -12,6 +12,12 @@ import pytest
 from pydantic import ValidationError
 
 from agentseek_api import __version__
+from agentseek_api.docker_runtime import (
+    ControlQueryInvocation,
+    DockerRunInvocation,
+    ProcessInvocation,
+    ProcessResult,
+)
 from agentseek_api.services.langgraph_service import LangGraphService
 
 
@@ -42,14 +48,14 @@ def test_up_parser_collects_explicit_container_and_compose_names() -> None:
     assert args.compose_pass_env == ["TOKEN"]
 
 
-def test_up_parses_pass_env_without_forwarding_it_to_live_docker_execution(
+def test_up_pass_env_reaches_only_the_live_docker_carrier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from agentseek_api.cli import main
 
     config_path = _write_basic_langgraph_config(tmp_path)
     monkeypatch.setenv("ARBITRARY_HOST_SECRET", "must-not-reach-docker-run")
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -61,13 +67,15 @@ def test_up_parses_pass_env_without_forwarding_it_to_live_docker_execution(
             "--pass-env",
             "ARBITRARY_HOST_SECRET",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert "ARBITRARY_HOST_SECRET" not in _docker_env_from_run_command(capture.calls[1])
+    run = next(call for call in capture.calls if isinstance(call, DockerRunInvocation))
+    assert run.environment["ARBITRARY_HOST_SECRET"] == "must-not-reach-docker-run"
+    assert "must-not-reach-docker-run" not in " ".join(run.argv)
 
 
 def test_container_selection_combines_normalized_config_and_cli_compose_names(
@@ -110,6 +118,24 @@ class _RunCapture:
         if command[:3] == ["docker", "container", "inspect"]:
             return 1
         return 0
+
+
+@dataclass
+class _ProcessCapture:
+    calls: list[ProcessInvocation] | None = None
+    container_exists: bool = False
+    return_codes: dict[tuple[str, ...], int] | None = None
+
+    def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
+        if self.calls is None:
+            self.calls = []
+        self.calls.append(invocation)
+        return_code = 0
+        if invocation.argv[:3] == ("docker", "container", "inspect"):
+            return_code = 0 if self.container_exists else 1
+        if self.return_codes is not None:
+            return_code = self.return_codes.get(invocation.argv, return_code)
+        return ProcessResult(returncode=return_code)
 
 
 class _EncodingTextStream:
@@ -397,14 +423,10 @@ def test_public_worker_redacts_process_supervision_failures(
         assert child.close_calls == 1
 
 
-def _docker_env_from_run_command(command: list[str]) -> dict[str, str]:
-    values: dict[str, str] = {}
-    for index, token in enumerate(command):
-        if token != "-e":
-            continue
-        key, value = command[index + 1].split("=", maxsplit=1)
-        values[key] = value
-    return values
+def _application_environment(capture: _ProcessCapture) -> dict[str, str]:
+    assert capture.calls is not None
+    run = next(call for call in capture.calls if isinstance(call, DockerRunInvocation))
+    return {name: run.environment[name] for name in run.application_names}
 
 
 def _write_basic_langgraph_config(root: Path) -> Path:
@@ -1555,7 +1577,7 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -1566,13 +1588,16 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
             "linux/amd64,linux/arm64",
             "--no-pull",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
-    assert capture.command is not None
-    assert capture.command[:8] == [
+    assert capture.calls is not None
+    invocation = capture.calls[0]
+    assert type(invocation) is ProcessInvocation
+    assert "AGENTSEEK_GRAPHS" not in invocation.environment
+    assert invocation.argv[:8] == (
         "docker",
         "build",
         "--platform",
@@ -1581,8 +1606,8 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
         "agentseek:test",
         "-f",
         str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
-    ]
-    assert capture.command[-1] == "."
+    )
+    assert invocation.argv[-1] == "."
     generated = (tmp_path / ".agentseek" / "Dockerfile").read_text(encoding="utf-8")
     assert (
         "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*"
@@ -1943,7 +1968,7 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
         "OPENAI_BASE_URL=${API_ORIGIN}/v1\n",
         encoding="utf-8",
     )
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -1958,14 +1983,19 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
             str(env_file),
             "--recreate",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
-    assert capture.calls[1][:9] == [
+    assert capture.calls[0].argv == (
+        "docker",
+        "rm",
+        "-f",
+        "agentseek-up-8123",
+    )
+    assert capture.calls[1].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -1975,13 +2005,94 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
         "host.docker.internal:host-gateway",
         "-p",
         "8123:2024",
-    ]
-    assert capture.calls[1][-1] == "agentseek:test"
-    container_env = _docker_env_from_run_command(capture.calls[1])
+    )
+    assert capture.calls[1].argv[-1] == "agentseek:test"
+    container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["METADATA_DB_URL"] == "sqlite+aiosqlite:////tmp/agentseek.db"
     assert container_env["OCEANBASE_HOST"] == "host.docker.internal"
     assert container_env["OPENAI_BASE_URL"] == "https://api.example.test/v1"
+
+
+def test_up_keeps_application_values_only_in_final_run_carrier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    env_file = tmp_path / "docker.env"
+    env_file.write_text(
+        "OPENAI_API_KEY=sk-$#=雪\nEMPTY=\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("DOCKER_HOST", "unix:///private/docker.sock")
+    monkeypatch.setenv("UNSELECTED_CANARY", "must-not-cross")
+    capture = _ProcessCapture()
+
+    exit_code = main(
+        [
+            "up",
+            "--config",
+            str(config_path),
+            "--image",
+            "agentseek:test",
+            "--env-file",
+            str(env_file),
+            "--pass-env",
+            "EMPTY",
+            "--recreate",
+        ],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    assert len(capture.calls) == 2
+    remove, run = capture.calls
+    assert type(remove) is ProcessInvocation
+    assert dict(remove.environment)["DOCKER_HOST"] == "unix:///private/docker.sock"
+    assert "OPENAI_API_KEY" not in remove.environment
+    assert isinstance(run, DockerRunInvocation)
+    assert run.environment["OPENAI_API_KEY"] == "sk-$#=雪"
+    assert run.environment["EMPTY"] == ""
+    assert "UNSELECTED_CANARY" not in run.environment
+    joined_argv = " ".join(run.argv)
+    assert "sk-$#=雪" not in joined_argv
+    assert "OPENAI_API_KEY=sk-$#=雪" not in joined_argv
+    assert ("-e", "OPENAI_API_KEY") in tuple(zip(run.argv, run.argv[1:], strict=False))
+
+
+def test_up_container_existence_probe_is_bounded_and_control_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    config_path = _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("DOCKER_HOST", "unix:///private/docker.sock")
+    monkeypatch.setenv("OPENAI_API_KEY", "application-canary")
+    capture = _ProcessCapture()
+
+    exit_code = main(
+        ["up", "--config", str(config_path), "--image", "agentseek:test"],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert capture.calls is not None
+    probe = capture.calls[0]
+    assert isinstance(probe, ControlQueryInvocation)
+    assert probe.timeout_seconds > 0
+    assert probe.argv == (
+        "docker",
+        "container",
+        "inspect",
+        "agentseek-up-8123",
+    )
+    assert probe.environment["DOCKER_HOST"] == "unix:///private/docker.sock"
+    assert "OPENAI_API_KEY" not in probe.environment
+    assert capture.calls[1].environment["OPENAI_API_KEY"] == "application-canary"
 
 
 def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
@@ -1990,7 +2101,7 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
     config_path = _write_basic_langgraph_config(tmp_path)
     compose_path = tmp_path / "docker-compose.yml"
     compose_path.write_text("services: {}\n", encoding="utf-8")
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2003,14 +2114,19 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
             str(compose_path),
             "--recreate",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0] == ["docker", "rm", "-f", "agentseek-up-8123"]
-    assert capture.calls[1] == [
+    assert capture.calls[0].argv == (
+        "docker",
+        "rm",
+        "-f",
+        "agentseek-up-8123",
+    )
+    assert capture.calls[1].argv == (
         "docker",
         "compose",
         "-f",
@@ -2018,8 +2134,10 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
         "up",
         "-d",
         "--force-recreate",
-    ]
-    assert capture.calls[2][-1] == "agentseek:test"
+    )
+    assert capture.calls[2].argv[-1] == "agentseek:test"
+    for invocation in capture.calls[:2]:
+        assert "AGENTSEEK_GRAPHS" not in invocation.environment
 
 
 def test_up_command_rejects_missing_docker_compose_file(tmp_path: Path) -> None:
@@ -2055,15 +2173,7 @@ def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
     compose_path = tmp_path / "docker-compose.yml"
     compose_path.write_text("services: {}\n", encoding="utf-8")
     stderr = io.StringIO()
-    capture = _RunCapture()
-
-    def existing_container_runner(
-        command: list[str], *, env: dict[str, str], cwd: str | None = None
-    ) -> int:
-        capture(command, env=env, cwd=cwd)
-        if command[:3] == ["docker", "container", "inspect"]:
-            return 0
-        return 0
+    capture = _ProcessCapture(container_exists=True)
 
     exit_code = main(
         [
@@ -2075,13 +2185,16 @@ def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
             "--docker-compose",
             str(compose_path),
         ],
-        runner=existing_container_runner,
+        process_transport=capture,
         cwd=tmp_path,
         stderr=stderr,
     )
 
     assert exit_code == 2
-    assert capture.calls == [["docker", "container", "inspect", "agentseek-up-8123"]]
+    assert capture.calls is not None
+    assert [call.argv for call in capture.calls] == [
+        ("docker", "container", "inspect", "agentseek-up-8123")
+    ]
     assert "already exists" in stderr.getvalue()
     assert "--recreate" in stderr.getvalue()
 
@@ -2092,7 +2205,7 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2103,13 +2216,13 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
             "--postgres-uri",
             "postgresql://postgres:postgres@db/agentseek",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0] == [
+    assert capture.calls[0].argv == (
         "docker",
         "build",
         "-t",
@@ -2117,9 +2230,14 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
         "-f",
         str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
         ".",
-    ]
-    assert capture.calls[1] == ["docker", "container", "inspect", "agentseek-up-8124"]
-    assert capture.calls[2][:9] == [
+    )
+    assert capture.calls[1].argv == (
+        "docker",
+        "container",
+        "inspect",
+        "agentseek-up-8124",
+    )
+    assert capture.calls[2].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -2129,9 +2247,14 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
         "host.docker.internal:host-gateway",
         "-p",
         "8124:2024",
-    ]
-    assert capture.calls[2][-1] == "agentseek-up:8124"
-    container_env = _docker_env_from_run_command(capture.calls[2])
+    )
+    assert capture.calls[2].argv[-1] == "agentseek-up:8124"
+    for invocation in capture.calls[:2]:
+        assert "METADATA_DB_URL" not in invocation.environment
+        assert "postgresql://postgres:postgres@db/agentseek" not in " ".join(
+            invocation.argv
+        )
+    container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert (
         container_env["METADATA_DB_URL"]
@@ -2167,7 +2290,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
 """.strip(),
         encoding="utf-8",
     )
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2177,14 +2300,19 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
             "--image",
             "agentseek:test",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0] == ["docker", "container", "inspect", "agentseek-up-8123"]
-    assert capture.calls[1][:9] == [
+    assert capture.calls[0].argv == (
+        "docker",
+        "container",
+        "inspect",
+        "agentseek-up-8123",
+    )
+    assert capture.calls[1].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -2194,9 +2322,9 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
         "host.docker.internal:host-gateway",
         "-p",
         "8123:2024",
-    ]
-    assert capture.calls[1][-1] == "agentseek:test"
-    container_env = _docker_env_from_run_command(capture.calls[1])
+    )
+    assert capture.calls[1].argv[-1] == "agentseek:test"
+    container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
     assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/auth.py:backend"
     assert container_env["FEATURE_FLAG"] == "True"
@@ -2209,7 +2337,7 @@ def test_up_command_passes_ambient_env_into_container(
 
     config_path = _write_basic_langgraph_config(tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "ambient-key")
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2219,13 +2347,13 @@ def test_up_command_passes_ambient_env_into_container(
             "--image",
             "agentseek:test",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    container_env = _docker_env_from_run_command(capture.calls[1])
+    container_env = _application_environment(capture)
     assert container_env["OPENAI_API_KEY"] == "ambient-key"
 
 
@@ -2245,7 +2373,7 @@ def test_up_command_prefers_agentseek_json_without_explicit_flag(
         encoding="utf-8",
     )
     _write_basic_langgraph_config(tmp_path)
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2253,13 +2381,13 @@ def test_up_command_prefers_agentseek_json_without_explicit_flag(
             "--image",
             "agentseek:test",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    container_env = _docker_env_from_run_command(capture.calls[1])
+    container_env = _application_environment(capture)
     assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/agentseek.json"
 
 
@@ -2272,7 +2400,7 @@ def test_up_command_does_not_pass_shell_runtime_env_into_container(
     config_path = _write_basic_langgraph_config(tmp_path)
     monkeypatch.setenv("PATH", "/tmp/bad-path")
     monkeypatch.setenv("PWD", "/tmp/host-pwd")
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2282,13 +2410,13 @@ def test_up_command_does_not_pass_shell_runtime_env_into_container(
             "--image",
             "agentseek:test",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
     assert exit_code == 0
     assert capture.calls is not None
-    container_env = _docker_env_from_run_command(capture.calls[1])
+    container_env = _application_environment(capture)
     assert "PATH" not in container_env
     assert "PWD" not in container_env
 
@@ -2297,7 +2425,7 @@ def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> No
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    capture = _RunCapture()
+    capture = _ProcessCapture()
 
     exit_code = main(
         [
@@ -2308,7 +2436,7 @@ def test_up_command_uses_base_image_override_when_building(tmp_path: Path) -> No
             "python:3.13-slim-bookworm",
             "--no-pull",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
@@ -2348,29 +2476,27 @@ def test_up_command_returns_build_failure_without_running_container(
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    capture = _RunCapture()
+    build_argv = (
+        "docker",
+        "build",
+        "--pull",
+        "-t",
+        "agentseek-up:8125",
+        "-f",
+        str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
+        ".",
+    )
+    capture = _ProcessCapture(return_codes={build_argv: 9})
 
-    def fail_build(
-        command: list[str], *, env: dict[str, str], cwd: str | None = None
-    ) -> int:
-        capture(command, env=env, cwd=cwd)
-        return 9 if command[:2] == ["docker", "build"] else 0
-
-    exit_code = main(["up", "--port", "8125"], runner=fail_build, cwd=tmp_path)
+    exit_code = main(
+        ["up", "--port", "8125"],
+        process_transport=capture,
+        cwd=tmp_path,
+    )
 
     assert exit_code == 9
-    assert capture.calls == [
-        [
-            "docker",
-            "build",
-            "--pull",
-            "-t",
-            "agentseek-up:8125",
-            "-f",
-            str((tmp_path / ".agentseek" / "Dockerfile").resolve()),
-            ".",
-        ]
-    ]
+    assert capture.calls is not None
+    assert [call.argv for call in capture.calls] == [build_argv]
 
 
 def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) -> None:
@@ -2378,15 +2504,7 @@ def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) 
 
     config_path = _write_basic_langgraph_config(tmp_path)
     stderr = io.StringIO()
-    capture = _RunCapture()
-
-    def existing_container_runner(
-        command: list[str], *, env: dict[str, str], cwd: str | None = None
-    ) -> int:
-        capture(command, env=env, cwd=cwd)
-        if command[:3] == ["docker", "container", "inspect"]:
-            return 0
-        return 0
+    capture = _ProcessCapture(container_exists=True)
 
     exit_code = main(
         [
@@ -2396,53 +2514,43 @@ def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) 
             "--image",
             "agentseek:test",
         ],
-        runner=existing_container_runner,
+        process_transport=capture,
         cwd=tmp_path,
         stderr=stderr,
     )
 
     assert exit_code == 2
-    assert capture.calls == [["docker", "container", "inspect", "agentseek-up-8123"]]
+    assert capture.calls is not None
+    assert [call.argv for call in capture.calls] == [
+        ("docker", "container", "inspect", "agentseek-up-8123")
+    ]
     assert "already exists" in stderr.getvalue()
     assert "--recreate" in stderr.getvalue()
 
 
-def test_container_exists_uses_quiet_probe_for_default_runner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_container_exists_uses_a_private_bounded_query(tmp_path: Path) -> None:
     from agentseek_api import cli as cli_module
 
-    observed: dict[str, object] = {}
-
-    class _Completed:
-        returncode = 0
-
-    def fake_run(command: list[str], **kwargs: object) -> _Completed:
-        observed["command"] = command
-        observed["kwargs"] = kwargs
-        return _Completed()
-
-    monkeypatch.setattr(cli_module.subprocess, "run", fake_run)
+    capture = _ProcessCapture(container_exists=True)
 
     exists = cli_module._container_exists(
         "agentseek-up-8123",
-        runner=cli_module._default_runner,
-        env={},
+        process_transport=capture,
+        docker_control={},
         cwd=tmp_path,
     )
 
     assert exists is True
-    assert observed["command"] == [
+    assert capture.calls is not None
+    invocation = capture.calls[0]
+    assert isinstance(invocation, ControlQueryInvocation)
+    assert invocation.timeout_seconds > 0
+    assert invocation.argv == (
         "docker",
         "container",
         "inspect",
         "agentseek-up-8123",
-    ]
-    kwargs = observed["kwargs"]
-    assert kwargs["stdout"] is cli_module.subprocess.DEVNULL
-    assert kwargs["stderr"] is cli_module.subprocess.DEVNULL
-    assert kwargs["check"] is False
+    )
 
 
 def test_up_command_waits_for_http_health_when_requested(
@@ -2451,7 +2559,7 @@ def test_up_command_waits_for_http_health_when_requested(
     from agentseek_api import cli as cli_module
 
     config_path = _write_basic_langgraph_config(tmp_path)
-    capture = _RunCapture()
+    capture = _ProcessCapture()
     waited: list[tuple[str, float]] = []
 
     def fake_wait(url: str, *, timeout_seconds: float) -> None:
@@ -2470,7 +2578,7 @@ def test_up_command_waits_for_http_health_when_requested(
             "8123",
             "--wait",
         ],
-        runner=capture,
+        process_transport=capture,
         cwd=tmp_path,
     )
 
