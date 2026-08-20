@@ -275,6 +275,7 @@ start_worker() {
     -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
     -e REDIS_WORKER_LOCK_KEY="${REDIS_WORKER_LOCK_KEY}" \
     -e WORKER_CONCURRENT_JOBS="${WORKER_CONCURRENT_JOBS}" \
+    -e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json" \
     -e SEEKDB_URL="${SEEKDB_URL}" \
     -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
     -e OCEANBASE_PORT="${OCEANBASE_PORT}" \
@@ -282,7 +283,7 @@ start_worker() {
     -e OCEANBASE_PASSWORD="${OCEANBASE_PASSWORD}" \
     -e OCEANBASE_DB_NAME="${OCEANBASE_DB_NAME}" \
     "$IMAGE_TAG" \
-    python -m agentseek_api.cli worker >/dev/null; then
+    python -I -m agentseek_api.cli worker --environment-mode preloaded-v1 >/dev/null; then
     return 0
   else
     status=$?
@@ -415,6 +416,7 @@ docker run -d \
   -p "${API_PORT}:2024" \
   -e EXECUTOR_BACKEND=redis \
   -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
+  -e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json" \
   -e SEEKDB_URL="${SEEKDB_URL}" \
   -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
   -e OCEANBASE_PORT="${OCEANBASE_PORT}" \

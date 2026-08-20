@@ -14,6 +14,16 @@ def test_redis_runtime_builds_image_from_exact_candidate_wheel() -> None:
     assert 'rm -rf -- "$CANDIDATE_DIR"' in script
 
 
+def test_redis_runtime_launches_api_and_worker_in_preloaded_mode() -> None:
+    script = Path("scripts/test-redis-runtime.sh").read_text()
+
+    assert script.count('-e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json"') == 2
+    assert (
+        "python -I -m agentseek_api.cli worker --environment-mode preloaded-v1"
+        in script
+    )
+
+
 def test_redis_runtime_runs_live_queue_ownership_tests() -> None:
     script = Path("scripts/test-redis-runtime.sh").read_text()
 
