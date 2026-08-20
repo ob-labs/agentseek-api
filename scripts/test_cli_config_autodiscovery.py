@@ -3,10 +3,28 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
+
+
+_URL_USERINFO = re.compile(r"(?P<scheme>https?://)[^/@\s]+@", re.IGNORECASE)
+
+
+def _report_github_failure(message: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    normalized = " | ".join(
+        line.strip() for line in message.splitlines() if line.strip()
+    )
+    normalized = _URL_USERINFO.sub(r"\g<scheme><redacted>@", normalized)[:800]
+    if not normalized:
+        normalized = "dockerfile subprocess failed without a diagnostic"
+    escaped = normalized.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(f"::error title=AgentSeek dockerfile smoke::{escaped}", file=sys.stderr)
 
 
 def _verify_bundle(output: Path) -> tuple[Path, dict[str, object]]:
@@ -83,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
             text=True,
         )
         if completed.returncode != 0:
+            _report_github_failure(completed.stderr)
             raise SystemExit("agentseek-api dockerfile bundle generation failed")
 
         _dockerfile, manifest = _verify_bundle(output_path)

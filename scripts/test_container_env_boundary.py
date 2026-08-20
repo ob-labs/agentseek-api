@@ -199,7 +199,16 @@ def _run_probe(
     )
     for name in names:
         argv.extend(("-e", name))
-    argv.extend((image, "python", "-c", _probe_script(names, result_path.name)))
+    argv.extend(
+        (
+            "--entrypoint",
+            "python",
+            image,
+            "-I",
+            "-c",
+            _probe_script(names, result_path.name),
+        )
+    )
     result = _safe_process(
         tuple(argv),
         cwd=cwd,
@@ -631,6 +640,16 @@ def _require(condition: bool, boundary: str) -> None:
         raise BoundaryFailure(f"{boundary} boundary failed")
 
 
+def _report_github_failure(message: str) -> None:
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    escaped = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    print(
+        f"::error title=AgentSeek container boundary::{escaped}",
+        file=sys.stderr,
+    )
+
+
 def _verify_evidence(evidence: BoundaryEvidence) -> None:
     _require(
         evidence.disallowed_value not in evidence.build_environment.values(),
@@ -713,6 +732,7 @@ def main(*, evidence_collector: EvidenceCollector = collect_boundary_evidence) -
         )
         _verify_evidence(evidence)
     except BoundaryFailure as exc:
+        _report_github_failure(str(exc))
         print(f"container boundary verification failed: {exc}", file=sys.stderr)
         return 1
     except Exception:

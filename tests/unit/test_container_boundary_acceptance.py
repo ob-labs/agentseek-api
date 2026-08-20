@@ -9,6 +9,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from agentseek_api.docker_runtime import ProcessResult
 
 
 SCRIPT = Path("scripts/test_container_env_boundary.py")
+AUTODISCOVERY_SCRIPT = Path("scripts/test_cli_config_autodiscovery.py")
 
 
 def _load_script():
@@ -23,6 +25,17 @@ def _load_script():
         pytest.fail("the executable container-boundary acceptance module is missing")
     spec = importlib.util.spec_from_file_location(
         "container_boundary_acceptance", SCRIPT
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_autodiscovery_script():
+    spec = importlib.util.spec_from_file_location(
+        "cli_config_autodiscovery", AUTODISCOVERY_SCRIPT
     )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -84,6 +97,27 @@ def test_success_output_is_one_value_free_line() -> None:
     assert output.getvalue() == "container boundary verification passed\n"
 
 
+def test_boundary_failure_emits_value_free_github_annotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script()
+    stderr = io.StringIO()
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+    def fail(**_kwargs):
+        raise module.BoundaryFailure("synthetic Docker carrier probe failed")
+
+    with contextlib.redirect_stderr(stderr):
+        result = module.main(evidence_collector=fail)
+
+    assert result == 1
+    lines = stderr.getvalue().splitlines()
+    assert lines == [
+        "::error title=AgentSeek container boundary::synthetic Docker carrier probe failed",
+        "container boundary verification failed: synthetic Docker carrier probe failed",
+    ]
+
+
 @pytest.mark.parametrize(
     "application",
     [
@@ -137,6 +171,14 @@ def test_probe_writes_and_reads_the_exact_private_result_basename(
     assert dict(observed) == application
     assert json.loads(result_path.read_text(encoding="utf-8")) == application
     assert tuple(path.name for path in tmp_path.iterdir()) == (result_path.name,)
+    run_argv = calls[0]
+    entrypoint_index = run_argv.index("--entrypoint")
+    assert run_argv[entrypoint_index : entrypoint_index + 3] == (
+        "--entrypoint",
+        "python",
+        "synthetic:test",
+    )
+    assert run_argv[-3:-1] == ("-I", "-c")
     assert calls[1][:3] == ("docker", "container", "inspect")
 
 
@@ -216,3 +258,33 @@ def test_cli_config_autodiscovery_executes_the_bundle_contract() -> None:
     )
 
     assert completed.returncode == 0, completed.stderr
+
+
+def test_cli_config_autodiscovery_emits_value_free_ci_failure_annotation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_autodiscovery_script()
+    credential = "tiny-password"
+    stderr = io.StringIO()
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+    monkeypatch.setattr(
+        module.subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(
+            returncode=2,
+            stdout="",
+            stderr=(
+                "The build output root could not be verified private at "
+                f"https://alice:{credential}@registry.invalid\n"
+            ),
+        ),
+    )
+
+    with contextlib.redirect_stderr(stderr), pytest.raises(SystemExit):
+        module.main([])
+
+    diagnostic = stderr.getvalue()
+    assert diagnostic.startswith("::error title=AgentSeek dockerfile smoke::")
+    assert "build output root could not be verified private" in diagnostic
+    assert credential not in diagnostic
+    assert "alice" not in diagnostic

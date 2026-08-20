@@ -57,6 +57,23 @@ def test_cli_docker_runtime_has_independent_current_and_floor_compose_legs() -> 
     assert any(step.get("run") == "make test-cli-docker" for step in steps)
 
 
+def test_docker_marked_tests_run_only_in_the_dedicated_docker_matrix() -> None:
+    parsed = yaml.safe_load(
+        Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
+    )
+
+    fast_steps = parsed["jobs"]["fast-tests"]["steps"]
+    fast_commands = tuple(step.get("run", "") for step in fast_steps)
+    assert any("-m 'not docker'" in command for command in fast_commands)
+
+    docker_steps = parsed["jobs"]["cli-docker-runtime"]["steps"]
+    assert any(
+        step.get("run")
+        == "uv run pytest tests/unit/test_docker_runtime.py -m docker -q"
+        for step in docker_steps
+    )
+
+
 def test_compose_floor_action_is_commit_pinned_and_floor_only() -> None:
     workflow = Path(".github/workflows/ci.yml").read_text(encoding="utf-8")
     body = _job(workflow, "cli-docker-runtime")
