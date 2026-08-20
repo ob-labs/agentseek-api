@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 IMAGE_TAG="${IMAGE_TAG:-agentseek-api-redis-smoke:latest}"
 CONFIG_PATH="${CONFIG_PATH:-examples/docker_ci_auth/manifest.json}"
+AUTH_MODULE_PATH="${AUTH_MODULE_PATH:-/deps/agent/examples/docker_ci_auth/auth_backend.py:HeaderAuthBackend}"
 NETWORK_NAME="${NETWORK_NAME:-agentseek-redis-runtime}"
 BACKEND_CONTAINER="${BACKEND_CONTAINER:-agentseek-redis-backend}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-agentseek-redis}"
@@ -276,6 +277,7 @@ start_worker() {
     -e REDIS_WORKER_LOCK_KEY="${REDIS_WORKER_LOCK_KEY}" \
     -e WORKER_CONCURRENT_JOBS="${WORKER_CONCURRENT_JOBS}" \
     -e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json" \
+    -e AUTH_MODULE_PATH="${AUTH_MODULE_PATH}" \
     -e SEEKDB_URL="${SEEKDB_URL}" \
     -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
     -e OCEANBASE_PORT="${OCEANBASE_PORT}" \
@@ -417,6 +419,7 @@ docker run -d \
   -e EXECUTOR_BACKEND=redis \
   -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
   -e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json" \
+  -e AUTH_MODULE_PATH="${AUTH_MODULE_PATH}" \
   -e SEEKDB_URL="${SEEKDB_URL}" \
   -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
   -e OCEANBASE_PORT="${OCEANBASE_PORT}" \

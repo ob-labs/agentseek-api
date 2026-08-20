@@ -19,6 +19,11 @@ def test_redis_runtime_launches_api_and_worker_in_preloaded_mode() -> None:
 
     assert script.count('-e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json"') == 2
     assert (
+        'AUTH_MODULE_PATH="${AUTH_MODULE_PATH:-/deps/agent/examples/'
+        'docker_ci_auth/auth_backend.py:HeaderAuthBackend}"' in script
+    )
+    assert script.count('-e AUTH_MODULE_PATH="${AUTH_MODULE_PATH}"') == 2
+    assert (
         "python -I -m agentseek_api.cli worker --environment-mode preloaded-v1"
         in script
     )
