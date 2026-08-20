@@ -82,22 +82,17 @@ def test_runtime_commands_accept_explicit_preloaded_environment_mode(
 
 
 @pytest.mark.parametrize(
-    ("inherited", "config", "env_file", "match"),
+    ("manifest_value", "config", "env_file", "match"),
     [
-        ({}, None, None, "AGENTSEEK_GRAPHS"),
-        ({"AGENTSEEK_GRAPHS": "relative.json"}, None, None, "absolute"),
-        (
-            {"AGENTSEEK_GRAPHS": "/image/manifest.v1.json"},
-            "/other.json",
-            None,
-            "config",
-        ),
-        ({"AGENTSEEK_GRAPHS": "/image/manifest.v1.json"}, None, ".env", "env-file"),
+        (None, None, None, "AGENTSEEK_GRAPHS"),
+        ("relative.json", None, None, "absolute"),
+        ("absolute", "other.json", None, "config"),
+        ("absolute", None, ".env", "env-file"),
     ],
 )
 def test_preloaded_mode_rejects_ambiguous_sources_before_loading(
     tmp_path: Path,
-    inherited: dict[str, str],
+    manifest_value: str | None,
     config: str | None,
     env_file: str | None,
     match: str,
@@ -105,10 +100,19 @@ def test_preloaded_mode_rejects_ambiguous_sources_before_loading(
     from agentseek_api.cli import CliError, resolve_runtime_for_mode
     from agentseek_api.environment import EnvironmentMode
 
+    inherited = {}
+    if manifest_value is not None:
+        inherited["AGENTSEEK_GRAPHS"] = (
+            str(tmp_path / "manifest.v1.json")
+            if manifest_value == "absolute"
+            else manifest_value
+        )
+    config_path = str(tmp_path / config) if config is not None else None
+
     with pytest.raises(CliError, match=match):
         resolve_runtime_for_mode(
             mode=EnvironmentMode.PRELOADED_V1,
-            config_path=config,
+            config_path=config_path,
             env_file=env_file,
             inherited=inherited,
             cwd=tmp_path,
@@ -902,6 +906,8 @@ def invoke_failure_case(
         payload["build_include"] = ["included-link"]
         config_path.write_text(json.dumps(payload), encoding="utf-8")
     elif case == "special_file_build_include":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("requires a platform FIFO primitive")
         fifo = tmp_path / "included-pipe"
         os.mkfifo(fifo)
         payload["build_include"] = ["included-pipe"]

@@ -118,6 +118,49 @@ def test_boundary_failure_emits_value_free_github_annotation(
     ]
 
 
+def test_generated_compose_flow_uses_build_controls_for_direct_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script()
+    observed_controls: list[dict[str, str]] = []
+
+    monkeypatch.setattr(module, "_build_candidate", lambda _project: object())
+    monkeypatch.setattr(module, "_remove_owned_image", lambda **_kwargs: None)
+
+    def fake_cli(_argv, *, process_transport, **_kwargs):
+        process_transport.image = "agentseek:test"
+        process_transport.build_environment = {"PATH": "docker-control-only"}
+        process_transport.build_context_archive = b"context"
+        process_transport.compose_environment = {}
+        process_transport.application_environment = {"ALLOWED_SENTINEL": "allowed"}
+        process_transport.image_archive_and_history = b"image"
+        process_transport.invocations.append(
+            module.CapturedInvocation(
+                kind="compose",
+                argv=("docker", "compose", "up"),
+                environment={"PATH": "docker-control-only"},
+                stdin_sha256=None,
+            )
+        )
+        return 0
+
+    def fake_probe(*, docker_environment, **_kwargs):
+        observed_controls.append(dict(docker_environment))
+
+    monkeypatch.setattr(module, "cli_main", fake_cli)
+    monkeypatch.setattr(module, "_prove_value_domain_carrier", fake_probe)
+
+    evidence = module.collect_boundary_evidence(
+        disallowed_name="DISALLOWED_CANARY",
+        disallowed_value="disallowed",
+        allowed_name="ALLOWED_SENTINEL",
+        allowed_value="allowed",
+    )
+
+    assert evidence.invocations[0].kind == "compose"
+    assert observed_controls == [{"PATH": "docker-control-only"}]
+
+
 def test_process_failure_tail_is_bounded_and_value_free() -> None:
     module = _load_script()
     forbidden = "abc"

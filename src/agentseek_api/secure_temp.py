@@ -817,7 +817,7 @@ def private_artifact(
     private_parent_expected: os.stat_result | None = None
     fd: int | None = None
     expected: os.stat_result | None = None
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     if os.name == "nt":  # pragma: no cover - native Windows only

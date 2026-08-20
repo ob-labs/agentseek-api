@@ -662,16 +662,7 @@ def collect_boundary_evidence(
                         raise BoundaryFailure(
                             "built image boundary evidence was missing"
                         )
-                    first_run = next(
-                        item
-                        for item in transport.invocations
-                        if item.kind == "docker-run"
-                    )
-                    controls = {
-                        name: value
-                        for name, value in first_run.environment.items()
-                        if name not in transport.application_environment
-                    }
+                    controls = dict(transport.build_environment)
                     _prove_value_domain_carrier(
                         image=transport.image,
                         docker_environment=controls,

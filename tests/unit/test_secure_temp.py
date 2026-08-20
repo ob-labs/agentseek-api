@@ -603,6 +603,10 @@ def test_windows_sweep_removes_private_directory_with_inherited_descendants(
         old = now - 48 * 60 * 60
         os.utime(path, (old, old))
 
+        expected = path.lstat()
+        assert secure_temp._quarantined_directory_matches(path, expected)
+        assert secure_temp._verify_windows_private_tree(path)
+
         removed = sweep_expired_artifacts(
             tmp_root=tmp_path,
             prefix="agentseek-build-",
@@ -614,6 +618,33 @@ def test_windows_sweep_removes_private_directory_with_inherited_descendants(
         assert not path.exists()
     finally:
         manager.__exit__(None, None, None)
+
+
+@POSIX_ONLY
+def test_private_artifact_opens_binary_on_platforms_with_text_mode_fds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    binary_flag = 0x40000000
+    real_open = os.open
+    observed_flags: list[int] = []
+
+    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+
+    def binary_open(path, flags, mode=0o777):
+        observed_flags.append(flags)
+        return real_open(path, flags & ~binary_flag, mode)
+
+    monkeypatch.setattr(os, "open", binary_open)
+
+    with private_artifact(
+        tmp_root=tmp_path,
+        prefix="agentseek-compose-",
+        contents=b"line-one\nline-two\n",
+    ) as path:
+        assert path.read_bytes() == b"line-one\nline-two\n"
+
+    assert observed_flags
+    assert all(flags & binary_flag for flags in observed_flags)
 
 
 @POSIX_ONLY
