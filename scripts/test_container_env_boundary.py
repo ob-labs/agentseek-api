@@ -11,6 +11,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import traceback
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -712,6 +713,19 @@ def _report_github_failure(message: str) -> None:
     )
 
 
+def _unexpected_failure_fingerprint(exc: BaseException) -> str:
+    location = ""
+    for frame in reversed(traceback.extract_tb(exc.__traceback__)):
+        path = Path(frame.filename).resolve()
+        try:
+            relative = path.relative_to(_ROOT)
+        except ValueError:
+            continue
+        location = f" at {relative.as_posix()}:{frame.lineno}"
+        break
+    return f"real-runtime boundary failed ({type(exc).__name__}{location})"
+
+
 def _verify_evidence(evidence: BoundaryEvidence) -> None:
     _require(
         evidence.disallowed_value not in evidence.build_environment.values(),
@@ -797,11 +811,10 @@ def main(*, evidence_collector: EvidenceCollector = collect_boundary_evidence) -
         _report_github_failure(str(exc))
         print(f"container boundary verification failed: {exc}", file=sys.stderr)
         return 1
-    except Exception:
-        print(
-            "container boundary verification failed: real-runtime boundary failed",
-            file=sys.stderr,
-        )
+    except Exception as exc:
+        failure = _unexpected_failure_fingerprint(exc)
+        _report_github_failure(failure)
+        print(f"container boundary verification failed: {failure}", file=sys.stderr)
         return 1
     print(_SUCCESS)
     return 0

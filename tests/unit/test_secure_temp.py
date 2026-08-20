@@ -605,6 +605,8 @@ def test_windows_sweep_removes_private_directory_with_inherited_descendants(
 
         expected = path.lstat()
         assert secure_temp._quarantined_directory_matches(path, expected)
+        secure_temp._verify_descendant_dacl(nested, directory=True)
+        secure_temp._verify_descendant_dacl(nested / "ordinary.txt", directory=False)
         assert secure_temp._verify_windows_private_tree(path)
 
         removed = sweep_expired_artifacts(

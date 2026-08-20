@@ -118,6 +118,27 @@ def test_boundary_failure_emits_value_free_github_annotation(
     ]
 
 
+def test_unexpected_failure_emits_only_a_value_free_code_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_script()
+    stderr = io.StringIO()
+    secret = "unexpected-private-value"
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
+
+    def fail(**_kwargs):
+        raise RuntimeError(secret)
+
+    with contextlib.redirect_stderr(stderr):
+        result = module.main(evidence_collector=fail)
+
+    diagnostic = stderr.getvalue()
+    assert result == 1
+    assert "RuntimeError" in diagnostic
+    assert "test_container_boundary_acceptance.py" in diagnostic
+    assert secret not in diagnostic
+
+
 def test_generated_compose_flow_uses_build_controls_for_direct_probe(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
