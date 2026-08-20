@@ -3,7 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
+import sys
 import uuid
 import zipfile
 from dataclasses import replace
@@ -56,6 +58,77 @@ from tests.container_plan_helpers import (
 )
 
 
+DOCKER_EXECUTABLE = shutil.which("docker") or str(
+    Path(sys.executable).parent / ("docker.exe" if os.name == "nt" else "docker")
+)
+
+
+@pytest.mark.parametrize(
+    ("platform", "environment", "selected_path", "resolved"),
+    [
+        (
+            "linux",
+            {"PATH": "/selected/docker/bin"},
+            "/selected/docker/bin",
+            "/selected/docker/bin/docker",
+        ),
+        (
+            "win32",
+            {"Path": r"C:\selected\docker"},
+            r"C:\selected\docker",
+            r"C:\selected\docker\docker.exe",
+        ),
+    ],
+)
+def test_resolve_docker_executable_uses_only_selected_platform_path(
+    monkeypatch: pytest.MonkeyPatch,
+    platform: str,
+    environment: dict[str, str],
+    selected_path: str,
+    resolved: str,
+) -> None:
+    from agentseek_api.docker_runtime import resolve_docker_executable
+
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_which(executable: str, *, path: str | None = None) -> str:
+        calls.append((executable, path))
+        return resolved
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+
+    assert resolve_docker_executable(environment, platform=platform) == resolved
+    assert calls == [("docker", selected_path)]
+
+
+@pytest.mark.parametrize(
+    ("environment", "resolved"),
+    [({}, None), ({"PATH": "/selected/docker/bin"}, None), ({"PATH": "."}, "docker")],
+)
+def test_resolve_docker_executable_fails_closed_without_absolute_selected_binary(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: dict[str, str],
+    resolved: str | None,
+) -> None:
+    from agentseek_api.docker_runtime import resolve_docker_executable
+
+    monkeypatch.setattr(shutil, "which", lambda *_args, **_kwargs: resolved)
+
+    with pytest.raises(DockerRuntimeError, match="Docker executable"):
+        resolve_docker_executable(environment, platform="linux")
+
+
+def test_process_invocation_rejects_unresolved_docker_executable(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ContainerPolicyError, match="absolute"):
+        build_docker_query_invocation(
+            argv=("docker", "version"),
+            docker_control={},
+            cwd=tmp_path,
+        )
+
+
 def test_build_image_invocation_uses_stdin_buildx_and_secret(tmp_path: Path) -> None:
     plan = build_plan_fixture(tmp_path)
     bundle = materialize_build_bundle(
@@ -66,6 +139,7 @@ def test_build_image_invocation_uses_stdin_buildx_and_secret(tmp_path: Path) -> 
     invocation = build_image_invocation(
         bundle,
         plan=plan,
+        docker_executable=DOCKER_EXECUTABLE,
         docker_control={"PATH": "/usr/bin", "DOCKER_BUILDKIT": "0"},
         tag="agentseek:test",
         platform="linux/amd64",
@@ -73,7 +147,7 @@ def test_build_image_invocation_uses_stdin_buildx_and_secret(tmp_path: Path) -> 
     )
     assert isinstance(invocation, BuildImageInvocation)
     assert invocation.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "buildx",
         "build",
         "--load",
@@ -104,7 +178,12 @@ def test_dockerfile_and_build_omit_pip_secret_when_not_configured(
         dockerfile_bytes=dockerfile,
         output_root=tmp_path / "bundle-no-pip-secret",
     )
-    invocation = build_image_invocation(bundle, plan=plan, docker_control={})
+    invocation = build_image_invocation(
+        bundle,
+        plan=plan,
+        docker_executable=DOCKER_EXECUTABLE,
+        docker_control={},
+    )
     assert b"type=secret,id=pip_config" not in dockerfile
     assert "--secret" not in invocation.argv
     assert "None" not in invocation.argv
@@ -138,7 +217,12 @@ def test_build_image_invocation_rejects_bundle_plan_mismatch(
         supplied_plan = replace(plan, base_image="python:3.13-alpine")
 
     with pytest.raises(DockerRuntimeError, match="bundle does not match.*plan"):
-        build_image_invocation(bundle, plan=supplied_plan, docker_control={})
+        build_image_invocation(
+            bundle,
+            plan=supplied_plan,
+            docker_executable=DOCKER_EXECUTABLE,
+            docker_control={},
+        )
 
 
 def test_build_image_invocation_requires_stdin_bytes(tmp_path: Path) -> None:
@@ -152,7 +236,7 @@ def test_require_supported_buildx_uses_two_bounded_queries(tmp_path: Path) -> No
 
     def transport(invocation: ProcessInvocation) -> ProcessResult:
         calls.append(invocation)
-        if invocation.argv == ("docker", "buildx", "version"):
+        if invocation.argv == (DOCKER_EXECUTABLE, "buildx", "version"):
             return ProcessResult(
                 returncode=0,
                 stdout=b"github.com/docker/buildx v0.12.0 deadbeef\n",
@@ -161,14 +245,15 @@ def test_require_supported_buildx_uses_two_bounded_queries(tmp_path: Path) -> No
 
     assert MINIMUM_BUILDX_VERSION == (0, 12, 0)
     assert require_supported_buildx(
+        docker_executable=DOCKER_EXECUTABLE,
         transport=transport,
         docker_control={"PATH": "/usr/bin"},
         cwd=tmp_path,
         plan=plan,
     ) == (0, 12, 0)
     assert [call.argv for call in calls] == [
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
     ]
     assert all(isinstance(call, ControlQueryInvocation) for call in calls)
     assert all("--bootstrap" not in call.argv for call in calls)
@@ -214,8 +299,15 @@ def test_require_supported_buildx_fails_before_build(
         return version_result if len(calls) == 1 else inspect_result
 
     with pytest.raises(DockerRuntimeError, match=match):
-        require_supported_buildx(transport=transport, docker_control={}, cwd=tmp_path)
-    assert all(call.argv[:3] != ("docker", "buildx", "build") for call in calls)
+        require_supported_buildx(
+            docker_executable=DOCKER_EXECUTABLE,
+            transport=transport,
+            docker_control={},
+            cwd=tmp_path,
+        )
+    assert all(
+        call.argv[:3] != (DOCKER_EXECUTABLE, "buildx", "build") for call in calls
+    )
 
 
 def test_buildx_without_secret_support_fails_bounded_and_value_free(
@@ -236,6 +328,7 @@ def test_buildx_without_secret_support_fails_bounded_and_value_free(
 
     with pytest.raises(DockerRuntimeError, match="secret") as caught:
         require_supported_buildx(
+            docker_executable=DOCKER_EXECUTABLE,
             transport=transport,
             docker_control={},
             cwd=tmp_path,
@@ -260,7 +353,12 @@ def test_pip_config_swap_before_build_invocation_is_rejected(tmp_path: Path) -> 
     replacement.write_text("password=swapped\n", encoding="utf-8")
     replacement.replace(plan.pip_config_file)
     with pytest.raises(DockerRuntimeError, match="pip config identity changed"):
-        build_image_invocation(bundle, plan=plan, docker_control={})
+        build_image_invocation(
+            bundle,
+            plan=plan,
+            docker_executable=DOCKER_EXECUTABLE,
+            docker_control={},
+        )
 
 
 def test_pip_config_swap_during_buildx_probes_is_rejected(tmp_path: Path) -> None:
@@ -282,14 +380,15 @@ def test_pip_config_swap_during_buildx_probes_is_rejected(tmp_path: Path) -> Non
 
     with pytest.raises(DockerRuntimeError, match="pip config identity changed"):
         require_supported_buildx(
+            docker_executable=DOCKER_EXECUTABLE,
             transport=transport,
             docker_control={},
             cwd=tmp_path,
             plan=plan,
         )
     assert [call.argv for call in calls] == [
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
     ]
 
 
@@ -349,6 +448,7 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
     }
     transport = SubprocessTransport()
     require_supported_buildx(
+        docker_executable=DOCKER_EXECUTABLE,
         transport=transport,
         docker_control=docker_control,
         cwd=tmp_path,
@@ -358,6 +458,7 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
     invocation = build_image_invocation(
         bundle,
         plan=plan,
+        docker_executable=DOCKER_EXECUTABLE,
         docker_control=docker_control,
         tag=tag,
     )
@@ -379,7 +480,7 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
             errors="replace"
         )
         history = subprocess.run(
-            ["docker", "image", "history", "--no-trunc", tag],
+            [DOCKER_EXECUTABLE, "image", "history", "--no-trunc", tag],
             cwd=tmp_path,
             env=docker_control,
             stdout=subprocess.PIPE,
@@ -396,7 +497,7 @@ def test_buildx_secret_mount_consumes_canary_without_disclosure(
             assert secret not in repr(invocation)
     finally:
         subprocess.run(
-            ["docker", "image", "rm", "--force", tag],
+            [DOCKER_EXECUTABLE, "image", "rm", "--force", tag],
             cwd=tmp_path,
             env=docker_control,
             stdout=subprocess.PIPE,
@@ -590,6 +691,7 @@ def test_compose_invocation_is_explicit_control_only_and_value_redacted(
     compose_file = tmp_path / "compose.yaml"
 
     invocation = build_compose_invocation(
+        docker_executable=DOCKER_EXECUTABLE,
         compose_file=compose_file,
         env_file=env_file,
         docker_control={"DOCKER_HOST": "unix:///private/docker.sock"},
@@ -600,7 +702,7 @@ def test_compose_invocation_is_explicit_control_only_and_value_redacted(
     )
 
     assert invocation.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "compose",
         "--env-file",
         str(env_file),
@@ -638,6 +740,7 @@ def test_compose_invocation_rejects_missing_names_and_control_collisions(
 ) -> None:
     with pytest.raises(ContainerPolicyError, match=message):
         build_compose_invocation(
+            docker_executable=DOCKER_EXECUTABLE,
             compose_file=tmp_path / "compose.yaml",
             env_file=tmp_path / "private.env",
             docker_control=docker_control,
@@ -658,6 +761,7 @@ def test_require_supported_compose_uses_bounded_control_only_query(
 
     assert MINIMUM_COMPOSE_VERSION == (2, 24, 0)
     assert require_supported_compose(
+        docker_executable=DOCKER_EXECUTABLE,
         transport=transport,
         docker_control={"PATH": "/usr/bin"},
         cwd=tmp_path,
@@ -665,7 +769,7 @@ def test_require_supported_compose_uses_bounded_control_only_query(
     assert len(calls) == 1
     query = calls[0]
     assert isinstance(query, ControlQueryInvocation)
-    assert query.argv == ("docker", "compose", "version", "--short")
+    assert query.argv == (DOCKER_EXECUTABLE, "compose", "version", "--short")
     assert dict(query.environment) == {"PATH": "/usr/bin"}
     assert query.timeout_seconds > 0
 
@@ -678,6 +782,7 @@ def test_require_supported_compose_rejects_old_version_value_free(
 
     with pytest.raises(DockerRuntimeError) as exc_info:
         require_supported_compose(
+            docker_executable=DOCKER_EXECUTABLE,
             transport=transport,
             docker_control={},
             cwd=tmp_path,
@@ -693,6 +798,7 @@ def test_require_supported_compose_rejects_minimum_prerelease(tmp_path: Path) ->
 
     with pytest.raises(DockerRuntimeError, match="2.24.0 or newer"):
         require_supported_compose(
+            docker_executable=DOCKER_EXECUTABLE,
             transport=transport,
             docker_control={},
             cwd=tmp_path,
@@ -703,7 +809,7 @@ def test_docker_run_uses_names_in_argv_and_values_only_in_carrier(
     tmp_path: Path,
 ) -> None:
     invocation = build_docker_run_invocation(
-        base_argv=("docker", "run", "--rm"),
+        base_argv=(DOCKER_EXECUTABLE, "run", "--rm"),
         image="agentseek:test",
         docker_control={"PATH": "/usr/bin"},
         application_payload={"OPENAI_API_KEY": "sk-$#=雪", "EMPTY": ""},
@@ -716,7 +822,7 @@ def test_docker_run_uses_names_in_argv_and_values_only_in_carrier(
     )
 
     assert invocation.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "run",
         "--rm",
         "-e",
@@ -739,7 +845,7 @@ def test_docker_run_preserves_physical_newline_only_in_carrier(
     value = "first line\nsecond line"
 
     invocation = build_docker_run_invocation(
-        base_argv=("docker", "run", "--rm"),
+        base_argv=(DOCKER_EXECUTABLE, "run", "--rm"),
         image="agentseek:test",
         docker_control={},
         application_payload={"MULTILINE": value},
@@ -750,7 +856,7 @@ def test_docker_run_preserves_physical_newline_only_in_carrier(
     assert invocation.environment["MULTILINE"] == value
     assert value not in " ".join(invocation.argv)
     assert invocation.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "run",
         "--rm",
         "-e",
@@ -767,7 +873,7 @@ def test_windows_docker_run_rejects_casefolded_cross_map_collision(
         match="Application payload collides with Docker control keys",
     ):
         build_docker_run_invocation(
-            base_argv=("docker", "run"),
+            base_argv=(DOCKER_EXECUTABLE, "run"),
             image="agentseek:test",
             docker_control={"Path": "control"},
             application_payload={"PATH": "application"},
@@ -800,7 +906,7 @@ def test_windows_docker_run_rejects_casefolded_duplicates_within_map(
 ) -> None:
     with pytest.raises(ContainerPolicyError) as exc_info:
         build_docker_run_invocation(
-            base_argv=("docker", "run"),
+            base_argv=(DOCKER_EXECUTABLE, "run"),
             image="agentseek:test",
             docker_control=docker_control,
             application_payload=application_payload,
@@ -814,7 +920,7 @@ def test_windows_docker_run_rejects_casefolded_duplicates_within_map(
 
 def test_linux_docker_run_keeps_case_sensitive_name_semantics(tmp_path: Path) -> None:
     invocation = build_docker_run_invocation(
-        base_argv=("docker", "run"),
+        base_argv=(DOCKER_EXECUTABLE, "run"),
         image="agentseek:test",
         docker_control={"Path": "control"},
         application_payload={"PATH": "application"},
@@ -833,7 +939,7 @@ def test_nul_collision_is_rejected_before_value_free_collision_diagnostic(
 
     with pytest.raises(ContainerPolicyError) as exc_info:
         build_docker_run_invocation(
-            base_argv=("docker", "run"),
+            base_argv=(DOCKER_EXECUTABLE, "run"),
             image="agentseek:test",
             docker_control={name: "control"},
             application_payload={name: "application"},
@@ -849,7 +955,7 @@ def test_nul_collision_is_rejected_before_value_free_collision_diagnostic(
 
 def test_non_run_docker_invocation_has_only_docker_control(tmp_path: Path) -> None:
     invocation = build_docker_control_invocation(
-        argv=("docker", "image", "inspect", "agentseek:test"),
+        argv=(DOCKER_EXECUTABLE, "image", "inspect", "agentseek:test"),
         docker_control={"PATH": "/usr/bin"},
         cwd=tmp_path,
     )
@@ -875,7 +981,7 @@ def test_docker_run_rejects_collisions_and_nul(
 ) -> None:
     with pytest.raises(ContainerPolicyError):
         build_docker_run_invocation(
-            base_argv=("docker", "run"),
+            base_argv=(DOCKER_EXECUTABLE, "run"),
             image="agentseek:test",
             docker_control=docker_control,
             application_payload=application_payload,
@@ -888,7 +994,7 @@ def test_query_invocation_is_bounded_and_redacted(tmp_path: Path) -> None:
     canary = "baked-env-canary"
     invocation = build_docker_query_invocation(
         argv=(
-            "docker",
+            DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "--format",
@@ -918,7 +1024,7 @@ def test_query_timeout_is_value_free(
 ) -> None:
     def timeout(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
         raise subprocess.TimeoutExpired(
-            cmd=["docker", "image", "inspect", "secret-image-name"],
+            cmd=[DOCKER_EXECUTABLE, "image", "inspect", "secret-image-name"],
             timeout=1.0,
             output=b"private-output",
             stderr=b"private-error",
@@ -926,7 +1032,7 @@ def test_query_timeout_is_value_free(
 
     monkeypatch.setattr(subprocess, "run", timeout)
     invocation = build_docker_query_invocation(
-        argv=("docker", "image", "inspect", "secret-image-name"),
+        argv=(DOCKER_EXECUTABLE, "image", "inspect", "secret-image-name"),
         docker_control={},
         cwd=tmp_path,
         timeout_seconds=1.0,
@@ -960,13 +1066,13 @@ def test_subprocess_transport_captures_only_queries(
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     query = build_docker_query_invocation(
-        argv=("docker", "compose", "version", "--short"),
+        argv=(DOCKER_EXECUTABLE, "compose", "version", "--short"),
         docker_control={"PATH": "/usr/bin"},
         cwd=tmp_path,
         timeout_seconds=2.0,
     )
     control = build_docker_control_invocation(
-        argv=("docker", "rm", "-f", "agentseek-up-8123"),
+        argv=(DOCKER_EXECUTABLE, "rm", "-f", "agentseek-up-8123"),
         docker_control={"PATH": "/usr/bin"},
         cwd=tmp_path,
     )
@@ -1002,22 +1108,22 @@ def test_legacy_runner_adapter_rejects_queries_and_stdin(tmp_path: Path) -> None
 
     adapter = LegacyRunnerAdapter(runner)
     control = build_docker_control_invocation(
-        argv=("docker", "rm", "-f", "test"), docker_control={}, cwd=tmp_path
+        argv=(DOCKER_EXECUTABLE, "rm", "-f", "test"), docker_control={}, cwd=tmp_path
     )
     query = build_docker_query_invocation(
-        argv=("docker", "image", "inspect", "test"),
+        argv=(DOCKER_EXECUTABLE, "image", "inspect", "test"),
         docker_control={},
         cwd=tmp_path,
     )
     stdin_invocation = ProcessInvocation(
-        argv=("docker", "build", "-"),
+        argv=(DOCKER_EXECUTABLE, "build", "-"),
         environment={},
         cwd=tmp_path,
         stdin_bytes=b"archive",
     )
 
     assert adapter(control).returncode == 7
-    assert calls == [(["docker", "rm", "-f", "test"], {}, str(tmp_path))]
+    assert calls == [([DOCKER_EXECUTABLE, "rm", "-f", "test"], {}, str(tmp_path))]
     assert "archive" not in repr(stdin_invocation)
     with pytest.raises(DockerRuntimeError, match="control queries"):
         adapter(query)
@@ -1073,7 +1179,7 @@ def test_image_compatibility_query_never_requests_hostile_baked_environment(
         argv: list[str], **kwargs: object
     ) -> subprocess.CompletedProcess[bytes]:
         assert argv == [
-            "docker",
+            DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "--format",
@@ -1093,7 +1199,7 @@ def test_image_compatibility_query_never_requests_hostile_baked_environment(
     monkeypatch.setattr(subprocess, "run", fake_run)
     invocation = build_docker_query_invocation(
         argv=(
-            "docker",
+            DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "--format",
@@ -1217,6 +1323,7 @@ def test_inspect_image_contract_uses_one_exact_query_and_overrides_cmd(
 
     contract = inspect_image_contract(
         "agentseek:test",
+        docker_executable=DOCKER_EXECUTABLE,
         transport=transport,
         docker_control={"DOCKER_HOST": "unix:///docker.sock"},
         cwd=tmp_path,
@@ -1225,7 +1332,7 @@ def test_inspect_image_contract_uses_one_exact_query_and_overrides_cmd(
     assert len(calls) == 1
     assert isinstance(calls[0], ControlQueryInvocation)
     assert calls[0].argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "image",
         "inspect",
         "--format",
@@ -1256,6 +1363,10 @@ def test_inspect_image_contract_rejects_unsupported_entrypoint_value_free(
 
     with pytest.raises(ImageContractError) as caught:
         inspect_image_contract(
-            canary, transport=transport, docker_control={}, cwd=tmp_path
+            canary,
+            docker_executable=DOCKER_EXECUTABLE,
+            transport=transport,
+            docker_control={},
+            cwd=tmp_path,
         )
     assert canary not in str(caught.value)

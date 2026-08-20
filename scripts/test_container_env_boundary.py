@@ -131,14 +131,14 @@ def _safe_process(
 
 
 def _classify(invocation: ProcessInvocation) -> str:
-    argv = invocation.argv
+    argv = invocation.argv[1:]
     if isinstance(invocation, BuildImageInvocation):
         return "build"
     if isinstance(invocation, DockerRunInvocation):
         return "docker-run"
-    if argv[:3] == ("docker", "rm", "-f"):
+    if argv[:2] == ("rm", "-f"):
         return "remove"
-    if argv[:2] == ("docker", "compose"):
+    if argv[:1] == ("compose",):
         return "compose"
     return "inspect"
 
@@ -161,18 +161,18 @@ def _invocation_stage(invocation: ProcessInvocation) -> str:
         return "candidate image build"
     if isinstance(invocation, DockerRunInvocation):
         return "direct carrier probe"
-    argv = invocation.argv
-    if argv[:3] == ("docker", "compose", "version"):
+    argv = invocation.argv[1:]
+    if argv[:2] == ("compose", "version"):
         return "Compose capability query"
-    if argv[:3] == ("docker", "buildx", "version"):
+    if argv[:2] == ("buildx", "version"):
         return "Buildx version query"
-    if argv[:3] == ("docker", "buildx", "inspect"):
+    if argv[:2] == ("buildx", "inspect"):
         return "Buildx availability query"
-    if argv[:3] == ("docker", "image", "inspect"):
+    if argv[:2] == ("image", "inspect"):
         return "image contract query"
-    if argv[:3] == ("docker", "rm", "-f"):
+    if argv[:2] == ("rm", "-f"):
         return "container cleanup"
-    if argv[:2] == ("docker", "compose"):
+    if argv[:1] == ("compose",):
         return "Compose render"
     return "Docker control query"
 
@@ -194,6 +194,7 @@ def _probe_script(names: tuple[str, ...], result_name: str) -> str:
 
 def _run_probe(
     *,
+    docker_executable: str,
     image: str,
     application: Mapping[str, str],
     docker_environment: Mapping[str, str],
@@ -203,7 +204,7 @@ def _run_probe(
     names = tuple(sorted(application))
     container_name = f"agentseek-boundary-probe-{secrets.token_hex(6)}"
     argv = [
-        "docker",
+        docker_executable,
         "run",
         "--rm",
         "--name",
@@ -237,7 +238,7 @@ def _run_probe(
     if result.returncode != 0:
         raise BoundaryFailure("synthetic Docker carrier probe failed")
     remaining = _safe_process(
-        ("docker", "container", "inspect", container_name),
+        (docker_executable, "container", "inspect", container_name),
         cwd=cwd,
         environment=docker_environment,
         timeout=30,
@@ -277,10 +278,21 @@ class _EvidenceTransport:
         default_factory=lambda: MappingProxyType({}), repr=False
     )
     image: str | None = None
+    docker_executable: str | None = None
+    container_name: str | None = None
     last_stage: str = "planning"
     last_failure_detail: str = field(default="", repr=False)
 
+    def require_docker_executable(self) -> str:
+        if self.docker_executable is None:
+            raise BoundaryFailure("Docker executable evidence was missing")
+        return self.docker_executable
+
     def _record(self, invocation: ProcessInvocation) -> None:
+        if self.docker_executable is None:
+            self.docker_executable = invocation.argv[0]
+        elif self.docker_executable != invocation.argv[0]:
+            raise BoundaryFailure("Docker executable identity changed")
         digest = (
             None
             if invocation.stdin_bytes is None
@@ -345,7 +357,14 @@ class _EvidenceTransport:
             tmp_root=invocation.cwd.parent,
         ) as image_archive:
             save = _safe_process(
-                ("docker", "image", "save", "--output", str(image_archive), self.image),
+                (
+                    invocation.argv[0],
+                    "image",
+                    "save",
+                    "--output",
+                    str(image_archive),
+                    self.image,
+                ),
                 cwd=invocation.cwd,
                 environment=invocation.environment,
             )
@@ -353,7 +372,14 @@ class _EvidenceTransport:
                 raise BoundaryFailure("built image export failed")
             archive_bytes = image_archive.read_bytes()
         history = _safe_process(
-            ("docker", "history", "--no-trunc", "--format", "{{json .}}", self.image),
+            (
+                invocation.argv[0],
+                "history",
+                "--no-trunc",
+                "--format",
+                "{{json .}}",
+                self.image,
+            ),
             cwd=invocation.cwd,
             environment=invocation.environment,
             timeout=30,
@@ -398,6 +424,13 @@ class _EvidenceTransport:
         if isinstance(invocation, DockerRunInvocation):
             if self.image is None:
                 raise BoundaryFailure("direct-run image boundary was missing")
+            try:
+                name_index = invocation.argv.index("--name")
+                self.container_name = invocation.argv[name_index + 1]
+            except (ValueError, IndexError) as exc:
+                raise BoundaryFailure(
+                    "generated container ownership boundary was missing"
+                ) from exc
             application = {
                 name: invocation.environment[name]
                 for name in invocation.application_names
@@ -408,14 +441,20 @@ class _EvidenceTransport:
                 if name not in invocation.application_names
             }
             self.application_environment = _run_probe(
+                docker_executable=invocation.argv[0],
                 image=self.image,
                 application=application,
                 docker_environment=docker_environment,
                 cwd=invocation.cwd,
                 result_path=self.result_path,
             )
-            return ProcessResult(returncode=0)
-        if invocation.argv[:2] == ("docker", "compose") and "up" in invocation.argv:
+            return _safe_process(
+                invocation.argv,
+                cwd=invocation.cwd,
+                environment=invocation.environment,
+                stdin=invocation.stdin_bytes,
+            )
+        if invocation.argv[1:2] == ("compose",) and "up" in invocation.argv:
             return self._render_compose(invocation)
         timeout = (
             invocation.timeout_seconds
@@ -490,9 +529,25 @@ def _write_project(
     package = root / "chat"
     package.mkdir()
     (package / "__init__.py").write_text("", encoding="utf-8")
-    (package / "graph.py").write_text("graph = object()\n", encoding="utf-8")
+    (package / "graph.py").write_text(
+        "from langgraph.graph import END, START, StateGraph\n"
+        "\n"
+        "def respond(state):\n"
+        "    return {'message': state.get('message', '')}\n"
+        "\n"
+        "builder = StateGraph(dict)\n"
+        "builder.add_node('respond', respond)\n"
+        "builder.add_edge(START, 'respond')\n"
+        "builder.add_edge('respond', END)\n"
+        "graph = builder.compile(name='Boundary Graph')\n",
+        encoding="utf-8",
+    )
     application_dotenv = root / "application.env"
-    application_dotenv.write_text(f"{allowed_name}={allowed_value}\n", encoding="utf-8")
+    application_dotenv.write_text(
+        f"{allowed_name}={allowed_value}\n"
+        "METADATA_DB_URL=sqlite+aiosqlite:////tmp/agentseek-boundary.db\n",
+        encoding="utf-8",
+    )
     application_dotenv.chmod(0o600)
     config = root / "agentseek.json"
     config.write_text(
@@ -523,7 +578,12 @@ def _write_project(
 
 
 def _prove_value_domain_carrier(
-    *, image: str, docker_environment: Mapping[str, str], cwd: Path, result_path: Path
+    *,
+    docker_executable: str,
+    image: str,
+    docker_environment: Mapping[str, str],
+    cwd: Path,
+    result_path: Path,
 ) -> None:
     values = MappingProxyType(
         {
@@ -543,6 +603,7 @@ def _prove_value_domain_carrier(
     result_path.write_bytes(b"")
     result_path.chmod(0o600)
     observed = _run_probe(
+        docker_executable=docker_executable,
         image=image,
         application=values,
         docker_environment=docker_environment,
@@ -554,22 +615,49 @@ def _prove_value_domain_carrier(
 
 
 def _remove_owned_image(
-    *, image: str, cwd: Path, environment: Mapping[str, str]
+    *,
+    docker_executable: str,
+    image: str,
+    cwd: Path,
+    environment: Mapping[str, str],
 ) -> None:
     removed = _safe_process(
-        ("docker", "image", "rm", "--force", image),
+        (docker_executable, "image", "rm", "--force", image),
         cwd=cwd,
         environment=environment,
         timeout=30,
     )
     remaining = _safe_process(
-        ("docker", "image", "inspect", image),
+        (docker_executable, "image", "inspect", image),
         cwd=cwd,
         environment=environment,
         timeout=30,
     )
     if removed.returncode != 0 or remaining.returncode == 0:
         raise BoundaryFailure("owned image cleanup boundary failed")
+
+
+def _remove_owned_container(
+    *,
+    docker_executable: str,
+    container_name: str,
+    cwd: Path,
+    environment: Mapping[str, str],
+) -> None:
+    _safe_process(
+        (docker_executable, "rm", "-f", container_name),
+        cwd=cwd,
+        environment=environment,
+        timeout=30,
+    )
+    remaining = _safe_process(
+        (docker_executable, "container", "inspect", container_name),
+        cwd=cwd,
+        environment=environment,
+        timeout=30,
+    )
+    if remaining.returncode == 0:
+        raise BoundaryFailure("owned container cleanup boundary failed")
 
 
 def collect_boundary_evidence(
@@ -630,6 +718,7 @@ def collect_boundary_evidence(
                             "--port",
                             _PORT,
                             "--recreate",
+                            "--wait",
                         ),
                         process_transport=transport,
                         cwd=project,
@@ -651,6 +740,7 @@ def collect_boundary_evidence(
                         )
                     controls = dict(transport.build_environment)
                     _prove_value_domain_carrier(
+                        docker_executable=transport.require_docker_executable(),
                         image=transport.image,
                         docker_environment=controls,
                         cwd=project,
@@ -667,20 +757,40 @@ def collect_boundary_evidence(
                         invocations=tuple(transport.invocations),
                     )
                 finally:
+                    active_failure = sys.exception()
                     if had_previous:
                         assert previous is not None
                         os.environ[disallowed_name] = previous
                     else:
                         os.environ.pop(disallowed_name, None)
+                    first = transport.invocations[0] if transport.invocations else None
+                    environment = {} if first is None else first.environment
+                    cleanup_failure: BoundaryFailure | None = None
+                    if transport.container_name is not None:
+                        try:
+                            _remove_owned_container(
+                                docker_executable=transport.require_docker_executable(),
+                                container_name=transport.container_name,
+                                cwd=project,
+                                environment=environment,
+                            )
+                        except BoundaryFailure as exc:
+                            cleanup_failure = exc
                     if transport.image is not None:
-                        first = (
-                            transport.invocations[0] if transport.invocations else None
-                        )
-                        environment = {} if first is None else first.environment
-                        _remove_owned_image(
-                            image=transport.image,
-                            cwd=project,
-                            environment=environment,
+                        try:
+                            _remove_owned_image(
+                                docker_executable=transport.require_docker_executable(),
+                                image=transport.image,
+                                cwd=project,
+                                environment=environment,
+                            )
+                        except BoundaryFailure as exc:
+                            cleanup_failure = cleanup_failure or exc
+                    if cleanup_failure is not None:
+                        if active_failure is None:
+                            raise cleanup_failure
+                        active_failure.add_note(
+                            "Owned container cleanup could not be verified."
                         )
 
 

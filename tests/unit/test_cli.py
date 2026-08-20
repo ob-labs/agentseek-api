@@ -6,6 +6,7 @@ import importlib
 import io
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -31,6 +32,23 @@ from agentseek_api.docker_runtime import (
 )
 from agentseek_api.services.langgraph_service import LangGraphService
 from tests.container_plan_helpers import write_sanitized_manifest
+
+
+DOCKER_EXECUTABLE = str(
+    Path(sys.executable).parent / ("docker.exe" if os.name == "nt" else "docker")
+)
+
+
+@pytest.fixture(autouse=True)
+def _fixed_unit_docker_executable(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_which = shutil.which
+
+    def fixed_which(executable: str, *, path: str | None = None) -> str | None:
+        if executable == "docker":
+            return DOCKER_EXECUTABLE
+        return original_which(executable, path=path)
+
+    monkeypatch.setattr(shutil, "which", fixed_which)
 
 
 def test_preloaded_mode_never_reads_config_environment_sources(
@@ -305,7 +323,7 @@ class _RunCapture:
         self.command = command
         self.env = env
         self.cwd = cwd
-        if command[:3] == ["docker", "container", "inspect"]:
+        if command[:3] == [DOCKER_EXECUTABLE, "container", "inspect"]:
             return 1
         return 0
 
@@ -321,14 +339,15 @@ class _ProcessCapture:
         if self.calls is None:
             self.calls = []
         self.calls.append(invocation)
-        if invocation.argv == ("docker", "compose", "version", "--short"):
+        docker_args = invocation.argv[1:]
+        if docker_args == ("compose", "version", "--short"):
             return ProcessResult(returncode=0, stdout=b"2.40.3\n")
-        if invocation.argv == ("docker", "buildx", "version"):
+        if docker_args == ("buildx", "version"):
             return ProcessResult(
                 returncode=0,
                 stdout=b"github.com/docker/buildx v0.14.0 deadbeef\n",
             )
-        if invocation.argv[:3] == ("docker", "image", "inspect"):
+        if docker_args[:2] == ("image", "inspect"):
             selected = self.image_config or (
                 {
                     "org.agentseek.environment-contract": "preloaded-v1",
@@ -341,7 +360,7 @@ class _ProcessCapture:
             )
             return ProcessResult(returncode=0, stdout=json.dumps(selected).encode())
         return_code = 0
-        if invocation.argv[:3] == ("docker", "container", "inspect"):
+        if docker_args[:2] == ("container", "inspect"):
             return_code = 0 if self.container_exists else 1
         if self.return_codes is not None:
             return_code = self.return_codes.get(invocation.argv, return_code)
@@ -369,20 +388,21 @@ class BoundaryRunner(ProcessTransport):
     def _is_read_only(invocation: ProcessInvocation) -> bool:
         if not isinstance(invocation, ControlQueryInvocation):
             return False
-        argv = tuple(invocation.argv)
-        if argv[:3] == ("docker", "image", "inspect"):
+        argv = tuple(invocation.argv[1:])
+        if argv[:2] == ("image", "inspect"):
             return True
-        if argv == ("docker", "compose", "version", "--short"):
+        if argv == ("compose", "version", "--short"):
             return True
         if argv in {
-            ("docker", "buildx", "version"),
-            ("docker", "buildx", "inspect"),
+            ("buildx", "version"),
+            ("buildx", "inspect"),
         }:
             return True
-        return argv[:2] == ("docker", "compose") and "config" in argv[2:]
+        return argv[:1] == ("compose",) and "config" in argv[1:]
 
     def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
         argv = tuple(invocation.argv)
+        docker_args = argv[1:]
         environment_items = tuple(sorted(invocation.environment.items()))
         stdin_bytes = invocation.stdin_bytes
         self.calls.append(
@@ -403,23 +423,23 @@ class BoundaryRunner(ProcessTransport):
         )
         if not isinstance(invocation, ControlQueryInvocation):
             return ProcessResult(returncode=0)
-        if argv == ("docker", "compose", "version", "--short"):
+        if docker_args == ("compose", "version", "--short"):
             version = (
                 b"2.0.0\n"
                 if self.failure_case == "unsupported_compose_version"
                 else b"2.40.3\n"
             )
             return ProcessResult(returncode=0, stdout=version)
-        if argv == ("docker", "buildx", "version"):
+        if docker_args == ("buildx", "version"):
             return ProcessResult(
                 returncode=0,
                 stdout=b"github.com/docker/buildx v0.14.0 deadbeef\n",
             )
-        if argv == ("docker", "buildx", "inspect"):
+        if docker_args == ("buildx", "inspect"):
             return ProcessResult(
                 returncode=1 if self.failure_case == "unavailable_buildkit" else 0
             )
-        if argv[:3] == ("docker", "image", "inspect"):
+        if docker_args[:2] == ("image", "inspect"):
             labels = {
                 "org.agentseek.environment-contract": "preloaded-v1",
                 "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
@@ -437,7 +457,7 @@ class BoundaryRunner(ProcessTransport):
                 returncode=0,
                 stdout=json.dumps([labels, entrypoint, []]).encode("utf-8"),
             )
-        if argv[:3] == ("docker", "container", "inspect"):
+        if docker_args[:2] == ("container", "inspect"):
             return ProcessResult(returncode=1)
         return ProcessResult(returncode=0)
 
@@ -445,18 +465,18 @@ class BoundaryRunner(ProcessTransport):
 @pytest.mark.parametrize(
     "argv",
     [
-        ("docker", "compose", "version", "--short"),
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "compose", "version", "--short"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
         (
-            "docker",
+            DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "--format",
             "fixture",
             "agentseek:test",
         ),
-        ("docker", "compose", "-f", "compose.yaml", "config"),
+        (DOCKER_EXECUTABLE, "compose", "-f", "compose.yaml", "config"),
     ],
 )
 def test_boundary_runner_requires_control_query_type_for_read_only_call(
@@ -480,7 +500,7 @@ def test_boundary_runner_treats_container_inspect_as_workload_boundary(
 
     runner(
         ControlQueryInvocation(
-            argv=("docker", "container", "inspect", "agentseek-up-8123"),
+            argv=(DOCKER_EXECUTABLE, "container", "inspect", "agentseek-up-8123"),
             environment={},
             cwd=tmp_path,
             stdin_bytes=None,
@@ -999,14 +1019,16 @@ def test_container_plan_failure_starts_no_workload(
     }:
         assert runner.calls == []
     expected_control_calls = {
-        "unsupported_compose_version": [("docker", "compose", "version", "--short")],
+        "unsupported_compose_version": [
+            (DOCKER_EXECUTABLE, "compose", "version", "--short")
+        ],
         "unavailable_buildkit": [
-            ("docker", "buildx", "version"),
-            ("docker", "buildx", "inspect"),
+            (DOCKER_EXECUTABLE, "buildx", "version"),
+            (DOCKER_EXECUTABLE, "buildx", "inspect"),
         ],
         "missing_contract_label": [
             (
-                "docker",
+                DOCKER_EXECUTABLE,
                 "image",
                 "inspect",
                 "--format",
@@ -1016,7 +1038,7 @@ def test_container_plan_failure_starts_no_workload(
         ],
         "missing_manifest_label": [
             (
-                "docker",
+                DOCKER_EXECUTABLE,
                 "image",
                 "inspect",
                 "--format",
@@ -1026,7 +1048,7 @@ def test_container_plan_failure_starts_no_workload(
         ],
         "incompatible_entrypoint": [
             (
-                "docker",
+                DOCKER_EXECUTABLE,
                 "image",
                 "inspect",
                 "--format",
@@ -1062,10 +1084,10 @@ def test_generated_up_builds_then_inspects_before_any_workload(tmp_path: Path) -
     assert exit_code == 0
     argv = [call.argv for call in runner.calls]
     assert argv[:5] == [
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
         (
-            "docker",
+            DOCKER_EXECUTABLE,
             "buildx",
             "build",
             "--load",
@@ -1077,18 +1099,18 @@ def test_generated_up_builds_then_inspects_before_any_workload(tmp_path: Path) -
             "-",
         ),
         (
-            "docker",
+            DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "--format",
             "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
             "agentseek-up:8123",
         ),
-        ("docker", "rm", "-f", "agentseek-up-8123"),
+        (DOCKER_EXECUTABLE, "rm", "-f", "agentseek-up-8123"),
     ]
     assert len(argv) == 6
     assert argv[5][:9] == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "run",
         "--detach",
         "--name",
@@ -1110,6 +1132,37 @@ def test_generated_up_builds_then_inspects_before_any_workload(tmp_path: Path) -
     )
 
 
+def test_up_resolves_docker_once_from_selected_path_and_freezes_absolute_argv(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api.cli import main
+
+    _write_basic_langgraph_config(tmp_path)
+    monkeypatch.setenv("PATH", "/selected/docker/bin")
+    calls: list[tuple[str, str | None]] = []
+
+    def fake_which(executable: str, *, path: str | None = None) -> str:
+        calls.append((executable, path))
+        return "/selected/docker/bin/docker"
+
+    monkeypatch.setattr(shutil, "which", fake_which)
+    runner = BoundaryRunner()
+
+    exit_code = main(
+        ["up", "--image", "agentseek:test", "--recreate"],
+        process_transport=runner,
+        cwd=tmp_path,
+    )
+
+    assert exit_code == 0
+    assert calls == [("docker", "/selected/docker/bin")]
+    assert runner.calls
+    assert {invocation.argv[0] for invocation in runner.calls} == {
+        "/selected/docker/bin/docker"
+    }
+
+
 def test_generated_up_materializes_compose_artifact_before_build_and_cleans_it(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1123,20 +1176,24 @@ def test_generated_up_materializes_compose_artifact_before_build_and_cleans_it(
     config_path = _write_basic_langgraph_config(tmp_path)
     payload = json.loads(config_path.read_text(encoding="utf-8"))
     payload["env"] = {"TOKEN": "literal"}
-    payload["compose_env"] = ["TOKEN"]
+    payload["compose_env"] = ["TOKEN", "AGENTSEEK_GRAPHS"]
     config_path.write_text(json.dumps(payload), encoding="utf-8")
     compose_path = tmp_path / "compose.yaml"
     compose_path.write_text("services: {}\n", encoding="utf-8")
 
     class ArtifactBoundaryRunner(BoundaryRunner):
         artifact_exists_during_build = False
+        artifact_contents_during_build: bytes | None = None
 
         def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
             if isinstance(invocation, BuildImageInvocation):
-                self.artifact_exists_during_build = any(
-                    child.name.startswith("agentseek-compose-")
+                artifacts = [
+                    child
                     for child in private_root.iterdir()
-                )
+                    if child.name.startswith("agentseek-compose-")
+                ]
+                self.artifact_exists_during_build = bool(artifacts)
+                self.artifact_contents_during_build = artifacts[0].read_bytes()
             return super().__call__(invocation)
 
     runner = ArtifactBoundaryRunner()
@@ -1153,6 +1210,9 @@ def test_generated_up_materializes_compose_artifact_before_build_and_cleans_it(
 
     assert exit_code == 0
     assert runner.artifact_exists_during_build is True
+    assert runner.artifact_contents_during_build == (
+        b'AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json"\nTOKEN="literal"\n'
+    )
     assert list(private_root.iterdir()) == []
 
 
@@ -2579,14 +2639,14 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
     assert exit_code == 0
     assert capture.calls is not None
     assert [call.argv for call in capture.calls[:2]] == [
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
     ]
     invocation = capture.calls[2]
     assert isinstance(invocation, BuildImageInvocation)
     assert "AGENTSEEK_GRAPHS" not in invocation.environment
     assert invocation.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "buildx",
         "build",
         "--load",
@@ -2624,7 +2684,9 @@ def test_build_command_rejects_unavailable_buildx_before_build(tmp_path: Path) -
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    capture = _ProcessCapture(return_codes={("docker", "buildx", "inspect"): 1})
+    capture = _ProcessCapture(
+        return_codes={(DOCKER_EXECUTABLE, "buildx", "inspect"): 1}
+    )
     stderr = io.StringIO()
 
     exit_code = main(
@@ -2637,8 +2699,8 @@ def test_build_command_rejects_unavailable_buildx_before_build(tmp_path: Path) -
     assert exit_code == 2
     assert capture.calls is not None
     assert [call.argv for call in capture.calls] == [
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
     ]
     assert "builder is unavailable" in stderr.getvalue()
 
@@ -2769,7 +2831,7 @@ def test_generated_up_uses_final_auth_selection_and_sanitized_build_stdin(
     assert capture.calls is not None
     build = _captured_image_build(capture)
     assert build.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "buildx",
         "build",
         "--load",
@@ -2980,7 +3042,7 @@ def test_up_custom_image_inspects_contract_and_runs_explicit_preloaded_mode(
     assert capture.calls is not None
     inspect = capture.calls[0]
     assert inspect.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "image",
         "inspect",
         "--format",
@@ -3533,13 +3595,13 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
     assert exit_code == 0
     assert capture.calls is not None
     assert capture.calls[1].argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "rm",
         "-f",
         "agentseek-up-8123",
     )
     assert capture.calls[2].argv[:9] == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "run",
         "--detach",
         "--name",
@@ -3629,7 +3691,7 @@ def test_up_container_existence_probe_is_bounded_and_control_only(
     assert isinstance(probe, ControlQueryInvocation)
     assert probe.timeout_seconds > 0
     assert probe.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "container",
         "inspect",
         "agentseek-up-8123",
@@ -3665,20 +3727,20 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
     assert exit_code == 0
     assert capture.calls is not None
     assert capture.calls[1].argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "compose",
         "version",
         "--short",
     )
     assert capture.calls[2].argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "rm",
         "-f",
         "agentseek-up-8123",
     )
     compose_invocation = capture.calls[3]
     assert compose_invocation.argv[:3] == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "compose",
         "--env-file",
     )
@@ -3722,7 +3784,7 @@ def test_up_compose_uses_selected_literal_artifact_and_ignores_ambient_controls(
         compose_contents: bytes | None = None
 
         def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
-            if invocation.argv[:3] == ("docker", "compose", "--env-file"):
+            if invocation.argv[:3] == (DOCKER_EXECUTABLE, "compose", "--env-file"):
                 self.compose_contents = Path(invocation.argv[3]).read_bytes()
             return super().__call__(invocation)
 
@@ -3748,7 +3810,7 @@ def test_up_compose_uses_selected_literal_artifact_and_ignores_ambient_controls(
     compose = next(
         call
         for call in capture.calls
-        if call.argv[:3] == ("docker", "compose", "--env-file")
+        if call.argv[:3] == (DOCKER_EXECUTABLE, "compose", "--env-file")
     )
     artifact = Path(compose.argv[3])
     assert not artifact.exists()
@@ -3770,7 +3832,7 @@ def test_up_compose_artifact_is_removed_after_compose_failure(tmp_path: Path) ->
     class FailureCapture(_ProcessCapture):
         def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
             result = super().__call__(invocation)
-            if invocation.argv[:3] == ("docker", "compose", "--env-file"):
+            if invocation.argv[:3] == (DOCKER_EXECUTABLE, "compose", "--env-file"):
                 artifact = Path(invocation.argv[3])
                 assert artifact.exists()
                 artifact_paths.append(artifact)
@@ -3887,15 +3949,15 @@ def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
     assert capture.calls is not None
     assert [call.argv for call in capture.calls] == [
         (
-            "docker",
+            DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "--format",
             "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
             "agentseek:test",
         ),
-        ("docker", "compose", "version", "--short"),
-        ("docker", "container", "inspect", "agentseek-up-8123"),
+        (DOCKER_EXECUTABLE, "compose", "version", "--short"),
+        (DOCKER_EXECUTABLE, "container", "inspect", "agentseek-up-8123"),
     ]
     assert "already exists" in stderr.getvalue()
     assert "--recreate" in stderr.getvalue()
@@ -3925,11 +3987,11 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
     assert exit_code == 0
     assert capture.calls is not None
     assert [call.argv for call in capture.calls[:2]] == [
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
     ]
     assert capture.calls[2].argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "buildx",
         "build",
         "--load",
@@ -3940,15 +4002,15 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
         "-",
     )
     assert capture.calls[2].stdin_bytes is not None
-    assert capture.calls[3].argv[:3] == ("docker", "image", "inspect")
+    assert capture.calls[3].argv[:3] == (DOCKER_EXECUTABLE, "image", "inspect")
     assert capture.calls[4].argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "container",
         "inspect",
         "agentseek-up-8124",
     )
     assert capture.calls[5].argv[:9] == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "run",
         "--detach",
         "--name",
@@ -3965,7 +4027,7 @@ def test_up_command_builds_image_when_missing_and_passes_postgres_uri(
             invocation.argv
         )
     container_env = _application_environment(capture)
-    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
+    assert container_env["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
     assert (
         container_env["METADATA_DB_URL"]
         == "postgresql://postgres:postgres@db/agentseek"
@@ -4016,15 +4078,15 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[3].argv[:3] == ("docker", "image", "inspect")
+    assert capture.calls[3].argv[:3] == (DOCKER_EXECUTABLE, "image", "inspect")
     assert capture.calls[4].argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "container",
         "inspect",
         "agentseek-up-8123",
     )
     assert capture.calls[5].argv[:9] == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "run",
         "--detach",
         "--name",
@@ -4036,7 +4098,7 @@ def test_up_command_passes_config_auth_env_and_containerizes_file_paths(
     )
     assert "agentseek-up:8123" in capture.calls[5].argv
     container_env = _application_environment(capture)
-    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
+    assert container_env["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
     assert container_env["AUTH_MODULE_PATH"] == "/deps/agent/auth.py:backend"
     assert container_env["FEATURE_FLAG"] == "True"
 
@@ -4197,7 +4259,7 @@ def test_up_command_returns_build_failure_without_running_container(
 
     _write_basic_langgraph_config(tmp_path)
     build_argv = (
-        "docker",
+        DOCKER_EXECUTABLE,
         "buildx",
         "build",
         "--load",
@@ -4219,8 +4281,8 @@ def test_up_command_returns_build_failure_without_running_container(
     assert exit_code == 9
     assert capture.calls is not None
     assert [call.argv for call in capture.calls] == [
-        ("docker", "buildx", "version"),
-        ("docker", "buildx", "inspect"),
+        (DOCKER_EXECUTABLE, "buildx", "version"),
+        (DOCKER_EXECUTABLE, "buildx", "inspect"),
         build_argv,
     ]
 
@@ -4249,14 +4311,14 @@ def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) 
     assert capture.calls is not None
     assert [call.argv for call in capture.calls] == [
         (
-            "docker",
+            DOCKER_EXECUTABLE,
             "image",
             "inspect",
             "--format",
             "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
             "agentseek:test",
         ),
-        ("docker", "container", "inspect", "agentseek-up-8123"),
+        (DOCKER_EXECUTABLE, "container", "inspect", "agentseek-up-8123"),
     ]
     assert "already exists" in stderr.getvalue()
     assert "--recreate" in stderr.getvalue()
@@ -4269,6 +4331,7 @@ def test_container_exists_uses_a_private_bounded_query(tmp_path: Path) -> None:
 
     exists = cli_module._container_exists(
         "agentseek-up-8123",
+        docker_executable=DOCKER_EXECUTABLE,
         process_transport=capture,
         docker_control={},
         cwd=tmp_path,
@@ -4280,7 +4343,7 @@ def test_container_exists_uses_a_private_bounded_query(tmp_path: Path) -> None:
     assert isinstance(invocation, ControlQueryInvocation)
     assert invocation.timeout_seconds > 0
     assert invocation.argv == (
-        "docker",
+        DOCKER_EXECUTABLE,
         "container",
         "inspect",
         "agentseek-up-8123",

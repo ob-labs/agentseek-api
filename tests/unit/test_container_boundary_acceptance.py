@@ -20,6 +20,9 @@ SCRIPT = Path("scripts/test_container_env_boundary.py")
 AUTODISCOVERY_SCRIPT = Path("scripts/test_cli_config_autodiscovery.py")
 CLI_DOCKER_SCRIPT = Path("scripts/test-cli-docker.sh")
 VALUE_FREE_LOG_SCRIPT = Path("scripts/value_free_log_tail.py")
+DOCKER_EXECUTABLE = str(
+    Path(sys.executable).parent / ("docker.exe" if os.name == "nt" else "docker")
+)
 
 
 def _load_script():
@@ -157,12 +160,15 @@ def test_generated_compose_flow_uses_build_controls_for_direct_probe(
 ) -> None:
     module = _load_script()
     observed_controls: list[dict[str, str]] = []
+    observed_cli_argv: list[tuple[str, ...]] = []
 
     monkeypatch.setattr(module, "_build_candidate", lambda _project: object())
     monkeypatch.setattr(module, "_remove_owned_image", lambda **_kwargs: None)
 
-    def fake_cli(_argv, *, process_transport, **_kwargs):
+    def fake_cli(argv, *, process_transport, **_kwargs):
+        observed_cli_argv.append(tuple(argv))
         process_transport.image = "agentseek:test"
+        process_transport.docker_executable = DOCKER_EXECUTABLE
         process_transport.build_environment = {"PATH": "docker-control-only"}
         process_transport.build_context_archive = b"context"
         process_transport.compose_environment = {}
@@ -193,6 +199,82 @@ def test_generated_compose_flow_uses_build_controls_for_direct_probe(
 
     assert evidence.invocations[0].kind == "compose"
     assert observed_controls == [{"PATH": "docker-control-only"}]
+    assert observed_cli_argv and "--wait" in observed_cli_argv[0]
+
+
+def test_generated_run_transport_executes_the_real_preloaded_container(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_script()
+    result_path = tmp_path / "result.json"
+    result_path.write_text("{}", encoding="utf-8")
+    transport = module._EvidenceTransport(
+        result_path=result_path,
+        compose_dotenv_canary="canary",
+        forbidden_values=(),
+        image="agentseek:test",
+    )
+    calls: list[tuple[str, ...]] = []
+    probes: list[dict[str, str]] = []
+
+    monkeypatch.setattr(
+        module,
+        "_run_probe",
+        lambda **kwargs: (
+            probes.append(dict(kwargs["application"])) or kwargs["application"]
+        ),
+    )
+
+    def fake_process(argv, **_kwargs):
+        calls.append(tuple(argv))
+        return ProcessResult(returncode=0)
+
+    monkeypatch.setattr(module, "_safe_process", fake_process)
+    invocation = module.DockerRunInvocation(
+        argv=(
+            DOCKER_EXECUTABLE,
+            "run",
+            "--detach",
+            "--name",
+            "agentseek-up-48123",
+            "-e",
+            "ALLOWED_SENTINEL",
+            "agentseek:test",
+        ),
+        environment={"PATH": "control", "ALLOWED_SENTINEL": "allowed"},
+        cwd=tmp_path,
+        application_names=frozenset({"ALLOWED_SENTINEL"}),
+    )
+
+    assert transport(invocation).returncode == 0
+    assert probes == [{"ALLOWED_SENTINEL": "allowed"}]
+    assert calls == [invocation.argv]
+    assert transport.container_name == "agentseek-up-48123"
+
+
+def test_owned_generated_container_cleanup_requires_absence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_script()
+    calls: list[tuple[str, ...]] = []
+
+    def fake_process(argv, **_kwargs):
+        calls.append(tuple(argv))
+        return ProcessResult(returncode=1 if "inspect" in argv else 0)
+
+    monkeypatch.setattr(module, "_safe_process", fake_process)
+
+    module._remove_owned_container(
+        docker_executable=DOCKER_EXECUTABLE,
+        container_name="agentseek-up-48123",
+        cwd=tmp_path,
+        environment={"PATH": "control"},
+    )
+
+    assert calls == [
+        (DOCKER_EXECUTABLE, "rm", "-f", "agentseek-up-48123"),
+        (DOCKER_EXECUTABLE, "container", "inspect", "agentseek-up-48123"),
+    ]
 
 
 def test_compose_evidence_uses_floor_compatible_rendered_document(
@@ -229,7 +311,7 @@ def test_compose_evidence_uses_floor_compatible_rendered_document(
     monkeypatch.setattr(module, "_safe_process", fake_process)
     invocation = ProcessInvocation(
         argv=(
-            "docker",
+            DOCKER_EXECUTABLE,
             "compose",
             "--env-file",
             "private.env",
@@ -244,7 +326,7 @@ def test_compose_evidence_uses_floor_compatible_rendered_document(
     assert transport._render_compose(invocation).returncode == 0
     assert calls == [
         (
-            "docker",
+            DOCKER_EXECUTABLE,
             "compose",
             "--env-file",
             "private.env",
@@ -311,7 +393,7 @@ def test_probe_writes_and_reads_the_exact_private_result_basename(
     def fake_process(argv, *, cwd, environment, stdin=None, timeout=None):
         del cwd, stdin, timeout
         calls.append(argv)
-        if argv[:3] == ("docker", "container", "inspect"):
+        if argv[:3] == (DOCKER_EXECUTABLE, "container", "inspect"):
             return ProcessResult(returncode=1)
         script = argv[-1].replace("/result/", f"{result_path.parent}/")
         completed = subprocess.run(
@@ -329,6 +411,7 @@ def test_probe_writes_and_reads_the_exact_private_result_basename(
     monkeypatch.setattr(module, "_safe_process", fake_process)
 
     observed = module._run_probe(
+        docker_executable=DOCKER_EXECUTABLE,
         image="synthetic:test",
         application=application,
         docker_environment={"PATH": os.environ["PATH"]},
@@ -347,7 +430,7 @@ def test_probe_writes_and_reads_the_exact_private_result_basename(
         "synthetic:test",
     )
     assert run_argv[-3:-1] == ("-I", "-c")
-    assert calls[1][:3] == ("docker", "container", "inspect")
+    assert calls[1][:3] == (DOCKER_EXECUTABLE, "container", "inspect")
 
 
 def test_probe_fails_if_auto_remove_leaves_the_owned_container(
@@ -366,6 +449,7 @@ def test_probe_fails_if_auto_remove_leaves_the_owned_container(
 
     with pytest.raises(module.BoundaryFailure, match="cleanup"):
         module._run_probe(
+            docker_executable=DOCKER_EXECUTABLE,
             image="synthetic:test",
             application={},
             docker_environment={"PATH": os.environ["PATH"]},
@@ -383,6 +467,7 @@ def test_owned_image_cleanup_requires_removal_and_absence(
 
     with pytest.raises(module.BoundaryFailure, match="cleanup"):
         module._remove_owned_image(
+            docker_executable=DOCKER_EXECUTABLE,
             image="synthetic:test",
             cwd=tmp_path,
             environment={"PATH": os.environ["PATH"]},

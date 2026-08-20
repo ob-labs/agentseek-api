@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -30,6 +31,7 @@ MINIMUM_BUILDX_VERSION = (0, 12, 0)
 IMAGE_COMPATIBILITY_FORMAT = (
     "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]"
 )
+PRELOADED_MANIFEST_PATH = "/opt/agentseek/manifest.v1.json"
 
 _SEMANTIC_VERSION = r"[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?"
 _COMPOSE_VERSION = re.compile(rf"^v?(?P<version>{_SEMANTIC_VERSION})$")
@@ -56,6 +58,7 @@ class ProcessInvocation:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "argv", tuple(self.argv))
+        _validate_argv(self.argv)
         object.__setattr__(
             self, "environment", MappingProxyType(dict(self.environment))
         )
@@ -136,6 +139,46 @@ def _validate_argv(argv: tuple[str, ...]) -> None:
         raise ContainerPolicyError("Docker invocation argv must not be empty.")
     if any("\0" in item for item in argv):
         raise ContainerPolicyError("Docker invocation argv contains NUL.")
+    if not Path(argv[0]).is_absolute():
+        raise ContainerPolicyError(
+            "Docker invocation executable must be an absolute path."
+        )
+
+
+def resolve_docker_executable(
+    docker_control: Mapping[str, str],
+    *,
+    platform: str = sys.platform,
+) -> str:
+    """Resolve Docker once from the selected control-plane search path."""
+
+    if platform == "win32":
+        selected = [
+            value for name, value in docker_control.items() if name.casefold() == "path"
+        ]
+        path_value = selected[0] if len(selected) == 1 else None
+    else:
+        path_value = docker_control.get("PATH")
+    if not path_value:
+        raise DockerRuntimeError(
+            "Docker executable could not be resolved from the selected PATH."
+        )
+    executable = shutil.which("docker", path=path_value)
+    if executable is None:
+        raise DockerRuntimeError(
+            "Docker executable could not be resolved from the selected PATH."
+        )
+    if platform == "win32":
+        from pathlib import PureWindowsPath
+
+        is_absolute = PureWindowsPath(executable).is_absolute()
+    else:
+        is_absolute = Path(executable).is_absolute()
+    if not is_absolute:
+        raise DockerRuntimeError(
+            "Docker executable could not be resolved from the selected PATH."
+        )
+    return executable
 
 
 def _validated_environment(
@@ -270,6 +313,7 @@ def build_image_invocation(
     bundle: ContainerBuildBundle,
     *,
     plan: ContainerBuildPlan,
+    docker_executable: str,
     docker_control: Mapping[str, str],
     tag: str | None = None,
     platform: str | None = None,
@@ -281,7 +325,7 @@ def build_image_invocation(
         raise DockerRuntimeError("The build bundle does not match the supplied plan.")
     archive = bundle.archive_bytes()
     validate_pip_config_identity(plan)
-    argv = ["docker", "buildx", "build", "--load", "--file", "Dockerfile"]
+    argv = [docker_executable, "buildx", "build", "--load", "--file", "Dockerfile"]
     if platform:
         argv.extend(("--platform", platform))
     if pull:
@@ -338,6 +382,7 @@ def encode_compose_environment(values: Mapping[str, str]) -> str:
 
 def build_compose_invocation(
     *,
+    docker_executable: str,
     compose_file: Path,
     env_file: Path,
     docker_control: Mapping[str, str],
@@ -356,7 +401,7 @@ def build_compose_invocation(
         platform=platform,
     )
     argv = [
-        "docker",
+        docker_executable,
         "compose",
         "--env-file",
         str(env_file),
@@ -374,6 +419,7 @@ def build_compose_invocation(
 
 def require_supported_compose(
     *,
+    docker_executable: str,
     transport: ProcessTransport,
     docker_control: Mapping[str, str],
     cwd: Path,
@@ -381,7 +427,7 @@ def require_supported_compose(
     """Reject old or unavailable Compose before private artifacts are created."""
 
     query = build_docker_query_invocation(
-        argv=("docker", "compose", "version", "--short"),
+        argv=(docker_executable, "compose", "version", "--short"),
         docker_control=docker_control,
         cwd=cwd,
     )
@@ -488,6 +534,7 @@ def require_buildx_available(result: ProcessResult) -> None:
 
 def require_supported_buildx(
     *,
+    docker_executable: str,
     transport: ProcessTransport,
     docker_control: Mapping[str, str],
     cwd: Path,
@@ -496,7 +543,7 @@ def require_supported_buildx(
     """Require a usable Buildx plugin before any side-effecting build call."""
 
     version_query = build_docker_query_invocation(
-        argv=("docker", "buildx", "version"),
+        argv=(docker_executable, "buildx", "version"),
         docker_control=docker_control,
         cwd=cwd,
     )
@@ -516,7 +563,7 @@ def require_supported_buildx(
             f"Docker Buildx {required} or newer is required for BuildKit secrets."
         )
     inspect_query = build_docker_query_invocation(
-        argv=("docker", "buildx", "inspect"),
+        argv=(docker_executable, "buildx", "inspect"),
         docker_control=docker_control,
         cwd=cwd,
     )
@@ -564,7 +611,7 @@ def parse_image_compatibility_result(result: ProcessResult) -> DockerImageConfig
 
 _PRELOADED_V1_LABELS = {
     "org.agentseek.environment-contract": "preloaded-v1",
-    "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
+    "org.agentseek.runtime-manifest": PRELOADED_MANIFEST_PATH,
     "org.agentseek.runtime-distribution": "agentseek-api",
     "org.agentseek.runtime-version": "0.3.0",
 }
@@ -581,6 +628,7 @@ def require_preloaded_v1(labels: Mapping[str, str]) -> str:
 def inspect_image_contract(
     image: str,
     *,
+    docker_executable: str,
     transport: ProcessTransport,
     docker_control: Mapping[str, str],
     cwd: Path,
@@ -589,7 +637,7 @@ def inspect_image_contract(
 
     query = build_docker_query_invocation(
         argv=(
-            "docker",
+            docker_executable,
             "image",
             "inspect",
             "--format",
@@ -646,6 +694,7 @@ __all__ = [
     "IMAGE_COMPATIBILITY_FORMAT",
     "MINIMUM_BUILDX_VERSION",
     "MINIMUM_COMPOSE_VERSION",
+    "PRELOADED_MANIFEST_PATH",
     "ProcessInvocation",
     "ProcessResult",
     "ProcessTransport",
@@ -665,6 +714,7 @@ __all__ = [
     "require_buildx_available",
     "require_supported_buildx",
     "require_supported_compose",
+    "resolve_docker_executable",
     "validate_pip_config_identity",
     "validate_environment_name",
 ]

@@ -41,6 +41,7 @@ from agentseek_api.constants import DEFAULT_API_PORT
 from agentseek_api.docker_runtime import (
     DockerRuntimeError,
     LegacyRunnerAdapter,
+    PRELOADED_MANIFEST_PATH,
     ProcessTransport,
     SubprocessTransport,
     build_compose_invocation,
@@ -52,6 +53,7 @@ from agentseek_api.docker_runtime import (
     inspect_image_contract,
     require_supported_compose,
     require_supported_buildx,
+    resolve_docker_executable,
 )
 from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_file
 from agentseek_api.environment import (
@@ -1162,6 +1164,7 @@ def _execute_build_command(
         role=None,
     )
     docker_control = dict(docker_control_environment(environment_plan))
+    docker_executable = resolve_docker_executable(docker_control)
     with ExitStack() as cleanup:
         sweep_expired_artifacts(
             prefix="agentseek-build-",
@@ -1178,12 +1181,14 @@ def _execute_build_command(
         invocation = build_image_invocation(
             bundle,
             plan=build_plan,
+            docker_executable=docker_executable,
             docker_control=docker_control,
             tag=args.tag,
             platform=args.platform,
             pull=args.pull,
         )
         require_supported_buildx(
+            docker_executable=docker_executable,
             transport=process_transport,
             docker_control=docker_control,
             cwd=cwd,
@@ -1213,12 +1218,13 @@ def _wait_for_http_ready(url: str, *, timeout_seconds: float) -> None:
 def _container_exists(
     name: str,
     *,
+    docker_executable: str,
     process_transport: ProcessTransport,
     docker_control: dict[str, str],
     cwd: Path,
 ) -> bool:
     invocation = build_docker_query_invocation(
-        argv=("docker", "container", "inspect", name),
+        argv=(docker_executable, "container", "inspect", name),
         docker_control=docker_control,
         cwd=cwd,
     )
@@ -1252,6 +1258,7 @@ def _execute_up_command(
         postgres_uri=args.postgres_uri,
     )
     docker_control = dict(docker_control_environment(environment_plan))
+    docker_executable = resolve_docker_executable(docker_control)
     application_payload, final_auth = _resolve_application_container_payload(
         environment_plan, selection=selection
     )
@@ -1285,6 +1292,7 @@ def _execute_up_command(
             application_payload.pop("AUTH_MODULE_PATH", None)
         else:
             application_payload["AUTH_MODULE_PATH"] = auth_patch.value
+        application_payload["AGENTSEEK_GRAPHS"] = PRELOADED_MANIFEST_PATH
         generated_dockerfile_bytes = render_build_dockerfile(generated_plan)
 
     application_payload.pop("PYTHONPATH", None)
@@ -1309,6 +1317,7 @@ def _execute_up_command(
         if image:
             custom_image_contract = inspect_image_contract(
                 image,
+                docker_executable=docker_executable,
                 transport=process_transport,
                 docker_control=docker_control,
                 cwd=cwd,
@@ -1347,6 +1356,7 @@ def _execute_up_command(
             build_invocation = build_image_invocation(
                 bundle,
                 plan=generated_plan,
+                docker_executable=docker_executable,
                 docker_control=docker_control,
                 tag=image,
                 pull=args.pull,
@@ -1355,6 +1365,7 @@ def _execute_up_command(
         compose_env_path: Path | None = None
         if compose_path is not None:
             require_supported_compose(
+                docker_executable=docker_executable,
                 transport=process_transport,
                 docker_control=docker_control,
                 cwd=cwd,
@@ -1374,6 +1385,7 @@ def _execute_up_command(
         if build_invocation is not None:
             assert generated_plan is not None
             require_supported_buildx(
+                docker_executable=docker_executable,
                 transport=process_transport,
                 docker_control=docker_control,
                 cwd=cwd,
@@ -1384,16 +1396,36 @@ def _execute_up_command(
                 return build_exit_code
             custom_image_contract = inspect_image_contract(
                 image,
+                docker_executable=docker_executable,
                 transport=process_transport,
                 docker_control=docker_control,
                 cwd=cwd,
             )
+            application_payload = dict(application_payload)
+            application_payload["AGENTSEEK_GRAPHS"] = (
+                custom_image_contract.manifest_path
+            )
+            if compose_path is not None:
+                compose_payload = dict(
+                    select_compose_payload(
+                        application_payload=application_payload,
+                        selected_names=selection.compose_env,
+                        docker_control=docker_control,
+                    )
+                )
+                verified_compose = encode_compose_environment(compose_payload).encode(
+                    "utf-8"
+                )
+                if verified_compose != encoded_compose:
+                    raise CliError(
+                        "The generated image contract changed the selected Compose payload."
+                    )
 
         container_name = _container_name_for_port(args.port)
         remove_invocation = None
         if args.recreate:
             remove_invocation = build_docker_control_invocation(
-                argv=("docker", "rm", "-f", container_name),
+                argv=(docker_executable, "rm", "-f", container_name),
                 docker_control=docker_control,
                 cwd=cwd,
             )
@@ -1402,6 +1434,7 @@ def _execute_up_command(
         if compose_path is not None:
             assert compose_env_path is not None
             compose_invocation = build_compose_invocation(
+                docker_executable=docker_executable,
                 compose_file=compose_path,
                 env_file=compose_env_path,
                 docker_control=docker_control,
@@ -1412,7 +1445,7 @@ def _execute_up_command(
             )
 
         base_argv = (
-            "docker",
+            docker_executable,
             "run",
             "--detach",
             "--name",
@@ -1439,6 +1472,7 @@ def _execute_up_command(
             process_transport(remove_invocation)
         elif _container_exists(
             container_name,
+            docker_executable=docker_executable,
             process_transport=process_transport,
             docker_control=docker_control,
             cwd=cwd,
