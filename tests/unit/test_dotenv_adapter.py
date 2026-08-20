@@ -5,6 +5,37 @@ from pathlib import Path
 import pytest
 
 
+def test_parse_dotenv_document_is_physical_ordered_and_redacts_values(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.dotenv_adapter import parse_dotenv_document
+
+    env_file = tmp_path / "runtime.env"
+    env_file.write_text("FIRST=one\nSECOND=${FIRST}/two\n", encoding="utf-8")
+
+    document = parse_dotenv_document(env_file)
+
+    assert [binding.key for binding in document] == ["FIRST", "SECOND"]
+    assert document[1].referenced_names == frozenset({"FIRST"})
+    assert "one" not in repr(document)
+
+
+def test_parse_dotenv_document_rejects_malformed_without_value_leak(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.dotenv_adapter import DotenvFileError, parse_dotenv_document
+
+    env_file = tmp_path / "broken.env"
+    env_file.write_text(
+        'TOKEN=hostile-secret-sentinel\nBROKEN "value"\n', encoding="utf-8"
+    )
+
+    with pytest.raises(DotenvFileError) as raised:
+        parse_dotenv_document(env_file)
+
+    assert "hostile-secret-sentinel" not in str(raised.value)
+
+
 def test_parse_dotenv_file_preserves_file_local_physical_order(
     tmp_path: Path,
 ) -> None:

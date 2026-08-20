@@ -296,7 +296,7 @@ keys with similar names.
 uv run agentseek-api dev
 uv run agentseek-api serve --config ./langgraph.json --port 8080
 uv run agentseek-api worker --config ./langgraph.json
-uv run agentseek-api dockerfile --config ./langgraph.json ./Dockerfile.agentseek
+uv run agentseek-api dockerfile --config ./langgraph.json ./agentseek-build-bundle
 uv run agentseek-api build --config ./langgraph.json -t agentseek-api:dev
 uv run agentseek-api up --config ./langgraph.json --port 8123 --wait
 uv run agentseek-api version
@@ -323,9 +323,18 @@ uv run agentseek-api version
 - `build`
   - Use `-t, --tag` to set the image tag
   - Supports `--platform`, `--pull`, and `--no-pull`
+- `dockerfile`
+  - Writes a complete private build-bundle directory, including the generated
+    `Dockerfile`, sanitized runtime manifest, and selected project files; the
+    output argument is a new directory, not a standalone Dockerfile path
 - `up`
   - Supports `--wait`, `--image`, `--base-image`, `--postgres-uri`,
     `--recreate`, and `--no-recreate`
+  - `--pass-env NAME` explicitly selects a resolved application value for the
+    direct Docker carrier; the value is inherited by name and never put in argv
+  - `--compose-pass-env NAME` explicitly selects a resolved application value
+    for Compose interpolation; config can make the same selection with
+    `compose_env`
 
 Some LangGraph CLI-shaped flags are parsed for command compatibility but
 rejected when their runtime behavior is not implemented yet. For mocked,
@@ -404,6 +413,40 @@ Useful config fields:
 - `http.disable_a2a`: disable the A2A endpoint and agent-card discovery route
 - `base_image`, `python_version`, `image_distro`, `pip_config_file`,
   `dockerfile_lines`: Docker build customization fields
+- `build_include`: additional trusted regular files or directory trees to copy
+  into the sanitized build bundle
+- `compose_env`: names from the already-resolved application environment that
+  may cross into an explicitly selected Compose dotenv carrier
+
+### Container migration for 0.3.0
+
+The `preloaded-v1` contract is a breaking, fail-closed container boundary. The
+host resolves application configuration once. Containers started from generated images receive only
+the selected runtime payload, while ambient host values, dotenv files, package
+credentials, and unselected Compose values stay outside the build context and
+image layers. Use `--pass-env` or `--compose-pass-env` only for trusted input;
+these flags authorize a value to cross the named runtime boundary, not to enter
+the build.
+
+`build_include` is also a trusted-input declaration: review every selected path.
+Credentialed Python indexes belong in `pip_config_file`, which is mounted as a
+BuildKit pip secret and is not copied into the context. The `dockerfile` command
+now writes the complete bundle directory consumed by Docker rather than a lone
+Dockerfile.
+
+Custom images must expose all four exact labels:
+
+- `org.agentseek.environment-contract=preloaded-v1`
+- `org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json`
+- `org.agentseek.runtime-distribution=agentseek-api`
+- `org.agentseek.runtime-version=0.3.0`
+
+The manifest, installed distribution, entrypoint, and labels must agree. There
+is no legacy-image fallback: migrate and attest the image before passing it to
+`up --image`, or keep using the older launcher with the older image. Release
+Train A coordinates are API 0.2.3, templates 0.1.3, and AgentSeek 0.1.3; the
+The planned Train B template/catalog release is 0.1.4. The separate planned
+AgentSeek release is also 0.1.4; both follow the shipped 0.1.3 releases.
 
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP

@@ -6,6 +6,7 @@ cd "$ROOT_DIR"
 
 IMAGE_TAG="${IMAGE_TAG:-agentseek-api-redis-smoke:latest}"
 CONFIG_PATH="${CONFIG_PATH:-examples/docker_ci_auth/manifest.json}"
+AUTH_MODULE_PATH="${AUTH_MODULE_PATH:-/deps/agent/examples/docker_ci_auth/auth_backend.py:HeaderAuthBackend}"
 NETWORK_NAME="${NETWORK_NAME:-agentseek-redis-runtime}"
 BACKEND_CONTAINER="${BACKEND_CONTAINER:-agentseek-redis-backend}"
 REDIS_CONTAINER="${REDIS_CONTAINER:-agentseek-redis}"
@@ -19,6 +20,7 @@ OCEANBASE_DOCKER_MODE="${OCEANBASE_DOCKER_MODE:-mini}"
 STATE_DIR="${STATE_DIR:-$ROOT_DIR/.tmp/redis-runtime}"
 RESUME_STATE_FILE="$STATE_DIR/resume-state.json"
 SHUTDOWN_STATE_FILE=""
+CANDIDATE_DIR=""
 REDIS_WORKER_LOCK_KEY="${REDIS_WORKER_LOCK_KEY:-agentseek:worker:active}"
 WORKER_CONCURRENT_JOBS="${WORKER_CONCURRENT_JOBS:-10}"
 
@@ -33,6 +35,9 @@ cleanup() {
   docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
   if [[ -n "$SHUTDOWN_STATE_FILE" ]]; then
     rm -f "$SHUTDOWN_STATE_FILE" || true
+  fi
+  if [[ -n "$CANDIDATE_DIR" && -d "$CANDIDATE_DIR" ]]; then
+    rm -rf -- "$CANDIDATE_DIR" || true
   fi
   exit "$status"
 }
@@ -271,6 +276,8 @@ start_worker() {
     -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
     -e REDIS_WORKER_LOCK_KEY="${REDIS_WORKER_LOCK_KEY}" \
     -e WORKER_CONCURRENT_JOBS="${WORKER_CONCURRENT_JOBS}" \
+    -e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json" \
+    -e AUTH_MODULE_PATH="${AUTH_MODULE_PATH}" \
     -e SEEKDB_URL="${SEEKDB_URL}" \
     -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
     -e OCEANBASE_PORT="${OCEANBASE_PORT}" \
@@ -278,7 +285,7 @@ start_worker() {
     -e OCEANBASE_PASSWORD="${OCEANBASE_PASSWORD}" \
     -e OCEANBASE_DB_NAME="${OCEANBASE_DB_NAME}" \
     "$IMAGE_TAG" \
-    python -m agentseek_api.cli worker >/dev/null; then
+    python -I -m agentseek_api.cli worker --environment-mode preloaded-v1 >/dev/null; then
     return 0
   else
     status=$?
@@ -340,10 +347,46 @@ set_backend_defaults "$SEEKDB_DOCKER_BACKEND"
 
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 docker network create "$NETWORK_NAME" >/dev/null
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$ROOT_DIR/.tmp"
 SHUTDOWN_STATE_FILE="$(mktemp "$STATE_DIR/shutdown-state.XXXXXX")"
 
-uv run agentseek-api build --config "$CONFIG_PATH" -t "$IMAGE_TAG"
+CANDIDATE_DIR="$(mktemp -d "$ROOT_DIR/.tmp/agentseek-redis-candidate.XXXXXX")"
+if ! uv build --wheel --out-dir "$CANDIDATE_DIR"; then
+  echo "Candidate runtime wheel build failed." >&2
+  exit 1
+fi
+CANDIDATE_WHEELS=("$CANDIDATE_DIR"/agentseek_api-0.3.0-*.whl)
+if [[ "${#CANDIDATE_WHEELS[@]}" -ne 1 || ! -f "${CANDIDATE_WHEELS[0]}" ]]; then
+  echo "Candidate runtime wheel selection failed." >&2
+  exit 1
+fi
+CANDIDATE_WHEEL="${CANDIDATE_WHEELS[0]}"
+
+uv run python - "$CONFIG_PATH" "$IMAGE_TAG" "$CANDIDATE_WHEEL" <<'PY'
+from __future__ import annotations
+
+import hashlib
+import sys
+from pathlib import Path
+
+from agentseek_api.cli import main
+from agentseek_api.container_build import candidate_runtime_artifact
+
+config = Path(sys.argv[1])
+image = sys.argv[2]
+wheel = Path(sys.argv[3])
+artifact = candidate_runtime_artifact(
+    wheel,
+    hashlib.sha256(wheel.read_bytes()).hexdigest(),
+)
+raise SystemExit(
+    main(
+        ("build", "--config", str(config), "-t", image),
+        cwd=Path.cwd(),
+        runtime_artifact=artifact,
+    )
+)
+PY
 
 start_backend
 
@@ -375,6 +418,8 @@ docker run -d \
   -p "${API_PORT}:2024" \
   -e EXECUTOR_BACKEND=redis \
   -e REDIS_URL="redis://${REDIS_CONTAINER}:6379/0" \
+  -e AGENTSEEK_GRAPHS="/opt/agentseek/manifest.v1.json" \
+  -e AUTH_MODULE_PATH="${AUTH_MODULE_PATH}" \
   -e SEEKDB_URL="${SEEKDB_URL}" \
   -e OCEANBASE_HOST="${BACKEND_CONTAINER}" \
   -e OCEANBASE_PORT="${OCEANBASE_PORT}" \

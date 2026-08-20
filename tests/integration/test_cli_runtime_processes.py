@@ -3,11 +3,13 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
 from pathlib import Path
 
+import httpx
 import pytest
 
 from agentseek_api import __version__
@@ -135,6 +137,12 @@ def _stop_test_process(process: subprocess.Popen[str]) -> None:
         process.communicate(timeout=3)
 
 
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as listener:
+        listener.bind(("127.0.0.1", 0))
+        return int(listener.getsockname()[1])
+
+
 def _cleanup_recorded_pids(pids: tuple[int, ...]) -> None:
     for pid in pids:
         _terminate_observed_pid(pid, timeout_seconds=3.0)
@@ -246,6 +254,171 @@ def test_cli_import_does_not_import_runtime_settings(tmp_path: Path) -> None:
     )
 
     assert result.returncode == 0, result.stderr
+
+
+def test_preloaded_runtime_child_ignores_hostile_cwd_and_pythonpath(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    manifest = tmp_path / "manifest.v1.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime": {
+                    "distribution": "agentseek-api",
+                    "version": "0.3.0",
+                    "contract": "preloaded-v1",
+                },
+                "dependencies": [],
+                "graphs": {
+                    "chat": "agentseek_api.services.langgraph_service:_build_echo_graph"
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    hostile = tmp_path / "hostile"
+    package = hostile / "agentseek_api"
+    package.mkdir(parents=True)
+    marker = tmp_path / "hostile-imported"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "runtime_entrypoint.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('canary')\nraise SystemExit(23)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENTSEEK_GRAPHS", str(manifest))
+    monkeypatch.setenv("PYTHONPATH", str(hostile))
+    monkeypatch.setenv("PORT", "invalid-port-canary")
+    observed: dict[str, object] = {}
+
+    def run(command: list[str], *, env: dict[str, str], cwd: str) -> int:
+        observed["command"] = command
+        completed = subprocess.run(
+            command,
+            cwd=cwd,
+            env=env,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+        observed["stderr"] = completed.stderr
+        return completed.returncode
+
+    exit_code = main(
+        ["serve", "--environment-mode", "preloaded-v1"],
+        runner=run,
+        cwd=hostile,
+    )
+
+    assert exit_code == 2
+    assert marker.exists() is False
+    assert observed["command"][:3] == [sys.executable, "-I", "-m"]
+    assert observed["stderr"] == "Invalid runtime setting(s): PORT (int_parsing).\n"
+
+
+def test_preloaded_runtime_child_reaches_settings_and_manifest_graph_from_hostile_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    manifest = tmp_path / "manifest.v1.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime": {
+                    "distribution": "agentseek-api",
+                    "version": "0.3.0",
+                    "contract": "preloaded-v1",
+                },
+                "dependencies": [],
+                "graphs": {
+                    "review_graph": (
+                        "agentseek_api.services.langgraph_service:_build_echo_graph"
+                    )
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    hostile = tmp_path / "hostile"
+    package = hostile / "agentseek_api"
+    package.mkdir(parents=True)
+    marker = tmp_path / "hostile-imported"
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (package / "runtime_entrypoint.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('canary')\nraise SystemExit(23)\n",
+        encoding="utf-8",
+    )
+    port = _free_port()
+    monkeypatch.setenv("AGENTSEEK_GRAPHS", str(manifest))
+    monkeypatch.setenv("PYTHONPATH", str(hostile))
+    monkeypatch.setenv("APP_NAME", "Trusted preloaded settings")
+    monkeypatch.setenv("METADATA_DB_BACKEND", "sqlite")
+    monkeypatch.setenv(
+        "METADATA_DB_URL",
+        f"sqlite+aiosqlite:///{(tmp_path / 'runtime.db').as_posix()}",
+    )
+
+    def run(command: list[str], *, env: dict[str, str], cwd: str) -> int:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            deadline = time.monotonic() + 20
+            with httpx.Client(timeout=1, trust_env=False) as client:
+                while time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        stdout, stderr = process.communicate()
+                        raise AssertionError(
+                            f"runtime child exited {process.returncode}: {stdout} {stderr}"
+                        )
+                    try:
+                        openapi = client.get(f"http://127.0.0.1:{port}/openapi.json")
+                        if openapi.status_code != 200:
+                            time.sleep(0.05)
+                            continue
+                        assert openapi.json()["info"]["title"] == (
+                            "Trusted preloaded settings"
+                        )
+                        assistant = client.post(
+                            f"http://127.0.0.1:{port}/assistants",
+                            json={"name": "review", "graph_id": "review_graph"},
+                        )
+                        assert assistant.status_code == 200, assistant.text
+                        assert assistant.json()["graph_id"] == "review_graph"
+                        return 0
+                    except httpx.TransportError:
+                        time.sleep(0.05)
+            raise AssertionError("runtime child did not become ready")
+        finally:
+            _stop_test_process(process)
+
+    assert (
+        main(
+            [
+                "serve",
+                "--environment-mode",
+                "preloaded-v1",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(port),
+            ],
+            runner=run,
+            cwd=hostile,
+        )
+        == 0
+    )
+    assert not marker.exists()
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,45 @@ Notable changes to AgentSeek API are documented in this file.
 
 ## Unreleased
 
+## 0.3.0 - 2026-08-20
+
+### Highlights
+
+- Added the explicit `preloaded-v1` container environment contract so the host
+  remains the single owner of application environment resolution.
+- Generated containers install and attest the exact
+  `agentseek-api[embedded]==0.3.0` runtime independently of project
+  dependencies.
+- Hardened Docker, Compose, and build-context boundaries so application values
+  are carried only to the declared runtime target and credential-bearing source
+  files are excluded from image inputs.
+- Defined compatible custom-image labels and runtime-manifest checks for
+  `preloaded-v1` launches.
+
+### Upgrade notes
+
+- Container projects that pin `agentseek-api==0.2.2`, or otherwise exclude
+  `0.3.0`, must update their dependency constraint before using generated
+  images.
+- Custom images must publish the `preloaded-v1` environment-contract, runtime
+  manifest, distribution, and version labels; older images must keep using the
+  older launcher until migrated.
+- `dockerfile` now writes a complete build-bundle directory. Declare only
+  reviewed project paths with `build_include`; credentialed `pip_config_file`
+  input is delivered as a BuildKit secret rather than copied into the bundle.
+- Container application values cross only an explicit runtime boundary:
+  `--pass-env` selects the direct Docker carrier, while `compose_env` and
+  `--compose-pass-env` select the private Compose dotenv carrier. All are
+  trusted-input declarations and none authorize values to enter the build.
+- Custom images must provide the exact `org.agentseek.environment-contract`,
+  `org.agentseek.runtime-manifest`, `org.agentseek.runtime-distribution`, and
+  `org.agentseek.runtime-version` labels and matching manifest/runtime state.
+  There is no legacy-image fallback.
+- Release Train A shipped API 0.2.3, templates 0.1.3, and AgentSeek 0.1.3. The
+  planned Train B template/catalog release is 0.1.4. The separate planned
+  AgentSeek release is also 0.1.4; both follow their shipped 0.1.3 releases and
+  remain separate release gates.
+
 ## 0.2.3 - 2026-08-17
 
 ### Fixed
