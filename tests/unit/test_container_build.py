@@ -27,6 +27,7 @@ from agentseek_api.container_build import (
     candidate_runtime_artifact,
     interpret_host_runtime_policy,
     interpret_manifest_runtime_policy,
+    load_container_runtime_manifest_v1,
     materialize_build_bundle,
     plan_container_image,
     plan_generated_up_auth,
@@ -39,7 +40,245 @@ from tests.container_plan_helpers import (
     make_graph_project,
     package_only_build_plan_fixture,
     read_archive_member,
+    write_sanitized_manifest,
 )
+
+
+def test_canonical_manifest_loader_preserves_explicit_values_and_container_roots(
+    tmp_path: Path,
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document.update(
+        dependencies=["/deps/agent", "/deps/agent/source"],
+        store={"ttl": {"refresh_on_read": False, "default_ttl": 0}},
+        http={
+            "app": "/deps/agent/web.py:app",
+            "disable_mcp": False,
+            "disable_a2a": True,
+            "cors": {"allow_origins": [], "allow_credentials": False, "max_age": 0},
+        },
+        auth={
+            "openapi": {"securitySchemes": {}, "security": []},
+            "disable_studio_auth": False,
+        },
+    )
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    manifest = load_container_runtime_manifest_v1(manifest_path)
+
+    assert manifest.to_json_object() == document
+
+
+@pytest.mark.parametrize(
+    "root",
+    [
+        ".",
+        "source",
+        "../escape",
+        "/deps/agent/../escape",
+        "/other/root",
+        "/deps/agent/",
+    ],
+)
+def test_canonical_manifest_loader_rejects_noncanonical_container_roots(
+    tmp_path: Path, root: str
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["dependencies"] = [root]
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError, match="container"):
+        load_container_runtime_manifest_v1(manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("mutation", "match"),
+    [
+        (("runtime", "distribution", "other-runtime"), "identity"),
+        (("runtime", "version", "9.9.9"), "identity"),
+        (("runtime", "contract", "resolve"), "identity"),
+        (("http", "unknown", True), "http"),
+        (("http", "cors", {"unknown": True}), "cors"),
+        (("auth", "path", "secret.py:auth"), "auth"),
+        (("unknown", "field", True), "manifest"),
+        (("unknown", "env", {"TOKEN": "secret.py"}), "manifest"),
+        (("unknown", "pip_config_file", "secret.py"), "manifest"),
+        (("unknown", "dockerfile_lines", ["secret.py"]), "manifest"),
+    ],
+)
+def test_canonical_manifest_loader_rejects_unknown_or_forbidden_fields_value_free(
+    tmp_path: Path, mutation: tuple[str, str, object], match: str
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    parent, field, value = mutation
+    if parent == "unknown":
+        document[field] = value
+    else:
+        nested = document.setdefault(parent, {})
+        assert isinstance(nested, dict)
+        nested[field] = value
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError, match=match) as caught:
+        load_container_runtime_manifest_v1(manifest_path)
+    assert "secret.py" not in str(caught.value)
+
+
+def test_canonical_manifest_loader_rejects_boolean_schema_version(
+    tmp_path: Path,
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["schema_version"] = True
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError, match="identity"):
+        load_container_runtime_manifest_v1(manifest_path)
+
+
+@pytest.mark.parametrize(
+    ("section", "reference"),
+    [
+        ("graphs", "/deps/agent/../escape.py:graph"),
+        ("store", "/deps/agent/source/../../escape.py:embed"),
+        ("http", "/deps/agent/../escape.py:app"),
+    ],
+)
+def test_canonical_manifest_loader_rejects_absolute_copied_module_escapes(
+    tmp_path: Path, section: str, reference: str
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if section == "graphs":
+        document["graphs"] = {"chat": reference}
+    elif section == "store":
+        document["store"] = {"index": {"embed": reference}}
+    else:
+        document["http"] = {"app": reference}
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError, match="container"):
+        load_container_runtime_manifest_v1(manifest_path)
+
+
+@pytest.mark.parametrize("reference", ["missing-symbol", ":graph", "bad-module!:graph"])
+def test_canonical_manifest_loader_rejects_nonimportable_package_references(
+    tmp_path: Path, reference: str
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document["graphs"] = {"chat": reference}
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError, match="importable package"):
+        load_container_runtime_manifest_v1(manifest_path)
+
+
+@pytest.mark.parametrize(
+    "http",
+    [
+        {"disable_mcp": "bad"},
+        {"cors": {"max_age": "bad"}},
+        {"app": "../host.py:app"},
+    ],
+)
+def test_build_planning_and_preloaded_loading_share_http_rejection(
+    tmp_path: Path, http: dict[str, object]
+) -> None:
+    project = make_graph_project(tmp_path)
+    config = project / "agentseek.json"
+    host_document = json.loads(config.read_text(encoding="utf-8"))
+    host_document["http"] = http
+    config.write_text(json.dumps(host_document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError):
+        plan_container_image(config_path=config)
+
+    manifest_path = write_sanitized_manifest(tmp_path)
+    manifest_document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest_document["http"] = http
+    manifest_path.write_text(json.dumps(manifest_document), encoding="utf-8")
+    with pytest.raises(ContainerBuildError):
+        load_container_runtime_manifest_v1(manifest_path)
+
+
+@pytest.mark.parametrize(
+    "patch",
+    [
+        {"graphs": {"chat": {"graph": "chat.graph:graph", "unknown": True}}},
+        {"store": {"index": {"unknown": True}}},
+        {"auth": {"openapi": {"unknown": True}}},
+        {
+            "auth": {
+                "openapi": {
+                    "securitySchemes": {
+                        "oidc": {
+                            "type": "openIdConnect",
+                            "openIdConnectUrl": "https://user:manifest-canary@id.example/config",
+                        }
+                    },
+                    "security": [{"oidc": []}],
+                }
+            }
+        },
+    ],
+)
+def test_preloaded_loader_rejects_unknown_nested_or_credential_metadata_value_free(
+    tmp_path: Path, patch: dict[str, object]
+) -> None:
+    manifest_path = write_sanitized_manifest(tmp_path)
+    document = json.loads(manifest_path.read_text(encoding="utf-8"))
+    document.update(patch)
+    manifest_path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(ContainerBuildError) as caught:
+        load_container_runtime_manifest_v1(manifest_path)
+    assert "manifest-canary" not in str(caught.value)
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_loaded_manifest_runtime_policy_matches_host_for_boolean_matrix(
+    tmp_path: Path, flag: bool
+) -> None:
+    project = make_graph_project(tmp_path)
+    config = project / "agentseek.json"
+    host = {
+        "graphs": {"chat": "chat.graph:graph"},
+        "http": {
+            "app": "installed.web:app",
+            "disable_mcp": flag,
+            "disable_a2a": not flag,
+            "cors": {
+                "allow_origins": [],
+                "allow_methods": [],
+                "allow_headers": [],
+                "allow_credentials": False,
+                "expose_headers": [],
+                "max_age": 0,
+            },
+        },
+        "auth": {
+            "openapi": {
+                "securitySchemes": {
+                    "key": {"type": "apiKey", "name": "x-key", "in": "header"}
+                },
+                "security": [{"key": []}],
+            },
+            "disable_studio_auth": flag,
+        },
+    }
+    config.write_text(json.dumps(host), encoding="utf-8")
+    planned = plan_container_image(config_path=config).manifest
+    manifest_path = project / "manifest.v1.json"
+    manifest_path.write_bytes(planned.to_json_bytes())
+    loaded = load_container_runtime_manifest_v1(manifest_path)
+
+    assert interpret_host_runtime_policy(
+        host, config_path=config
+    ) == interpret_manifest_runtime_policy(loaded)
 
 
 def _dockerfile_run_argv(text: str) -> list[list[str]]:
@@ -1150,10 +1389,13 @@ def test_http_and_auth_policy_effect_matches_host_config(
     config.write_text(json.dumps(host_payload), encoding="utf-8")
 
     manifest = plan_container_image(config_path=config).manifest
+    manifest_path = project / "manifest.v1.json"
+    manifest_path.write_bytes(manifest.to_json_bytes())
+    loaded = load_container_runtime_manifest_v1(manifest_path)
 
     assert interpret_host_runtime_policy(
         host_payload, config_path=config
-    ) == interpret_manifest_runtime_policy(manifest)
+    ) == interpret_manifest_runtime_policy(loaded)
 
 
 def test_selected_source_collision_rules_are_fail_closed(tmp_path: Path) -> None:

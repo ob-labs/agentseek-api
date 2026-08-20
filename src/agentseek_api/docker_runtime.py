@@ -22,6 +22,7 @@ from agentseek_api.container_build import (
     container_build_plan_fingerprint,
 )
 from agentseek_api.environment import ContainerPolicyError
+from agentseek_api.constants import DEFAULT_API_PORT
 
 DEFAULT_CONTROL_QUERY_TIMEOUT_SECONDS = 10.0
 MINIMUM_COMPOSE_VERSION = (2, 24, 0)
@@ -40,6 +41,10 @@ _ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 class DockerRuntimeError(RuntimeError):
     """A value-free Docker transport failure."""
+
+
+class ImageContractError(DockerRuntimeError):
+    """A value-free incompatible custom-image failure."""
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -111,6 +116,12 @@ class DockerImageConfig:
             object.__setattr__(self, "entrypoint", tuple(self.entrypoint))
         if isinstance(self.command, list):
             object.__setattr__(self, "command", tuple(self.command))
+
+
+@dataclass(frozen=True)
+class PreloadedImageContract:
+    manifest_path: str
+    container_argv: tuple[str, ...]
 
 
 class ProcessTransport(Protocol):
@@ -551,6 +562,78 @@ def parse_image_compatibility_result(result: ProcessResult) -> DockerImageConfig
     )
 
 
+_PRELOADED_V1_LABELS = {
+    "org.agentseek.environment-contract": "preloaded-v1",
+    "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
+    "org.agentseek.runtime-distribution": "agentseek-api",
+    "org.agentseek.runtime-version": "0.3.0",
+}
+
+
+def require_preloaded_v1(labels: Mapping[str, str]) -> str:
+    """Require the complete immutable preloaded-v1 image label contract."""
+
+    if any(labels.get(name) != value for name, value in _PRELOADED_V1_LABELS.items()):
+        raise ImageContractError("The custom image must implement preloaded-v1.")
+    return labels["org.agentseek.runtime-manifest"]
+
+
+def inspect_image_contract(
+    image: str,
+    *,
+    transport: ProcessTransport,
+    docker_control: Mapping[str, str],
+    cwd: Path,
+) -> PreloadedImageContract:
+    """Inspect only labels/entrypoint/cmd and require an explicit-mode carrier."""
+
+    query = build_docker_query_invocation(
+        argv=(
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            IMAGE_COMPATIBILITY_FORMAT,
+            image,
+        ),
+        docker_control=docker_control,
+        cwd=cwd,
+    )
+    try:
+        config = parse_image_compatibility_result(transport(query))
+        manifest_path = require_preloaded_v1(config.labels)
+    except DockerRuntimeError as exc:
+        if isinstance(exc, ImageContractError):
+            raise
+        raise ImageContractError(
+            "The custom image compatibility check failed."
+        ) from exc
+    serve = (
+        "serve",
+        "--environment-mode",
+        "preloaded-v1",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(DEFAULT_API_PORT),
+    )
+    if config.entrypoint in (None, ()):
+        command = ("agentseek-api", *serve)
+    elif config.entrypoint in (
+        ("agentseek-api",),
+        ("python", "-m", "agentseek_api.cli"),
+    ):
+        command = serve
+    else:
+        raise ImageContractError(
+            "The custom image entrypoint cannot receive the preloaded-v1 command."
+        )
+    return PreloadedImageContract(
+        manifest_path=manifest_path,
+        container_argv=command,
+    )
+
+
 __all__ = [
     "BuildImageInvocation",
     "ControlQueryInvocation",
@@ -558,6 +641,7 @@ __all__ = [
     "DockerRunInvocation",
     "DockerImageConfig",
     "DockerRuntimeError",
+    "ImageContractError",
     "LegacyRunnerAdapter",
     "IMAGE_COMPATIBILITY_FORMAT",
     "MINIMUM_BUILDX_VERSION",
@@ -565,6 +649,7 @@ __all__ = [
     "ProcessInvocation",
     "ProcessResult",
     "ProcessTransport",
+    "PreloadedImageContract",
     "SubprocessTransport",
     "build_docker_control_invocation",
     "build_image_invocation",
@@ -575,6 +660,8 @@ __all__ = [
     "parse_buildx_version_result",
     "parse_compose_version_result",
     "parse_image_compatibility_result",
+    "inspect_image_contract",
+    "require_preloaded_v1",
     "require_buildx_available",
     "require_supported_buildx",
     "require_supported_compose",

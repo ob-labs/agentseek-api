@@ -11,6 +11,7 @@ import tomllib
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from pydantic import ValidationError
@@ -24,6 +25,181 @@ from agentseek_api.docker_runtime import (
     ProcessResult,
 )
 from agentseek_api.services.langgraph_service import LangGraphService
+from tests.container_plan_helpers import write_sanitized_manifest
+
+
+def test_preloaded_mode_never_reads_config_environment_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import resolve_runtime_for_mode
+    from agentseek_api.environment import EnvironmentMode
+
+    manifest_root = tmp_path / "image"
+    manifest_root.mkdir()
+    manifest = write_sanitized_manifest(manifest_root)
+    (tmp_path / "agentseek.json").write_text(
+        '{"graphs":{"decoy":"decoy.py:graph"},"env":".env"}',
+        encoding="utf-8",
+    )
+    (tmp_path / "langgraph.json").write_text(
+        '{"graphs":{"legacy":"legacy.py:graph"}}', encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=decoy", encoding="utf-8")
+    monkeypatch.setattr(
+        "agentseek_api.environment.parse_dotenv_document",
+        Mock(side_effect=AssertionError("dotenv reopened")),
+    )
+
+    result = resolve_runtime_for_mode(
+        mode=EnvironmentMode.PRELOADED_V1,
+        config_path=None,
+        env_file=None,
+        inherited={
+            "AGENTSEEK_GRAPHS": str(manifest),
+            "OPENAI_API_KEY": "runtime-only",
+        },
+        cwd=tmp_path,
+    )
+
+    assert result.values["OPENAI_API_KEY"] == "runtime-only"
+    assert result.values["AGENTSEEK_GRAPHS"] == str(manifest)
+
+
+@pytest.mark.parametrize("command", ["dev", "serve", "worker", "scheduler"])
+def test_runtime_commands_accept_explicit_preloaded_environment_mode(
+    command: str,
+) -> None:
+    from agentseek_api.cli import create_parser
+    from agentseek_api.environment import EnvironmentMode
+
+    args = create_parser().parse_args([command, "--environment-mode", "preloaded-v1"])
+    assert args.environment_mode is EnvironmentMode.PRELOADED_V1
+
+
+@pytest.mark.parametrize(
+    ("inherited", "config", "env_file", "match"),
+    [
+        ({}, None, None, "AGENTSEEK_GRAPHS"),
+        ({"AGENTSEEK_GRAPHS": "relative.json"}, None, None, "absolute"),
+        (
+            {"AGENTSEEK_GRAPHS": "/image/manifest.v1.json"},
+            "/other.json",
+            None,
+            "config",
+        ),
+        ({"AGENTSEEK_GRAPHS": "/image/manifest.v1.json"}, None, ".env", "env-file"),
+    ],
+)
+def test_preloaded_mode_rejects_ambiguous_sources_before_loading(
+    tmp_path: Path,
+    inherited: dict[str, str],
+    config: str | None,
+    env_file: str | None,
+    match: str,
+) -> None:
+    from agentseek_api.cli import CliError, resolve_runtime_for_mode
+    from agentseek_api.environment import EnvironmentMode
+
+    with pytest.raises(CliError, match=match):
+        resolve_runtime_for_mode(
+            mode=EnvironmentMode.PRELOADED_V1,
+            config_path=config,
+            env_file=env_file,
+            inherited=inherited,
+            cwd=tmp_path,
+        )
+
+
+def test_preloaded_mode_rejects_installed_distribution_mismatch_value_free(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api import cli as cli_module
+    from agentseek_api.cli import CliError
+    from agentseek_api.environment import EnvironmentMode
+
+    manifest = write_sanitized_manifest(tmp_path)
+    monkeypatch.setattr(cli_module.importlib.metadata, "version", lambda _name: "9.9.9")
+
+    with pytest.raises(CliError) as caught:
+        cli_module.resolve_runtime_for_mode(
+            mode=EnvironmentMode.PRELOADED_V1,
+            config_path=None,
+            env_file=None,
+            inherited={"AGENTSEEK_GRAPHS": str(manifest)},
+            cwd=tmp_path,
+        )
+    assert "9.9.9" not in str(caught.value)
+
+
+def test_preloaded_public_child_ignores_hostile_cwd_and_dev_forces_studio_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agentseek_api.cli import main
+
+    manifest = write_sanitized_manifest(tmp_path)
+    (tmp_path / "agentseek.json").write_text(
+        '{"graphs":{"decoy":"decoy.py:graph"},"env":".env"}', encoding="utf-8"
+    )
+    (tmp_path / "langgraph.json").write_text(
+        '{"graphs":{"legacy":"legacy.py:graph"}}', encoding="utf-8"
+    )
+    (tmp_path / ".env").write_text("OPENAI_API_KEY=decoy", encoding="utf-8")
+    monkeypatch.setenv("AGENTSEEK_GRAPHS", str(manifest))
+    monkeypatch.setenv("OPENAI_API_KEY", "runtime-only")
+    monkeypatch.setenv("STUDIO_AUTH_LOCAL_DEV", "false")
+    monkeypatch.setattr(
+        "agentseek_api.environment.parse_dotenv_document",
+        Mock(side_effect=AssertionError("dotenv reopened")),
+    )
+    original_read_text = Path.read_text
+    opened: list[Path] = []
+
+    def tracked_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        config_sources = {
+            manifest,
+            tmp_path / "agentseek.json",
+            tmp_path / "langgraph.json",
+            tmp_path / ".env",
+        }
+        if path in config_sources:
+            opened.append(path)
+        if path in config_sources - {manifest}:
+            raise AssertionError("hostile cwd source reopened")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", tracked_read_text)
+    capture = _RunCapture()
+
+    assert (
+        main(
+            ["dev", "--environment-mode", "preloaded-v1", "--no-browser"],
+            runner=capture,
+            cwd=tmp_path,
+        )
+        == 0
+    )
+    assert capture.env is not None
+    assert capture.env["AGENTSEEK_GRAPHS"] == str(manifest)
+    assert capture.env["OPENAI_API_KEY"] == "runtime-only"
+    assert capture.env["STUDIO_AUTH_LOCAL_DEV"] == "true"
+    assert opened == [manifest]
+
+
+def test_preloaded_mode_accepts_explicit_config_only_when_it_is_same_manifest(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import resolve_runtime_for_mode
+    from agentseek_api.environment import EnvironmentMode
+
+    manifest = write_sanitized_manifest(tmp_path)
+    result = resolve_runtime_for_mode(
+        mode=EnvironmentMode.PRELOADED_V1,
+        config_path=str(manifest),
+        env_file=None,
+        inherited={"AGENTSEEK_GRAPHS": str(manifest)},
+        cwd=tmp_path,
+    )
+    assert result.values["AGENTSEEK_GRAPHS"] == str(manifest)
 
 
 def test_python_dotenv_dependency_is_available() -> None:
@@ -130,6 +306,7 @@ class _ProcessCapture:
     calls: list[ProcessInvocation] | None = None
     container_exists: bool = False
     return_codes: dict[tuple[str, ...], int] | None = None
+    image_config: tuple[object, object, object] | None = None
 
     def __call__(self, invocation: ProcessInvocation) -> ProcessResult:
         if self.calls is None:
@@ -142,6 +319,18 @@ class _ProcessCapture:
                 returncode=0,
                 stdout=b"github.com/docker/buildx v0.14.0 deadbeef\n",
             )
+        if invocation.argv[:3] == ("docker", "image", "inspect"):
+            selected = self.image_config or (
+                {
+                    "org.agentseek.environment-contract": "preloaded-v1",
+                    "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
+                    "org.agentseek.runtime-distribution": "agentseek-api",
+                    "org.agentseek.runtime-version": "0.3.0",
+                },
+                [],
+                [],
+            )
+            return ProcessResult(returncode=0, stdout=json.dumps(selected).encode())
         return_code = 0
         if invocation.argv[:3] == ("docker", "container", "inspect"):
             return_code = 0 if self.container_exists else 1
@@ -1927,6 +2116,45 @@ def test_up_with_custom_image_rejects_host_file_auth_references(
     assert "host" in stderr.getvalue().lower()
 
 
+@pytest.mark.parametrize("coincident_host_file", [False, True])
+def test_up_custom_image_never_guesses_absolute_auth_file_origin(
+    tmp_path: Path, coincident_host_file: bool
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    reference = tmp_path / "coincident.py"
+    if coincident_host_file:
+        reference.write_text("auth = object()\n", encoding="utf-8")
+    env_file = tmp_path / "up.env"
+    env_file.write_text(f"AUTH_MODULE_PATH={reference}:auth\n", encoding="utf-8")
+    stderr = io.StringIO()
+    capture = _ProcessCapture()
+
+    assert (
+        main(
+            [
+                "up",
+                "--config",
+                str(config),
+                "--image",
+                "agentseek:test",
+                "--env-file",
+                str(env_file),
+            ],
+            process_transport=capture,
+            cwd=tmp_path,
+            stderr=stderr,
+        )
+        == 2
+    )
+    assert capture.calls is None
+    assert stderr.getvalue() == (
+        "Custom-image auth cannot reference a host file; bake the module into the image "
+        "and use an importable package reference.\n"
+    )
+
+
 @pytest.mark.parametrize("reference", ["", "installed.auth:auth"])
 def test_up_with_custom_image_preserves_empty_or_package_auth(
     tmp_path: Path, reference: str
@@ -1954,6 +2182,106 @@ def test_up_with_custom_image_preserves_empty_or_package_auth(
 
     assert exit_code == 0
     assert _application_environment(capture)["AUTH_MODULE_PATH"] == reference
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "expected_tail"),
+    [
+        (
+            [],
+            (
+                "agentseek-api",
+                "serve",
+                "--environment-mode",
+                "preloaded-v1",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "2024",
+            ),
+        ),
+        (
+            ["python", "-m", "agentseek_api.cli"],
+            (
+                "serve",
+                "--environment-mode",
+                "preloaded-v1",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "2024",
+            ),
+        ),
+    ],
+)
+def test_up_custom_image_inspects_contract_and_runs_explicit_preloaded_mode(
+    tmp_path: Path,
+    entrypoint: list[str],
+    expected_tail: tuple[str, ...],
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    capture = _ProcessCapture(
+        image_config=(
+            {
+                "org.agentseek.environment-contract": "preloaded-v1",
+                "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
+                "org.agentseek.runtime-distribution": "agentseek-api",
+                "org.agentseek.runtime-version": "0.3.0",
+            },
+            entrypoint,
+            ["hostile-default"],
+        )
+    )
+
+    assert (
+        main(
+            ["up", "--config", str(config), "--image", "agentseek:test"],
+            process_transport=capture,
+            cwd=tmp_path,
+        )
+        == 0
+    )
+
+    assert capture.calls is not None
+    inspect = capture.calls[0]
+    assert inspect.argv == (
+        "docker",
+        "image",
+        "inspect",
+        "--format",
+        "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
+        "agentseek:test",
+    )
+    assert ".Config.Env" not in " ".join(inspect.argv)
+    run = next(call for call in capture.calls if isinstance(call, DockerRunInvocation))
+    assert run.environment["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
+    assert run.argv[-len(expected_tail) :] == expected_tail
+
+
+def test_up_custom_image_contract_failure_stops_after_one_read_only_query(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api.cli import main
+
+    config = _write_basic_langgraph_config(tmp_path)
+    capture = _ProcessCapture(image_config=({}, [], []))
+    stderr = io.StringIO()
+
+    assert (
+        main(
+            ["up", "--config", str(config), "--image", "private-image-canary"],
+            process_transport=capture,
+            cwd=tmp_path,
+            stderr=stderr,
+        )
+        == 2
+    )
+    assert capture.calls is not None
+    assert len(capture.calls) == 1
+    assert isinstance(capture.calls[0], ControlQueryInvocation)
+    assert "private-image-canary" not in stderr.getvalue()
 
 
 def test_build_runtime_env_parses_exported_values(tmp_path: Path) -> None:
@@ -2354,13 +2682,13 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0].argv == (
+    assert capture.calls[1].argv == (
         "docker",
         "rm",
         "-f",
         "agentseek-up-8123",
     )
-    assert capture.calls[1].argv[:9] == (
+    assert capture.calls[2].argv[:9] == (
         "docker",
         "run",
         "--detach",
@@ -2371,9 +2699,9 @@ def test_up_command_plans_docker_run_with_recreate_and_env_file(tmp_path: Path) 
         "-p",
         "8123:2024",
     )
-    assert capture.calls[1].argv[-1] == "agentseek:test"
+    assert capture.calls[2].argv[-9] == "agentseek:test"
     container_env = _application_environment(capture)
-    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/langgraph.json"
+    assert container_env["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
     assert container_env["METADATA_DB_URL"] == "sqlite+aiosqlite:////tmp/agentseek.db"
     assert container_env["OCEANBASE_HOST"] == "host.docker.internal"
     assert container_env["OPENAI_BASE_URL"] == "https://api.example.test/v1"
@@ -2413,8 +2741,9 @@ def test_up_keeps_application_values_only_in_final_run_carrier(
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert len(capture.calls) == 2
-    remove, run = capture.calls
+    assert len(capture.calls) == 3
+    inspect, remove, run = capture.calls
+    assert isinstance(inspect, ControlQueryInvocation)
     assert type(remove) is ProcessInvocation
     assert dict(remove.environment)["DOCKER_HOST"] == "unix:///private/docker.sock"
     assert "OPENAI_API_KEY" not in remove.environment
@@ -2446,7 +2775,7 @@ def test_up_container_existence_probe_is_bounded_and_control_only(
 
     assert exit_code == 0
     assert capture.calls is not None
-    probe = capture.calls[0]
+    probe = capture.calls[1]
     assert isinstance(probe, ControlQueryInvocation)
     assert probe.timeout_seconds > 0
     assert probe.argv == (
@@ -2457,7 +2786,7 @@ def test_up_container_existence_probe_is_bounded_and_control_only(
     )
     assert probe.environment["DOCKER_HOST"] == "unix:///private/docker.sock"
     assert "OPENAI_API_KEY" not in probe.environment
-    assert capture.calls[1].environment["OPENAI_API_KEY"] == "application-canary"
+    assert capture.calls[2].environment["OPENAI_API_KEY"] == "application-canary"
 
 
 def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
@@ -2485,19 +2814,19 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
 
     assert exit_code == 0
     assert capture.calls is not None
-    assert capture.calls[0].argv == (
+    assert capture.calls[1].argv == (
         "docker",
         "compose",
         "version",
         "--short",
     )
-    assert capture.calls[1].argv == (
+    assert capture.calls[2].argv == (
         "docker",
         "rm",
         "-f",
         "agentseek-up-8123",
     )
-    compose_invocation = capture.calls[2]
+    compose_invocation = capture.calls[3]
     assert compose_invocation.argv[:3] == (
         "docker",
         "compose",
@@ -2510,7 +2839,7 @@ def test_up_command_supports_docker_compose_sidecars(tmp_path: Path) -> None:
         "-d",
         "--force-recreate",
     )
-    assert capture.calls[3].argv[-1] == "agentseek:test"
+    assert capture.calls[4].argv[-9] == "agentseek:test"
     for invocation in capture.calls:
         assert "AGENTSEEK_GRAPHS" not in invocation.environment or isinstance(
             invocation, DockerRunInvocation
@@ -2707,6 +3036,14 @@ def test_up_command_rejects_existing_container_before_starting_compose_sidecars(
     assert exit_code == 2
     assert capture.calls is not None
     assert [call.argv for call in capture.calls] == [
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
+            "agentseek:test",
+        ),
         ("docker", "compose", "version", "--short"),
         ("docker", "container", "inspect", "agentseek-up-8123"),
     ]
@@ -2910,7 +3247,7 @@ def test_up_command_prefers_agentseek_json_without_explicit_flag(
     assert exit_code == 0
     assert capture.calls is not None
     container_env = _application_environment(capture)
-    assert container_env["AGENTSEEK_GRAPHS"] == "/deps/agent/agentseek.json"
+    assert container_env["AGENTSEEK_GRAPHS"] == "/opt/agentseek/manifest.v1.json"
 
 
 def test_up_command_does_not_pass_shell_runtime_env_into_container(
@@ -3059,7 +3396,15 @@ def test_up_command_rejects_existing_container_without_recreate(tmp_path: Path) 
     assert exit_code == 2
     assert capture.calls is not None
     assert [call.argv for call in capture.calls] == [
-        ("docker", "container", "inspect", "agentseek-up-8123")
+        (
+            "docker",
+            "image",
+            "inspect",
+            "--format",
+            "[{{json .Config.Labels}},{{json .Config.Entrypoint}},{{json .Config.Cmd}}]",
+            "agentseek:test",
+        ),
+        ("docker", "container", "inspect", "agentseek-up-8123"),
     ]
     assert "already exists" in stderr.getvalue()
     assert "--recreate" in stderr.getvalue()

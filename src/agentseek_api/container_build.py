@@ -860,6 +860,32 @@ def _optional_number(
     return value
 
 
+def _validate_preloaded_reference(reference: str, *, location: str) -> None:
+    if reference == "":
+        return
+    module, separator, symbol = reference.rpartition(":")
+    error = f"{location} must use an importable package or copied container module reference."
+    if not separator or not module or not symbol or "\\" in module:
+        raise ContainerBuildError(error)
+    if not _is_path_reference(reference):
+        identifier = r"[A-Za-z_][A-Za-z0-9_]*"
+        if not re.fullmatch(
+            rf"{identifier}(?:\.{identifier})*", module
+        ) or not re.fullmatch(rf"{identifier}(?:\.{identifier})*", symbol):
+            raise ContainerBuildError(error)
+        return
+    path = PurePosixPath(module)
+    normalized = path.as_posix()
+    if (
+        not path.is_absolute()
+        or normalized != module
+        or ".." in path.parts
+        or path == _CONTAINER_ROOT
+        or _CONTAINER_ROOT not in path.parents
+    ):
+        raise ContainerBuildError(error)
+
+
 def _parse_graphs(
     raw: object,
     *,
@@ -867,6 +893,7 @@ def _parse_graphs(
     project_root: Path,
     selected: dict[str, SelectedSource],
     excluded: frozenset[Path],
+    preloaded: bool = False,
 ) -> Mapping[str, str | StructuredGraphV1]:
     if not isinstance(raw, dict) or not raw:
         raise ContainerBuildError("graphs must be a non-empty object.")
@@ -933,6 +960,11 @@ def _parse_graphs(
         else:
             raise ContainerBuildError(f"graphs.{name} must be a string or object.")
         for reference, reason in references:
+            if preloaded:
+                _validate_preloaded_reference(
+                    reference, location=f"graphs.{name}.{reason.value}"
+                )
+                continue
             located = _module_file(reference, base=reference_base)
             if located is None:
                 continue
@@ -985,6 +1017,7 @@ def _parse_store(
     project_root: Path,
     selected: dict[str, SelectedSource],
     excluded: frozenset[Path],
+    preloaded: bool = False,
 ) -> StoreManifestV1 | None:
     if raw is None:
         return None
@@ -1022,17 +1055,22 @@ def _parse_store(
         if embed is not None and not isinstance(embed, str):
             raise ContainerBuildError("store.index.embed must be a string.")
         if isinstance(embed, str) and _is_path_reference(embed):
-            located = _module_file(embed, base=reference_base)
-            if located is not None:
-                path, symbol = located
-                path = _select_file(
-                    selected,
-                    source=path,
-                    project_root=project_root,
-                    reason=SourceReason.STORE_HOOK,
-                    excluded=excluded,
-                )
-                embed = f"{_container_path(path.relative_to(project_root))}:{symbol}"
+            if preloaded:
+                _validate_preloaded_reference(embed, location="store.index.embed")
+            else:
+                located = _module_file(embed, base=reference_base)
+                if located is not None:
+                    path, symbol = located
+                    path = _select_file(
+                        selected,
+                        source=path,
+                        project_root=project_root,
+                        reason=SourceReason.STORE_HOOK,
+                        excluded=excluded,
+                    )
+                    embed = (
+                        f"{_container_path(path.relative_to(project_root))}:{symbol}"
+                    )
         index = StoreIndexManifestV1(
             embed=embed,
             dims=_optional_number(
@@ -1096,6 +1134,7 @@ def _parse_http(
     project_root: Path,
     selected: dict[str, SelectedSource],
     excluded: frozenset[Path],
+    preloaded: bool = False,
 ) -> HttpManifestV1 | None:
     if raw is None:
         return None
@@ -1105,7 +1144,9 @@ def _parse_http(
     app = raw.get("app")
     if app is not None and not isinstance(app, str):
         raise ContainerBuildError("http.app must be a string.")
-    if isinstance(app, str) and _is_path_reference(app):
+    if isinstance(app, str) and preloaded:
+        _validate_preloaded_reference(app, location="http.app")
+    elif isinstance(app, str) and _is_path_reference(app):
         located = _module_file(app, base=reference_base)
         if located is not None:
             path, symbol = located
@@ -1286,6 +1327,110 @@ def _parse_auth(raw: object) -> tuple[AuthPolicyManifestV1 | None, str | None]:
         ),
     )
     return policy, auth_path
+
+
+def _parse_container_runtime_manifest_v1_object(
+    document: object,
+) -> ContainerRuntimeManifestV1:
+    if not isinstance(document, dict):
+        raise ContainerBuildError("The runtime manifest must be an object.")
+    _validate_allowed(
+        document,
+        {
+            "schema_version",
+            "runtime",
+            "graphs",
+            "dependencies",
+            "store",
+            "http",
+            "auth",
+        },
+        "runtime manifest",
+    )
+    runtime = document.get("runtime")
+    if not isinstance(runtime, dict):
+        raise ContainerBuildError("The runtime manifest identity is incompatible.")
+    _validate_allowed(runtime, {"distribution", "version", "contract"}, "runtime")
+    if (
+        type(document.get("schema_version")) is not int
+        or document.get("schema_version") != 1
+        or runtime
+        != {
+            "distribution": "agentseek-api",
+            "version": _RUNTIME_VERSION,
+            "contract": "preloaded-v1",
+        }
+    ):
+        raise ContainerBuildError("The runtime manifest identity is incompatible.")
+    dependencies = document.get("dependencies")
+    if not isinstance(dependencies, list) or not all(
+        isinstance(item, str) and item for item in dependencies
+    ):
+        raise ContainerBuildError(
+            "Runtime manifest dependencies must be copied container directories."
+        )
+    for item in dependencies:
+        path = PurePosixPath(item)
+        if (
+            not path.is_absolute()
+            or path.as_posix() != item
+            or ".." in path.parts
+            or (path != _CONTAINER_ROOT and _CONTAINER_ROOT not in path.parents)
+        ):
+            raise ContainerBuildError(
+                "Runtime manifest dependencies must be normalized copied container directories."
+            )
+    selected: dict[str, SelectedSource] = {}
+    graphs = _parse_graphs(
+        document.get("graphs"),
+        reference_base=Path("/"),
+        project_root=Path("/"),
+        selected=selected,
+        excluded=frozenset(),
+        preloaded=True,
+    )
+    store = _parse_store(
+        document.get("store"),
+        reference_base=Path("/"),
+        project_root=Path("/"),
+        selected=selected,
+        excluded=frozenset(),
+        preloaded=True,
+    )
+    http = _parse_http(
+        document.get("http"),
+        reference_base=Path("/"),
+        project_root=Path("/"),
+        selected=selected,
+        excluded=frozenset(),
+        preloaded=True,
+    )
+    auth, auth_path = _parse_auth(document.get("auth"))
+    if auth_path is not None:
+        raise ContainerBuildError("Runtime manifest auth.path is not supported.")
+    return ContainerRuntimeManifestV1(
+        schema_version=1,
+        runtime=RuntimeManifestV1(
+            distribution="agentseek-api", version="0.3.0", contract="preloaded-v1"
+        ),
+        graphs=graphs,
+        dependencies=tuple(dependencies),
+        store=store,
+        http=http,
+        auth=auth,
+    )
+
+
+def load_container_runtime_manifest_v1(path: Path) -> ContainerRuntimeManifestV1:
+    """Load exactly one canonical preloaded-v1 runtime manifest."""
+
+    try:
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ContainerBuildError(
+            "The runtime manifest is missing or invalid JSON."
+        ) from exc
+    return _parse_container_runtime_manifest_v1_object(document)
 
 
 def _dependency_is_local(value: str) -> bool:
@@ -1907,6 +2052,7 @@ def plan_container_image(
         http=http,
         auth=auth,
     )
+    manifest = _parse_container_runtime_manifest_v1_object(manifest.to_json_object())
     return ContainerBuildPlan(
         base_image=base,
         python_version=raw_python,
@@ -2666,6 +2812,7 @@ __all__ = [
     "create_deterministic_context_archive",
     "interpret_host_runtime_policy",
     "interpret_manifest_runtime_policy",
+    "load_container_runtime_manifest_v1",
     "materialize_build_bundle",
     "plan_container_image",
     "plan_generated_up_auth",

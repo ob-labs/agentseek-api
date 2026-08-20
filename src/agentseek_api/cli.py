@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.metadata
 import json
 import os
 import signal
@@ -28,6 +29,7 @@ from agentseek_api.container_build import (
     ContainerBuildError,
     FinalAuthSelection,
     RuntimeArtifactV1,
+    load_container_runtime_manifest_v1,
     materialize_build_bundle,
     plan_container_image,
     plan_generated_up_auth,
@@ -45,6 +47,7 @@ from agentseek_api.docker_runtime import (
     build_docker_query_invocation,
     build_docker_run_invocation,
     encode_compose_environment,
+    inspect_image_contract,
     require_supported_compose,
     require_supported_buildx,
 )
@@ -53,7 +56,10 @@ from agentseek_api.environment import (
     CommandDerivedAssignment,
     ContainerPolicyError,
     EnvironmentPlan,
+    EnvironmentMode,
     EnvironmentTarget,
+    PRELOADED_V1_POLICY,
+    ResolvedEnvironment,
     resolve_environment,
 )
 from agentseek_api.process_supervisor import (
@@ -98,6 +104,7 @@ __all__ = [
     "build_uvicorn_command",
     "create_parser",
     "main",
+    "resolve_runtime_for_mode",
     "register_subcommands",
     "run_namespace",
 ]
@@ -453,6 +460,81 @@ def build_runtime_env(
         role=None,
     )
     return _resolve_host_environment_plan(plan)
+
+
+def resolve_runtime_for_mode(
+    *,
+    mode: EnvironmentMode,
+    config_path: str | None,
+    env_file: str | None,
+    inherited: dict[str, str],
+    cwd: Path,
+    role: str | None = None,
+) -> ResolvedEnvironment:
+    """Resolve ordinary sources or one exact preloaded manifest, never both."""
+
+    if mode is EnvironmentMode.RESOLVE:
+        discovered = discover_config_path(explicit_path=config_path, cwd=cwd)
+        plan = build_host_environment_plan(
+            config_path=discovered,
+            env_file=env_file,
+            cwd=cwd,
+            base_env=inherited,
+            role=role,
+        )
+        try:
+            return resolve_environment(plan, HOST_RUNTIME_POLICY)
+        except DotenvFileError as exc:
+            raise CliError(str(exc)) from exc
+
+    manifest_value = inherited.get("AGENTSEEK_GRAPHS")
+    if not manifest_value:
+        raise CliError("preloaded-v1 requires inherited AGENTSEEK_GRAPHS.")
+    manifest_path = Path(manifest_value)
+    if not manifest_path.is_absolute():
+        raise CliError("preloaded-v1 AGENTSEEK_GRAPHS must be an absolute path.")
+    if env_file is not None:
+        raise CliError("--env-file is not supported in preloaded-v1 mode.")
+    if (
+        config_path is not None
+        and str(_resolve_path(config_path, cwd=cwd)) != manifest_value
+    ):
+        raise CliError(
+            "--config must resolve to the inherited preloaded manifest path."
+        )
+    try:
+        manifest = load_container_runtime_manifest_v1(manifest_path)
+    except ContainerBuildError as exc:
+        raise CliError(str(exc)) from exc
+    try:
+        installed_version = importlib.metadata.version(manifest.runtime.distribution)
+    except importlib.metadata.PackageNotFoundError as exc:
+        raise CliError(
+            "The installed runtime distribution is incompatible with the manifest."
+        ) from exc
+    if installed_version != manifest.runtime.version:
+        raise CliError(
+            "The installed runtime distribution is incompatible with the manifest."
+        )
+    assignments: tuple[CommandDerivedAssignment, ...] = ()
+    if role == "dev":
+        assignments = (
+            CommandDerivedAssignment(
+                targets=frozenset({EnvironmentTarget.HOST_RUNTIME}),
+                values={"STUDIO_AUTH_LOCAL_DEV": "true"},
+                reason="development role safety",
+            ),
+        )
+    plan = EnvironmentPlan(
+        config_path=manifest_path,
+        config_dotenv=None,
+        config_mapping={},
+        auth_path=None,
+        cli_dotenv=None,
+        launch_environment=inherited,
+        command_assignments=assignments,
+    )
+    return resolve_environment(plan, PRELOADED_V1_POLICY)
 
 
 def build_host_environment_plan(
@@ -835,8 +917,15 @@ def _run_managed_dev_server(
 def _execute_runtime_command(
     args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
 ) -> int:
-    config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
-    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    env = dict(
+        resolve_runtime_for_mode(
+            mode=args.environment_mode,
+            config_path=args.config,
+            env_file=args.env_file,
+            inherited=dict(os.environ),
+            cwd=cwd,
+        ).values
+    )
     command = build_uvicorn_command(
         host=args.host,
         port=args.port,
@@ -854,14 +943,15 @@ def _execute_dev_command(
 ) -> int:
     _write_onboard_banner(stdout)
     args.reload = not args.no_reload
-    config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
-    env = _resolve_host_environment_plan(
-        build_host_environment_plan(
-            config_path=config_path,
+    env = dict(
+        resolve_runtime_for_mode(
+            mode=args.environment_mode,
+            config_path=args.config,
             env_file=args.env_file,
+            inherited=dict(os.environ),
             cwd=cwd,
             role="dev",
-        )
+        ).values
     )
     command = build_uvicorn_command(
         host=args.host,
@@ -884,16 +974,30 @@ def _execute_dev_command(
 def _execute_worker_command(
     args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
 ) -> int:
-    config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
-    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    env = dict(
+        resolve_runtime_for_mode(
+            mode=args.environment_mode,
+            config_path=args.config,
+            env_file=args.env_file,
+            inherited=dict(os.environ),
+            cwd=cwd,
+        ).values
+    )
     return runner(build_worker_command(), env=env, cwd=str(cwd))
 
 
 def _execute_scheduler_command(
     args: argparse.Namespace, *, runner: Callable[..., int], cwd: Path
 ) -> int:
-    config_path = discover_config_path(explicit_path=args.config, cwd=cwd)
-    env = build_runtime_env(config_path=config_path, env_file=args.env_file, cwd=cwd)
+    env = dict(
+        resolve_runtime_for_mode(
+            mode=args.environment_mode,
+            config_path=args.config,
+            env_file=args.env_file,
+            inherited=dict(os.environ),
+            cwd=cwd,
+        ).values
+    )
     return runner(build_scheduler_command(), env=env, cwd=str(cwd))
 
 
@@ -1117,8 +1221,15 @@ def _execute_up_command(
         environment_plan, selection=selection
     )
 
+    compose_path: Path | None = None
+    if args.docker_compose:
+        compose_path = _resolve_path(args.docker_compose, cwd=cwd)
+        if not compose_path.exists():
+            raise CliError(f"Docker compose file '{compose_path}' does not exist.")
+
     generated_plan = None
     generated_dockerfile_bytes: bytes | None = None
+    custom_image_contract = None
     if image:
         if (
             final_auth is not None
@@ -1128,6 +1239,14 @@ def _execute_up_command(
             raise CliError(
                 "Custom-image auth cannot reference a host file; bake the module into the image and use an importable package reference."
             )
+        custom_image_contract = inspect_image_contract(
+            image,
+            transport=process_transport,
+            docker_control=docker_control,
+            cwd=cwd,
+        )
+        application_payload = dict(application_payload)
+        application_payload["AGENTSEEK_GRAPHS"] = custom_image_contract.manifest_path
     else:
         _load_cli_config(config_path)
         generated_plan = plan_container_image(
@@ -1145,13 +1264,9 @@ def _execute_up_command(
             application_payload["AUTH_MODULE_PATH"] = auth_patch.value
         generated_dockerfile_bytes = render_build_dockerfile(generated_plan)
 
-    compose_path: Path | None = None
     compose_payload: dict[str, str] = {}
     encoded_compose: bytes | None = None
-    if args.docker_compose:
-        compose_path = _resolve_path(args.docker_compose, cwd=cwd)
-        if not compose_path.exists():
-            raise CliError(f"Docker compose file '{compose_path}' does not exist.")
+    if compose_path is not None:
         compose_payload = dict(
             select_compose_payload(
                 application_payload=application_payload,
@@ -1253,7 +1368,11 @@ def _execute_up_command(
         image=image,
         docker_control=docker_control,
         application_payload=application_payload,
-        container_argv=(),
+        container_argv=(
+            ()
+            if custom_image_contract is None
+            else custom_image_contract.container_argv
+        ),
         cwd=cwd,
     )
     run_exit_code = process_transport(run_invocation).returncode
@@ -1287,13 +1406,37 @@ def _add_command_parsers(
     dev_parser.add_argument("--studio-url")
     dev_parser.add_argument("--allow-blocking", action="store_true")
     dev_parser.add_argument("--tunnel", action="store_true")
+    dev_parser.add_argument(
+        "--environment-mode",
+        type=EnvironmentMode,
+        choices=tuple(EnvironmentMode),
+        default=EnvironmentMode.RESOLVE,
+    )
 
     serve_parser = subparsers.add_parser("serve", parents=[runtime_parent])
     serve_parser.add_argument("--host", default="127.0.0.1")
     serve_parser.add_argument("--port", default=DEFAULT_API_PORT, type=int)
+    serve_parser.add_argument(
+        "--environment-mode",
+        type=EnvironmentMode,
+        choices=tuple(EnvironmentMode),
+        default=EnvironmentMode.RESOLVE,
+    )
 
-    subparsers.add_parser("worker", parents=[runtime_parent])
-    subparsers.add_parser("scheduler", parents=[runtime_parent])
+    worker_parser = subparsers.add_parser("worker", parents=[runtime_parent])
+    worker_parser.add_argument(
+        "--environment-mode",
+        type=EnvironmentMode,
+        choices=tuple(EnvironmentMode),
+        default=EnvironmentMode.RESOLVE,
+    )
+    scheduler_parser = subparsers.add_parser("scheduler", parents=[runtime_parent])
+    scheduler_parser.add_argument(
+        "--environment-mode",
+        type=EnvironmentMode,
+        choices=tuple(EnvironmentMode),
+        default=EnvironmentMode.RESOLVE,
+    )
 
     subparsers.add_parser("version")
 

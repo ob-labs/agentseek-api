@@ -35,6 +35,26 @@ def make_graph_project(root: Path) -> Path:
     return project
 
 
+def write_sanitized_manifest(root: Path) -> Path:
+    manifest = root / "manifest.v1.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "runtime": {
+                    "distribution": "agentseek-api",
+                    "version": "0.3.0",
+                    "contract": "preloaded-v1",
+                },
+                "dependencies": [],
+                "graphs": {"chat": "chat.graph:graph"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest
+
+
 def build_plan_fixture(root: Path) -> ContainerBuildPlan:
     project = make_graph_project(root)
     pip_config = project / "pip.conf"

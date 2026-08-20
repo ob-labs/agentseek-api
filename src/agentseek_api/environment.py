@@ -22,6 +22,11 @@ class EnvironmentTarget(StrEnum):
     COMPOSE_CONTROL_PLANE = "compose-control-plane"
 
 
+class EnvironmentMode(StrEnum):
+    RESOLVE = "resolve"
+    PRELOADED_V1 = "preloaded-v1"
+
+
 class NameScope(StrEnum):
     NONE = "none"
     ALL = "all"
@@ -73,6 +78,16 @@ class ResolutionPolicy:
     export_scope: NameScope
     malformed: Literal["error"]
     unresolved: Literal["empty", "error"]
+
+
+PRELOADED_V1_POLICY = ResolutionPolicy(
+    target=EnvironmentTarget.HOST_RUNTIME,
+    interpolation_scope=NameScope.NONE,
+    assignment_scope=NameScope.ALL,
+    export_scope=NameScope.ALL,
+    malformed="error",
+    unresolved="error",
+)
 
 
 @dataclass(frozen=True)

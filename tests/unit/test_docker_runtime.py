@@ -18,6 +18,7 @@ from agentseek_api.docker_runtime import (
     ControlQueryInvocation,
     IMAGE_COMPATIBILITY_FORMAT,
     DockerRuntimeError,
+    ImageContractError,
     LegacyRunnerAdapter,
     ProcessInvocation,
     ProcessResult,
@@ -31,6 +32,8 @@ from agentseek_api.docker_runtime import (
     parse_buildx_version_result,
     parse_compose_version_result,
     parse_image_compatibility_result,
+    inspect_image_contract,
+    require_preloaded_v1,
     require_buildx_available,
     require_supported_buildx,
     require_supported_compose,
@@ -1043,3 +1046,128 @@ def test_image_compatibility_parser_rejects_nonexact_private_output(
     assert message == "Docker image compatibility query returned an invalid result."
     assert "private-error" not in message
     assert "not-json" not in message
+
+
+def _compatible_image_labels() -> dict[str, str]:
+    return {
+        "org.agentseek.environment-contract": "preloaded-v1",
+        "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
+        "org.agentseek.runtime-distribution": "agentseek-api",
+        "org.agentseek.runtime-version": "0.3.0",
+    }
+
+
+def test_custom_image_without_preloaded_labels_is_rejected() -> None:
+    with pytest.raises(ImageContractError, match="preloaded-v1"):
+        require_preloaded_v1({})
+
+
+@pytest.mark.parametrize("label", list(_compatible_image_labels()))
+def test_custom_image_requires_every_exact_preloaded_label(label: str) -> None:
+    labels = _compatible_image_labels()
+    labels[label] = "label-canary"
+    with pytest.raises(ImageContractError) as caught:
+        require_preloaded_v1(labels)
+    assert "label-canary" not in str(caught.value)
+
+
+@pytest.mark.parametrize(
+    ("entrypoint", "expected_command"),
+    [
+        (
+            [],
+            (
+                "agentseek-api",
+                "serve",
+                "--environment-mode",
+                "preloaded-v1",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "2024",
+            ),
+        ),
+        (
+            ["agentseek-api"],
+            (
+                "serve",
+                "--environment-mode",
+                "preloaded-v1",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "2024",
+            ),
+        ),
+        (
+            ["python", "-m", "agentseek_api.cli"],
+            (
+                "serve",
+                "--environment-mode",
+                "preloaded-v1",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "2024",
+            ),
+        ),
+    ],
+)
+def test_inspect_image_contract_uses_one_exact_query_and_overrides_cmd(
+    tmp_path: Path, entrypoint: list[str], expected_command: tuple[str, ...]
+) -> None:
+    calls: list[ProcessInvocation] = []
+
+    def transport(invocation: ProcessInvocation) -> ProcessResult:
+        calls.append(invocation)
+        return ProcessResult(
+            returncode=0,
+            stdout=json.dumps(
+                [_compatible_image_labels(), entrypoint, ["hostile", "default"]]
+            ).encode(),
+        )
+
+    contract = inspect_image_contract(
+        "agentseek:test",
+        transport=transport,
+        docker_control={"DOCKER_HOST": "unix:///docker.sock"},
+        cwd=tmp_path,
+    )
+
+    assert len(calls) == 1
+    assert isinstance(calls[0], ControlQueryInvocation)
+    assert calls[0].argv == (
+        "docker",
+        "image",
+        "inspect",
+        "--format",
+        IMAGE_COMPATIBILITY_FORMAT,
+        "agentseek:test",
+    )
+    assert ".Config.Env" not in " ".join(calls[0].argv)
+    assert contract.manifest_path == "/opt/agentseek/manifest.v1.json"
+    assert contract.container_argv == expected_command
+
+
+@pytest.mark.parametrize(
+    "entrypoint",
+    ["agentseek-api", ["/bin/sh", "-c"], ["python", "agentseek_api/cli.py"]],
+)
+def test_inspect_image_contract_rejects_unsupported_entrypoint_value_free(
+    tmp_path: Path, entrypoint: object
+) -> None:
+    canary = "entrypoint-canary"
+
+    def transport(_invocation: ProcessInvocation) -> ProcessResult:
+        return ProcessResult(
+            returncode=0,
+            stdout=json.dumps(
+                [_compatible_image_labels(), entrypoint, [canary]]
+            ).encode(),
+        )
+
+    with pytest.raises(ImageContractError) as caught:
+        inspect_image_contract(
+            canary, transport=transport, docker_control={}, cwd=tmp_path
+        )
+    assert canary not in str(caught.value)
