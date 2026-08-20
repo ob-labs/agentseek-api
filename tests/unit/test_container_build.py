@@ -347,6 +347,27 @@ def _candidate_build_plan(root: Path):
     )
 
 
+def test_candidate_renderer_stages_a_pep427_valid_wheel_filename(
+    tmp_path: Path,
+) -> None:
+    text = render_build_dockerfile(_candidate_build_plan(tmp_path)).decode("utf-8")
+    canonical = "agentseek_api-0.3.0-py3-none-any.whl"
+
+    assert f'"/opt/agentseek/runtime/{canonical}"' in text
+    assert f'"/opt/agentseek/runtime/{canonical}[embedded]"' in text
+    assert "/opt/agentseek/runtime/agentseek-api-0.3.0.whl" not in text
+
+
+def test_windows_binary_flag_is_used_for_bundle_file_io(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    binary_flag = 0x8000
+    monkeypatch.setattr(container_build.os, "O_BINARY", binary_flag, raising=False)
+
+    assert container_build._output_file_flags() & binary_flag
+    assert container_build._source_file_flags() & binary_flag
+
+
 def test_dockerfile_uses_manifest_labels_and_buildkit_pip_secret(
     tmp_path: Path,
 ) -> None:
@@ -600,7 +621,7 @@ def test_exact_runtime_install_forces_selected_artifact_replacement(
         argv
         for argv in commands
         if argv[:4] == ["python", "-m", "pip", "install"]
-        and any("agentseek-api" in operand for operand in argv)
+        and any("agentseek-api" in operand.replace("_", "-") for operand in argv)
     )
 
     assert "--force-reinstall" in runtime_install
@@ -621,7 +642,8 @@ def test_candidate_hash_verifier_has_success_and_failure_paths_under_optimize(
 ) -> None:
     plan = _candidate_build_plan(tmp_path)
     script = _generated_python_check(
-        render_build_dockerfile(plan).decode(), "agentseek-api-0.3.0.whl"
+        render_build_dockerfile(plan).decode(),
+        "agentseek_api-0.3.0-py3-none-any.whl",
     )
     assert plan.runtime_artifact.candidate_wheel is not None
     candidate = tmp_path / "candidate-check.whl"
@@ -635,7 +657,8 @@ def test_candidate_hash_verifier_has_success_and_failure_paths_under_optimize(
         "OriginalPath=pathlib.Path\n"
         f"actual=OriginalPath({str(candidate)!r})\n"
         "pathlib.Path=lambda value: actual if value=="
-        "'/opt/agentseek/runtime/agentseek-api-0.3.0.whl' else OriginalPath(value)"
+        "'/opt/agentseek/runtime/agentseek_api-0.3.0-py3-none-any.whl' "
+        "else OriginalPath(value)"
     )
 
     completed = _run_generated_check(script, setup)
@@ -755,7 +778,7 @@ def test_renderer_json_escapes_install_operands_and_candidate_source(
     assert '"package @ https://example.invalid/pkg.whl#sha256=' in text
     assert 'COPY ["runtime/candidate runtime.whl", "/opt/agentseek/runtime/' in text
     assert text.index("candidate runtime.whl") < text.index(
-        "agentseek-api-0.3.0.whl[embedded]"
+        "agentseek_api-0.3.0-py3-none-any.whl[embedded]"
     )
 
 

@@ -38,6 +38,7 @@ JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 
 _RUNTIME_VERSION = "0.3.0"
+_CANDIDATE_RUNTIME_FILENAME = f"agentseek_api-{_RUNTIME_VERSION}-py3-none-any.whl"
 _CONTAINER_ROOT = PurePosixPath("/deps/agent")
 _VCS_METADATA_NAMES = frozenset({".git", ".hg", ".svn", ".bzr"})
 
@@ -638,7 +639,7 @@ def _pip_config_source(path: Path) -> tuple[Path, tuple[int, int, int, int]]:
             raise ContainerBuildError("The pip config must be a readable regular file.")
         if os.name != "nt" and status.st_mode & 0o444 == 0:
             raise ContainerBuildError("The pip config must be a readable regular file.")
-        flags = os.O_RDONLY
+        flags = _source_file_flags()
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         descriptor = os.open(raw, flags)
@@ -2198,10 +2199,11 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
         lines.append("COPY app /deps/agent")
     lines.append("COPY runtime-constraints.txt /opt/agentseek/runtime-constraints.txt")
     if candidate_source is not None:
+        candidate_runtime_path = f"/opt/agentseek/runtime/{_CANDIDATE_RUNTIME_FILENAME}"
         lines.append(
             "COPY "
             + json.dumps(
-                [candidate_source, "/opt/agentseek/runtime/agentseek-api-0.3.0.whl"],
+                [candidate_source, candidate_runtime_path],
                 ensure_ascii=False,
             )
         )
@@ -2219,13 +2221,13 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
             )
         candidate_check = (
             "import hashlib,pathlib,sys;"
-            "p=pathlib.Path('/opt/agentseek/runtime/agentseek-api-0.3.0.whl');"
+            f"p=pathlib.Path('{candidate_runtime_path}');"
             "sys.exit('candidate runtime hash mismatch') if "
             f"hashlib.sha256(p.read_bytes()).hexdigest()!='{artifact.candidate_sha256}' "
             "else None"
         )
         lines.append(_docker_exec_run(("python", "-c", candidate_check)))
-        runtime_operand = "/opt/agentseek/runtime/agentseek-api-0.3.0.whl[embedded]"
+        runtime_operand = f"{candidate_runtime_path}[embedded]"
     else:
         runtime_operand = artifact.requirement
     lines.append(
@@ -2424,10 +2426,14 @@ def _opened_output_parent(
 
 
 def _output_file_flags() -> int:
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     return flags
+
+
+def _source_file_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_BINARY", 0)
 
 
 def _write_file_descriptor(fd: int, data: bytes) -> None:
@@ -2453,7 +2459,7 @@ def _read_regular_source(
         before = path.lstat()
         if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
             raise ContainerBuildError("A selected build source changed before copy.")
-        flags = os.O_RDONLY
+        flags = _source_file_flags()
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
         fd = os.open(path, flags)
