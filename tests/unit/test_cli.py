@@ -1139,12 +1139,15 @@ def test_up_resolves_docker_once_from_selected_path_and_freezes_absolute_argv(
     from agentseek_api.cli import main
 
     _write_basic_langgraph_config(tmp_path)
-    monkeypatch.setenv("PATH", "/selected/docker/bin")
+    selected_path = (
+        r"C:\selected\docker\bin" if os.name == "nt" else "/selected/docker/bin"
+    )
+    monkeypatch.setenv("PATH", selected_path)
     calls: list[tuple[str, str | None]] = []
 
     def fake_which(executable: str, *, path: str | None = None) -> str:
         calls.append((executable, path))
-        return "/selected/docker/bin/docker"
+        return DOCKER_EXECUTABLE
 
     monkeypatch.setattr(shutil, "which", fake_which)
     runner = BoundaryRunner()
@@ -1156,11 +1159,9 @@ def test_up_resolves_docker_once_from_selected_path_and_freezes_absolute_argv(
     )
 
     assert exit_code == 0
-    assert calls == [("docker", "/selected/docker/bin")]
+    assert calls == [("docker", selected_path)]
     assert runner.calls
-    assert {invocation.argv[0] for invocation in runner.calls} == {
-        "/selected/docker/bin/docker"
-    }
+    assert {invocation.argv[0] for invocation in runner.calls} == {DOCKER_EXECUTABLE}
 
 
 def test_generated_up_materializes_compose_artifact_before_build_and_cleans_it(
@@ -1193,7 +1194,14 @@ def test_generated_up_materializes_compose_artifact_before_build_and_cleans_it(
                     if child.name.startswith("agentseek-compose-")
                 ]
                 self.artifact_exists_during_build = bool(artifacts)
-                self.artifact_contents_during_build = artifacts[0].read_bytes()
+                artifact = artifacts[0]
+                content_files = (
+                    [artifact]
+                    if artifact.is_file()
+                    else [child for child in artifact.rglob("*") if child.is_file()]
+                )
+                assert len(content_files) == 1
+                self.artifact_contents_during_build = content_files[0].read_bytes()
             return super().__call__(invocation)
 
     runner = ArtifactBoundaryRunner()
