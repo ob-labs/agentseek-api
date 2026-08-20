@@ -143,22 +143,6 @@ def _classify(invocation: ProcessInvocation) -> str:
     return "inspect"
 
 
-def _parse_environment(output: bytes) -> Mapping[str, str]:
-    try:
-        text = output.decode("utf-8", errors="strict")
-    except UnicodeDecodeError as exc:
-        raise BoundaryFailure("Compose environment output was not UTF-8") from exc
-    parsed: dict[str, str] = {}
-    for line in text.splitlines():
-        if not line:
-            continue
-        name, separator, value = line.partition("=")
-        if not separator or not _ENVIRONMENT_NAME.fullmatch(name):
-            raise BoundaryFailure("Compose environment output was malformed")
-        parsed[name] = value
-    return MappingProxyType(parsed)
-
-
 def _value_free_process_tail(
     result: ProcessResult, *, redactions: tuple[bytes, ...]
 ) -> str:
@@ -317,15 +301,6 @@ class _EvidenceTransport:
         except ValueError as exc:
             raise BoundaryFailure("Compose invocation classification failed") from exc
         prefix = invocation.argv[:command_index]
-        environment_result = _safe_process(
-            (*prefix, "config", "--environment"),
-            cwd=invocation.cwd,
-            environment=invocation.environment,
-            timeout=30,
-        )
-        if environment_result.returncode != 0:
-            raise BoundaryFailure("Compose environment render failed")
-        self.compose_environment = _parse_environment(environment_result.stdout)
         rendered_result = _safe_process(
             (*prefix, "config", "--format", "json"),
             cwd=invocation.cwd,
@@ -336,13 +311,24 @@ class _EvidenceTransport:
             raise BoundaryFailure("Compose document render failed")
         try:
             rendered = json.loads(rendered_result.stdout)
-            observed = rendered["services"]["probe"]["environment"][
-                "PROJECT_DOTENV_CANARY"
-            ]
-        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            service_environment = rendered["services"]["probe"]["environment"]
+            if not isinstance(service_environment, dict) or not all(
+                isinstance(name, str) and isinstance(value, str)
+                for name, value in service_environment.items()
+            ):
+                raise TypeError
+            observed = service_environment["PROJECT_DOTENV_CANARY"]
+        except (
+            KeyError,
+            TypeError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+        ) as exc:
             raise BoundaryFailure("Compose document boundary was malformed") from exc
-        if observed != "unset" or self.compose_dotenv_canary in (
-            self.compose_environment.values()
+        self.compose_environment = MappingProxyType(dict(service_environment))
+        if (
+            observed != "unset"
+            or self.compose_dotenv_canary in service_environment.values()
         ):
             raise BoundaryFailure("explicit Compose env-file isolation failed")
         return ProcessResult(returncode=0)

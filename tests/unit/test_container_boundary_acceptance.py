@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from agentseek_api.docker_runtime import ProcessResult
+from agentseek_api.docker_runtime import ProcessInvocation, ProcessResult
 
 
 SCRIPT = Path("scripts/test_container_env_boundary.py")
@@ -180,6 +180,72 @@ def test_generated_compose_flow_uses_build_controls_for_direct_probe(
 
     assert evidence.invocations[0].kind == "compose"
     assert observed_controls == [{"PATH": "docker-control-only"}]
+
+
+def test_compose_evidence_uses_floor_compatible_rendered_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_script()
+    transport = module._EvidenceTransport(
+        result_path=tmp_path / "result.json",
+        compose_dotenv_canary="must-not-load",
+        forbidden_values=(),
+    )
+    calls: list[tuple[str, ...]] = []
+
+    def fake_process(argv, **_kwargs):
+        calls.append(argv)
+        if "--environment" in argv:
+            return ProcessResult(returncode=2)
+        return ProcessResult(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "services": {
+                        "probe": {
+                            "environment": {
+                                "PROJECT_DOTENV_CANARY": "unset",
+                                "SAFE_VALUE": "observed",
+                            }
+                        }
+                    }
+                }
+            ).encode(),
+        )
+
+    monkeypatch.setattr(module, "_safe_process", fake_process)
+    invocation = ProcessInvocation(
+        argv=(
+            "docker",
+            "compose",
+            "--env-file",
+            "private.env",
+            "-f",
+            "compose.json",
+            "up",
+        ),
+        environment={"PATH": "docker-control-only"},
+        cwd=tmp_path,
+    )
+
+    assert transport._render_compose(invocation).returncode == 0
+    assert calls == [
+        (
+            "docker",
+            "compose",
+            "--env-file",
+            "private.env",
+            "-f",
+            "compose.json",
+            "config",
+            "--format",
+            "json",
+        )
+    ]
+    assert dict(transport.compose_environment) == {
+        "PROJECT_DOTENV_CANARY": "unset",
+        "SAFE_VALUE": "observed",
+    }
 
 
 def test_process_failure_tail_is_bounded_and_value_free() -> None:

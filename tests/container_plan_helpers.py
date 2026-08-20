@@ -198,17 +198,6 @@ def docker_compose_available(*, cwd: Path) -> bool:
     )
 
 
-def _parse_compose_environment(output: bytes) -> dict[str, str]:
-    text = output.decode("utf-8", errors="strict")
-    matches = list(
-        re.finditer(
-            r"(?ms)^([A-Za-z_][A-Za-z0-9_]*)=(.*?)(?=^[A-Za-z_][A-Za-z0-9_]*=|\Z)",
-            text,
-        )
-    )
-    return {match.group(1): match.group(2).removesuffix("\n") for match in matches}
-
-
 def decode_with_supported_compose(
     encoded: str,
     *,
@@ -226,6 +215,8 @@ def decode_with_supported_compose(
     compose_path = tmp_path / "compose-conformance.json"
     result_path = tmp_path / "compose-results"
     result_path.mkdir(mode=0o700, exist_ok=True)
+    for name in names:
+        (result_path / name).touch(mode=0o600, exist_ok=False)
     env_path.write_text(encoded, encoding="utf-8")
     (tmp_path / ".env").write_text(
         "PROJECT_DOTENV_CANARY=must-not-load\n", encoding="utf-8"
@@ -258,12 +249,10 @@ def decode_with_supported_compose(
         "-f",
         str(compose_path),
     ]
-    substitution = _parse_compose_environment(
-        _run_private([*base, "config", "--environment"], cwd=tmp_path)
-    )
     rendered_document = json.loads(
         _run_private([*base, "config", "--format", "json"], cwd=tmp_path)
     )
+    substitution: dict[str, str] = {}
     rendered: dict[str, str] = {}
     commands: dict[str, tuple[str, ...]] = {}
     for name in names:
@@ -273,6 +262,7 @@ def decode_with_supported_compose(
         if service["environment"]["PROJECT_DOTENV_CANARY"] != "unset":
             raise RuntimeError("Compose loaded the project dotenv unexpectedly.")
         rendered[name] = service["environment"][name]
+        substitution[name] = rendered[name].replace("$$", "$")
         commands[name] = tuple(service["command"])
 
     runtime: dict[str, str] = {}

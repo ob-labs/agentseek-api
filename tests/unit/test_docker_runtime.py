@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+import tests.container_plan_helpers as container_plan_helpers
+
 from agentseek_api.docker_runtime import (
     MINIMUM_BUILDX_VERSION,
     MINIMUM_COMPOSE_VERSION,
@@ -482,6 +484,92 @@ def test_compose_encoder_round_trips_real_container_without_second_interpolation
 
     assert dict(decoded.substitution) == SPECIAL_VALUES
     assert dict(decoded.runtime) == SPECIAL_VALUES
+
+
+def test_compose_decoder_uses_floor_compatible_rendered_document(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[tuple[str, ...]] = []
+
+    def fake_run_private(command: list[str], *, cwd: Path) -> bytes:
+        assert cwd == tmp_path
+        calls.append(tuple(command))
+        if "--environment" in command:
+            pytest.fail("Compose 2.24.0 does not support config --environment")
+        return json.dumps(
+            {
+                "services": {
+                    "probe-dollar": {
+                        "environment": {
+                            "DOLLAR": "$${DOCKER_HOST}",
+                            "PROJECT_DOTENV_CANARY": "unset",
+                        },
+                        "command": [
+                            "sh",
+                            "-c",
+                            "printf '%s' \"$${DOLLAR}\" > /result/DOLLAR",
+                        ],
+                    }
+                }
+            }
+        ).encode()
+
+    monkeypatch.setattr(container_plan_helpers, "_run_private", fake_run_private)
+
+    decoded = decode_with_supported_compose(
+        encode_compose_environment({"DOLLAR": "${DOCKER_HOST}"}),
+        tmp_path=tmp_path,
+    )
+
+    assert decoded.substitution == {"DOLLAR": "${DOCKER_HOST}"}
+    assert decoded.rendered == {"DOLLAR": "$${DOCKER_HOST}"}
+    assert len(calls) == 1
+    assert calls[0][-3:] == ("config", "--format", "json")
+
+
+def test_compose_runtime_precreates_private_host_owned_result_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run_private(command: list[str], *, cwd: Path) -> bytes:
+        assert cwd == tmp_path
+        if command[-3:] == ["config", "--format", "json"]:
+            return json.dumps(
+                {
+                    "services": {
+                        "probe-value": {
+                            "environment": {
+                                "VALUE": "expected",
+                                "PROJECT_DOTENV_CANARY": "unset",
+                            },
+                            "command": [
+                                "sh",
+                                "-c",
+                                "printf '%s' \"$${VALUE}\" > /result/VALUE",
+                            ],
+                        }
+                    }
+                }
+            ).encode()
+        result = tmp_path / "compose-results" / "VALUE"
+        assert result.is_file()
+        assert result.stat().st_mode & 0o777 == 0o600
+        result.write_text("expected", encoding="utf-8")
+        return b""
+
+    monkeypatch.setattr(container_plan_helpers, "_run_private", fake_run_private)
+    monkeypatch.setattr(
+        container_plan_helpers.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0),
+    )
+
+    decoded = decode_with_supported_compose(
+        encode_compose_environment({"VALUE": "expected"}),
+        tmp_path=tmp_path,
+        run_service=True,
+    )
+
+    assert decoded.runtime == {"VALUE": "expected"}
 
 
 @pytest.mark.parametrize("value", ["nul\0value", "control\x01value"])
