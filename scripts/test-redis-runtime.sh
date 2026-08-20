@@ -344,10 +344,10 @@ set_backend_defaults "$SEEKDB_DOCKER_BACKEND"
 
 docker network rm "$NETWORK_NAME" >/dev/null 2>&1 || true
 docker network create "$NETWORK_NAME" >/dev/null
-mkdir -p "$STATE_DIR"
+mkdir -p "$STATE_DIR" "$ROOT_DIR/.tmp"
 SHUTDOWN_STATE_FILE="$(mktemp "$STATE_DIR/shutdown-state.XXXXXX")"
 
-CANDIDATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentseek-redis-candidate.XXXXXX")"
+CANDIDATE_DIR="$(mktemp -d "$ROOT_DIR/.tmp/agentseek-redis-candidate.XXXXXX")"
 if ! uv build --wheel --out-dir "$CANDIDATE_DIR"; then
   echo "Candidate runtime wheel build failed." >&2
   exit 1
