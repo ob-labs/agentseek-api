@@ -552,7 +552,11 @@ def test_search_crons_sorts_by_next_run_date_asc(client: TestClient) -> None:
     )
     assert response.status_code == 200
     ids = [item["cron_id"] for item in response.json()["items"]]
-    assert ids == [minutely["cron_id"], hourly["cron_id"]]
+    expected = sorted(
+        [hourly, minutely],
+        key=lambda item: (item["next_run_date"], item["cron_id"]),
+    )
+    assert ids == [item["cron_id"] for item in expected]
 
 
 def test_search_crons_filters_by_metadata(client: TestClient) -> None:

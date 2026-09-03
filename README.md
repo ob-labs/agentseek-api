@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh-CN.md)
 
-[![PyPI version](https://img.shields.io/pypi/v/agentseek-api.svg)](https://pypi.org/project/agentseek-api/) [![Python >=3.12](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](https://pypi.org/project/agentseek-api/) [![CI](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml?query=branch%3Amain)
+[![PyPI version](https://img.shields.io/pypi/v/agentseek-api.svg)](https://pypi.org/project/agentseek-api/) [![Python 3.12-3.13](https://img.shields.io/badge/python-3.12--3.13-blue.svg)](https://pypi.org/project/agentseek-api/) [![CI](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml?query=branch%3Amain)
 
 > [!WARNING]
 > This project is under active development and is **not production-ready**.
@@ -33,7 +33,7 @@ Current release boundary:
 
 ### Prerequisites
 
-- Python 3.12+
+- Python >=3.12,<3.14
 - `uv`
 
 ### Choose the right local loop
@@ -83,7 +83,7 @@ uv sync --extra embedded
 ### 2. Configure seekdb embed as the default backend (recommended)
 
 The fastest way to get a real backend running locally is **seekdb embed** — an
-in-process SeekDB instance, no Docker or separate process required:
+in-process seekdb instance, no Docker or separate process required:
 
 ```bash
 SEEKDB_EMBED=true agentseek-api dev
@@ -418,7 +418,7 @@ Useful config fields:
 - `compose_env`: names from the already-resolved application environment that
   may cross into an explicitly selected Compose dotenv carrier
 
-### Container migration for 0.3.0
+### Container contract introduced in 0.3.0
 
 The `preloaded-v1` contract is a breaking, fail-closed container boundary. The
 host resolves application configuration once. Containers started from generated images receive only
@@ -439,7 +439,7 @@ Custom images must expose all four exact labels:
 - `org.agentseek.environment-contract=preloaded-v1`
 - `org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json`
 - `org.agentseek.runtime-distribution=agentseek-api`
-- `org.agentseek.runtime-version=0.3.0`
+- `org.agentseek.runtime-version=0.3.1`
 
 The manifest, installed distribution, entrypoint, and labels must agree. There
 is no legacy-image fallback: migrate and attest the image before passing it to
@@ -451,7 +451,7 @@ AgentSeek release is also 0.1.4; both follow the shipped 0.1.3 releases.
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP
 Store API and the injected LangGraph `BaseStore` runtime for TTL and semantic
-search. This repo uses the published `langchain-oceanbase==0.5.2` package from
+search. This repo uses the published `langchain-oceanbase==0.6.3` package from
 PyPI.
 
 Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:

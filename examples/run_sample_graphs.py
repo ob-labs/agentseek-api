@@ -1,7 +1,7 @@
 """Run every sample graph once, in-process, to prove they import and execute.
 
 Useful as a local smoke test while developing a new graph. Does not require
-the HTTP server or SeekDB — it invokes each compiled graph directly through
+the HTTP server or seekdb — it invokes each compiled graph directly through
 LangGraph.
 """
 

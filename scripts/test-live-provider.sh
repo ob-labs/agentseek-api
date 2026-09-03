@@ -85,7 +85,7 @@ while time.time() < deadline:
         last_error = exc
         time.sleep(2)
 
-raise SystemExit(f"SeekDB did not become ready within {timeout_seconds:.0f}s: {last_error}")
+raise SystemExit(f"seekdb did not become ready within {timeout_seconds:.0f}s: {last_error}")
 PY
   then
     print_backend_debug

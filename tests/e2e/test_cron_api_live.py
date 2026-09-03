@@ -139,8 +139,13 @@ async def test_cron_search_sort_filter_select_against_real_db(e2e_base_url: str)
         )
         assert ordered.status_code == 200, ordered.text
         ids = [item["cron_id"] for item in ordered.json()["items"]]
-        # The minutely cron fires sooner, so it sorts first.
-        assert ids.index(minutely["cron_id"]) < ids.index(hourly["cron_id"])
+        # Near an hour boundary both schedules can resolve to the same minute,
+        # in which case the API's documented cron_id tiebreaker decides order.
+        expected = sorted(
+            [hourly, minutely],
+            key=lambda item: (item["next_run_date"], item["cron_id"]),
+        )
+        assert ids == [item["cron_id"] for item in expected]
 
         # metadata filter — exercises JSON extraction on the real backend.
         filtered = await client.post(

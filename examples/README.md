@@ -42,7 +42,7 @@ uv run python examples/external_graph/run.py
 ```
 
 Invokes every sample graph directly through LangGraph — no HTTP server, no
-SeekDB. Useful during development when you want a tight feedback loop.
+seekdb. Useful during development when you want a tight feedback loop.
 
 ## Running them through the HTTP API
 
@@ -76,7 +76,7 @@ curl -s http://127.0.0.1:2024/threads/$THREAD_ID/runs/$RUN_ID/wait \
 `tests/e2e/e2e_live_http_multi_graph.py` does the full dance against every
 registered sample. `make test-cli-dev-samples` runs that sweep through the
 `agentseek dev` CLI, and `make test-seekdb` runs it end-to-end against a real
-SeekDB-compatible backend.
+seekdb-compatible backend.
 
 ## Adding your own graph
 
