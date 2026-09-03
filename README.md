@@ -2,7 +2,7 @@
 
 **English** | [中文](README.zh-CN.md)
 
-[![PyPI version](https://img.shields.io/pypi/v/agentseek-api.svg)](https://pypi.org/project/agentseek-api/) [![Python >=3.12](https://img.shields.io/badge/python-%3E%3D3.12-blue.svg)](https://pypi.org/project/agentseek-api/) [![CI](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml?query=branch%3Amain)
+[![PyPI version](https://img.shields.io/pypi/v/agentseek-api.svg)](https://pypi.org/project/agentseek-api/) [![Python 3.12-3.13](https://img.shields.io/badge/python-3.12--3.13-blue.svg)](https://pypi.org/project/agentseek-api/) [![CI](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ob-labs/agentseek-api/actions/workflows/ci.yml?query=branch%3Amain)
 
 > [!WARNING]
 > This project is under active development and is **not production-ready**.
