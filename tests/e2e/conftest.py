@@ -81,7 +81,7 @@ def should_fail_live_provider_config() -> bool:
 def _start_e2e_server(*, graphs_path: str) -> Generator[str, None, None]:
     running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
     if not _seekdb_reachable():
-        message = "SeekDB/OceanBase backend is not reachable for e2e tests."
+        message = "seekdb/OceanBase backend is not reachable for e2e tests."
         if running_in_ci:
             pytest.fail(message)
         pytest.skip(message)
@@ -146,7 +146,7 @@ async def e2e_db() -> "AsyncGenerator[None, None]":
     The e2e server runs as a subprocess, so HTTP-only tests cannot reach the
     scheduler/migration functions (the scheduler is a separate process and those
     helpers operate through the module-level ``db_manager``). This fixture wires
-    the in-process ``db_manager`` to the same real SeekDB/OceanBase/MySQL backend
+    the in-process ``db_manager`` to the same real seekdb/OceanBase/MySQL backend
     so tests can invoke ``claim_due_crons``, ``dispatch_due_crons``,
     ``_apply_additive_migrations``, etc. directly and assert real-DB behavior.
 
@@ -157,7 +157,7 @@ async def e2e_db() -> "AsyncGenerator[None, None]":
     """
     running_in_ci = os.getenv("CI", "").lower() in {"1", "true", "yes"}
     if not _seekdb_reachable():
-        message = "SeekDB/OceanBase backend is not reachable for e2e tests."
+        message = "seekdb/OceanBase backend is not reachable for e2e tests."
         if running_in_ci:
             pytest.fail(message)
         pytest.skip(message)

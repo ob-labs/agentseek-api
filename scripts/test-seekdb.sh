@@ -93,13 +93,13 @@ while time.time() < deadline:
             charset="utf8mb4",
         )
         conn.close()
-        print("SeekDB is reachable")
+        print("seekdb is reachable")
         raise SystemExit(0)
     except Exception as exc:  # noqa: BLE001
         last_error = exc
         time.sleep(2)
 
-raise SystemExit(f"SeekDB did not become ready within {timeout_seconds:.0f}s: {last_error}")
+raise SystemExit(f"seekdb did not become ready within {timeout_seconds:.0f}s: {last_error}")
 PY
   then
     print_backend_debug

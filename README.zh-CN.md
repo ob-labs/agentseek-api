@@ -32,7 +32,7 @@
 
 ### 前置条件
 
-- Python 3.12+
+- Python >=3.12,<3.14
 - `uv`
 
 ### 选择合适的本地开发循环
@@ -80,7 +80,7 @@ uv sync --extra embedded
 
 ### 2. 将 seekdb embed 配置为默认后端（推荐）
 
-最快获得真实后端的方式是 **seekdb embed** — 一个进程内嵌入式 SeekDB 实例，
+最快获得真实后端的方式是 **seekdb embed** — 一个进程内嵌入式 seekdb 实例，
 无需 Docker 或独立进程：
 
 ```bash
@@ -383,7 +383,7 @@ Redis 实例同时运行。
 - `compose_env`：允许通过显式 Compose dotenv carrier 的、已完成解析的应用
   环境变量名称
 
-### 0.3.0 容器迁移
+### 0.3.0 引入的容器契约
 
 `preloaded-v1` 是不兼容旧行为、失败即关闭的容器边界。宿主机只解析一次
 应用配置。从生成镜像启动的容器只接收显式选择的运行时 payload；宿主机环境、dotenv
@@ -401,7 +401,7 @@ Redis 实例同时运行。
 - `org.agentseek.environment-contract=preloaded-v1`
 - `org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json`
 - `org.agentseek.runtime-distribution=agentseek-api`
-- `org.agentseek.runtime-version=0.3.0`
+- `org.agentseek.runtime-version=0.3.1`
 
 manifest、已安装 distribution、entrypoint 与标签必须一致。系统不提供旧镜像
 回退：传给 `up --image` 前必须完成迁移与校验；否则应继续用旧 launcher 配合
@@ -412,7 +412,7 @@ manifest、已安装 distribution、entrypoint 与标签必须一致。系统不
 CLI 层会尽量容忍 LangGraph 在端点级别使用的配置键，例如 `http` 与
 `api_version`。Store 配置会被 HTTP Store API 以及注入的 LangGraph
 `BaseStore` 运行时用于 TTL 与语义检索。本仓库使用 PyPI 上发布的
-`langchain-oceanbase==0.5.2` 包。
+`langchain-oceanbase==0.6.3` 包。
 
 配置驱动的自定义鉴权可以放在 `agentseek.json` 或 `langgraph.json` 中：
 

@@ -12,3 +12,4 @@ def test_release_build_excludes_private_superpowers_artifacts() -> None:
         project = tomllib.load(handle)
 
     assert "/.superpowers" in project["tool"]["hatch"]["build"]["exclude"]
+    assert "/docs/superpowers" in project["tool"]["hatch"]["build"]["exclude"]

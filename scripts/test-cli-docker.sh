@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 umask 077
 
-IMAGE_TAG="${IMAGE_TAG:-agentseek-api-cli-smoke:0.3.0}"
+IMAGE_TAG="${IMAGE_TAG:-agentseek-api-cli-smoke:0.3.1}"
 APP_CONTAINER="${APP_CONTAINER:-agentseek-up-8123}"
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/agentseek-cli-docker.XXXXXX")"
 PROJECT_DIR="$TMP_DIR/source-only-project"
@@ -172,7 +172,7 @@ if ! uv build --wheel --out-dir "$CANDIDATE_DIR" >"$WHEEL_BUILD_LOG" 2>&1; then
   exit 1
 fi
 
-CANDIDATE_WHEELS=("$CANDIDATE_DIR"/agentseek_api-0.3.0-*.whl)
+CANDIDATE_WHEELS=("$CANDIDATE_DIR"/agentseek_api-0.3.1-*.whl)
 if [[ "${#CANDIDATE_WHEELS[@]}" -ne 1 || ! -f "${CANDIDATE_WHEELS[0]}" ]]; then
   echo "Candidate wheel selection failed." >&2
   exit 1
@@ -233,7 +233,7 @@ if (
 positions = [
     dockerfile.index("packaging==25.0"),
     dockerfile.index("/tmp/custom-boundary"),
-    dockerfile.index("agentseek_api-0.3.0-py3-none-any.whl[embedded]"),
+    dockerfile.index("agentseek_api-0.3.1-py3-none-any.whl[embedded]"),
     dockerfile.index("COPY manifest.v1.json /opt/agentseek/manifest.v1.json"),
     dockerfile.index('"python", "-m", "pip", "check"'),
     dockerfile.index("importlib.metadata"),
@@ -268,7 +268,7 @@ expected = {
     "org.agentseek.environment-contract": "preloaded-v1",
     "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
     "org.agentseek.runtime-distribution": "agentseek-api",
-    "org.agentseek.runtime-version": "0.3.0",
+    "org.agentseek.runtime-version": "0.3.1",
 }
 raw = subprocess.run(
     ["docker", "image", "inspect", sys.argv[1]],
@@ -298,10 +298,10 @@ if raw != canonical:
 if document["runtime"] != {
     "contract": "preloaded-v1",
     "distribution": "agentseek-api",
-    "version": "0.3.0",
+    "version": "0.3.1",
 }:
     raise SystemExit("Runtime manifest identity failed")
-if importlib.metadata.version("agentseek-api") != "0.3.0":
+if importlib.metadata.version("agentseek-api") != "0.3.1":
     raise SystemExit("Runtime distribution version failed")
 PY
 
@@ -348,7 +348,7 @@ fi
 RUNTIME_RECORD="$(docker exec "$APP_CONTAINER" python -c 'import importlib.metadata,pathlib,agentseek_api; print(importlib.metadata.version("agentseek-api")); print(pathlib.Path(agentseek_api.__file__).resolve())')"
 RUNTIME_VERSION="$(printf '%s\n' "$RUNTIME_RECORD" | sed -n '1p')"
 RUNTIME_MODULE="$(printf '%s\n' "$RUNTIME_RECORD" | sed -n '2p')"
-if [[ "$RUNTIME_VERSION" != "0.3.0" ]]; then
+if [[ "$RUNTIME_VERSION" != "0.3.1" ]]; then
   echo "Running distribution version boundary failed." >&2
   exit 1
 fi

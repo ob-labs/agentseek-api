@@ -7,7 +7,7 @@ Each entry is keyed by ``graph_id`` and exposes three pieces:
 * ``prepare_input`` — converts the raw JSON payload the API receives into
   the shape the graph expects (messages, state dict, ...).
 * ``extract_output`` — turns the final graph result into a JSON-serialisable
-  dict that is stored as the run output and the OceanBase/SeekDB checkpoint.
+  dict that is stored as the run output and the OceanBase/seekdb checkpoint.
 
 Adding a new sample: drop a ``build_graph(checkpointer=None, store=None)``
 function under ``examples/graphs/<name>/graph.py`` and append an entry to

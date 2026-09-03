@@ -4,7 +4,7 @@ For each sample we create an Assistant bound to the matching ``graph_id``,
 submit a run with a shape the graph understands, wait for completion, and
 assert on the persisted output. Drives a live uvicorn server; the caller is
 responsible for pointing ``EXAMPLE_BASE_URL`` at a server that is already
-talking to a real SeekDB/OceanBase backend (or a compatible MySQL).
+talking to a real seekdb/OceanBase backend (or a compatible MySQL).
 """
 
 from __future__ import annotations

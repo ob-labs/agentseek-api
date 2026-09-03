@@ -613,7 +613,7 @@ _PRELOADED_V1_LABELS = {
     "org.agentseek.environment-contract": "preloaded-v1",
     "org.agentseek.runtime-manifest": PRELOADED_MANIFEST_PATH,
     "org.agentseek.runtime-distribution": "agentseek-api",
-    "org.agentseek.runtime-version": "0.3.0",
+    "org.agentseek.runtime-version": "0.3.1",
 }
 
 

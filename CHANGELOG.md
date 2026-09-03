@@ -4,6 +4,24 @@ Notable changes to AgentSeek API are documented in this file.
 
 ## Unreleased
 
+## 0.3.1 - 2026-09-03
+
+### Highlights
+
+- Upgraded both the base and embedded `langchain-oceanbase` dependency pins to
+  0.6.3, with the resolved embedded seekdb stack at `pylibseekdb` 1.4.0,
+  `pyobvector` 0.2.29, and `pyseekdb` 1.4.0.post1.
+- Synchronized package metadata, generated container runtime artifacts,
+  attestations, scripts, fixtures, and runtime labels at 0.3.1.
+- Restricted the supported Python range to `>=3.12,<3.14` and made generated
+  runtime verification reject unsupported Python versions.
+- Normalized current human-facing documentation and runtime prose to the
+  lowercase `seekdb` product spelling.
+
+### Upgrade notes
+
+- No API or schema migration is required for this release.
+
 ## 0.3.0 - 2026-08-20
 
 ### Highlights

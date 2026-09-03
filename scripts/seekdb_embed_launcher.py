@@ -1,4 +1,4 @@
-"""Foreground launcher for an embedded SeekDB instance.
+"""Foreground launcher for an embedded seekdb instance.
 
 Intended to be pointed at by `SEEKDB_EMBED_CMD` in `scripts/test-seekdb.sh`.
 Starts `pylibseekdb.open_with_service` on the requested port, ensures the
@@ -30,7 +30,7 @@ def _wait_for_port(host: str, port: int, timeout_seconds: float) -> None:
                 return
         except OSError:
             time.sleep(0.3)
-    raise SystemExit(f"embedded SeekDB did not open port {port} within {timeout_seconds:.0f}s")
+    raise SystemExit(f"embedded seekdb did not open port {port} within {timeout_seconds:.0f}s")
 
 
 def _load_pylibseekdb():
@@ -43,7 +43,7 @@ def _load_pylibseekdb():
         if exc.name != "pylibseekdb":
             raise
         raise SystemExit(
-            "Embedded SeekDB support is optional. Install it with "
+            "Embedded seekdb support is optional. Install it with "
             "'uv sync --dev --extra embedded' before running embedded mode."
         ) from exc
     return pylibseekdb

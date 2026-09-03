@@ -102,7 +102,7 @@ jobs:
           tests/integration/test_metadata_db_config.py
           -q
 
-      - name: Sync embedded SeekDB extra for serve smoke
+      - name: Sync embedded seekdb extra for serve smoke
         if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
         run: uv sync --dev --extra embedded
 
@@ -115,7 +115,7 @@ jobs:
         run: uv run python scripts/test_minimum_cli_dependencies.py
 
   embedded-seekdb-smoke:
-    name: Embedded SeekDB Smoke
+    name: Embedded seekdb Smoke
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

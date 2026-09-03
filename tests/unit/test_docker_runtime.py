@@ -205,8 +205,8 @@ def test_build_image_invocation_rejects_bundle_plan_mismatch(
         wheel = plan.project_root / "candidate.whl"
         with zipfile.ZipFile(wheel, "w") as archive:
             archive.writestr(
-                "agentseek_api-0.3.0.dist-info/METADATA",
-                "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.0\n",
+                "agentseek_api-0.3.1.dist-info/METADATA",
+                "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.1\n",
             )
         artifact = candidate_runtime_artifact(
             wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()
@@ -1247,7 +1247,7 @@ def _compatible_image_labels() -> dict[str, str]:
         "org.agentseek.environment-contract": "preloaded-v1",
         "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
         "org.agentseek.runtime-distribution": "agentseek-api",
-        "org.agentseek.runtime-version": "0.3.0",
+        "org.agentseek.runtime-version": "0.3.1",
     }
 
 

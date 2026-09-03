@@ -353,7 +353,7 @@ class _ProcessCapture:
                     "org.agentseek.environment-contract": "preloaded-v1",
                     "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
                     "org.agentseek.runtime-distribution": "agentseek-api",
-                    "org.agentseek.runtime-version": "0.3.0",
+                    "org.agentseek.runtime-version": "0.3.1",
                 },
                 [],
                 [],
@@ -444,7 +444,7 @@ class BoundaryRunner(ProcessTransport):
                 "org.agentseek.environment-contract": "preloaded-v1",
                 "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
                 "org.agentseek.runtime-distribution": "agentseek-api",
-                "org.agentseek.runtime-version": "0.3.0",
+                "org.agentseek.runtime-version": "0.3.1",
             }
             if self.failure_case == "missing_contract_label":
                 labels.pop("org.agentseek.environment-contract")
@@ -2183,7 +2183,7 @@ def test_release_versions_are_consistent() -> None:
         and package.get("source") == {"editable": "."}
     )
 
-    assert __version__ == "0.3.0"
+    assert __version__ == "0.3.1"
     assert project_config["version"] == __version__
     assert root_package["version"] == __version__
 
@@ -2226,7 +2226,7 @@ def test_internal_candidate_runtime_artifact_is_forwarded_unchanged(
     artifact = RuntimeArtifactV1(
         distribution="agentseek-api",
         extra="embedded",
-        version="0.3.0",
+        version="0.3.1",
         source=RuntimeArtifactSource.CANDIDATE_WHEEL,
         candidate_wheel=wheel,
         candidate_sha256="0" * 64,
@@ -2679,7 +2679,7 @@ def test_build_command_plans_docker_build_from_generated_dockerfile(
         "app/chat/graph.py",
     } <= members
     assert "COPY app /deps/agent" in generated
-    assert "agentseek-api[embedded]==0.3.0" in generated
+    assert "agentseek-api[embedded]==0.3.1" in generated
     assert "org.agentseek.environment-contract=preloaded-v1" in generated
     assert (
         'CMD ["python", "-I", "-m", "agentseek_api.cli", "serve", "--environment-mode", '
@@ -2775,11 +2775,11 @@ def test_candidate_runtime_injection_changes_copied_build_artifact(
     from agentseek_api.container_build import candidate_runtime_artifact
 
     _write_basic_langgraph_config(tmp_path)
-    wheel = tmp_path / "agentseek_api-0.3.0-py3-none-any.whl"
+    wheel = tmp_path / "agentseek_api-0.3.1-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
-            "agentseek_api-0.3.0.dist-info/METADATA",
-            "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.0\n",
+            "agentseek_api-0.3.1.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.1\n",
         )
     artifact = candidate_runtime_artifact(
         wheel, hashlib.sha256(wheel.read_bytes()).hexdigest()
@@ -3031,7 +3031,7 @@ def test_up_custom_image_inspects_contract_and_runs_explicit_preloaded_mode(
                 "org.agentseek.environment-contract": "preloaded-v1",
                 "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
                 "org.agentseek.runtime-distribution": "agentseek-api",
-                "org.agentseek.runtime-version": "0.3.0",
+                "org.agentseek.runtime-version": "0.3.1",
             },
             entrypoint,
             ["hostile-default"],
@@ -3124,7 +3124,7 @@ def test_custom_python_entrypoint_uses_safe_carrier_from_hostile_cwd(
                 "org.agentseek.environment-contract": "preloaded-v1",
                 "org.agentseek.runtime-manifest": "/opt/agentseek/manifest.v1.json",
                 "org.agentseek.runtime-distribution": "agentseek-api",
-                "org.agentseek.runtime-version": "0.3.0",
+                "org.agentseek.runtime-version": "0.3.1",
             },
             ["python", "-m", "agentseek_api.cli"],
             ["hostile-default"],
@@ -3176,7 +3176,7 @@ def test_custom_python_entrypoint_uses_safe_carrier_from_hostile_cwd(
         "2024",
     )
     assert completed.returncode == 0
-    assert completed.stdout == "agentseek-api 0.3.0\n"
+    assert completed.stdout == "agentseek-api 0.3.1\n"
     assert marker.exists() is False
 
 

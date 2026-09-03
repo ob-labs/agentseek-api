@@ -511,7 +511,7 @@ def _build_candidate(project: Path):
         cwd=_ROOT,
         environment=environment,
     )
-    wheels = tuple(output.glob("agentseek_api-0.3.0-*.whl"))
+    wheels = tuple(output.glob("agentseek_api-0.3.1-*.whl"))
     if result.returncode != 0 or len(wheels) != 1:
         raise BoundaryFailure("candidate runtime wheel build failed")
     wheel = wheels[0]

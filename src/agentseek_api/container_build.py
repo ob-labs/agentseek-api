@@ -37,7 +37,7 @@ from agentseek_api.secure_temp import (
 JsonScalar: TypeAlias = None | bool | int | float | str
 JsonValue: TypeAlias = JsonScalar | tuple["JsonValue", ...] | Mapping[str, "JsonValue"]
 
-_RUNTIME_VERSION = "0.3.0"
+_RUNTIME_VERSION = "0.3.1"
 _CANDIDATE_RUNTIME_FILENAME = f"agentseek_api-{_RUNTIME_VERSION}-py3-none-any.whl"
 _CONTAINER_ROOT = PurePosixPath("/deps/agent")
 _VCS_METADATA_NAMES = frozenset({".git", ".hg", ".svn", ".bzr"})
@@ -227,7 +227,7 @@ class RuntimeArtifactSource(StrEnum):
 class RuntimeArtifactV1:
     distribution: Literal["agentseek-api"]
     extra: Literal["embedded"]
-    version: Literal["0.3.0"]
+    version: Literal["0.3.1"]
     source: RuntimeArtifactSource
     candidate_wheel: Path | None = field(default=None, repr=False)
     candidate_sha256: str | None = None
@@ -265,13 +265,13 @@ class RuntimeArtifactV1:
 
     @property
     def requirement(self) -> str:
-        return "agentseek-api[embedded]==0.3.0"
+        return "agentseek-api[embedded]==0.3.1"
 
 
 PUBLISHED_RUNTIME_ARTIFACT = RuntimeArtifactV1(
     distribution="agentseek-api",
     extra="embedded",
-    version="0.3.0",
+    version="0.3.1",
     source=RuntimeArtifactSource.PUBLISHED_INDEX,
 )
 
@@ -279,7 +279,7 @@ PUBLISHED_RUNTIME_ARTIFACT = RuntimeArtifactV1(
 @dataclass(frozen=True)
 class RuntimeManifestV1:
     distribution: Literal["agentseek-api"]
-    version: Literal["0.3.0"]
+    version: Literal["0.3.1"]
     contract: Literal["preloaded-v1"]
 
 
@@ -295,7 +295,7 @@ class ContainerRuntimeManifestV1:
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or self.runtime != RuntimeManifestV1(
-            distribution="agentseek-api", version="0.3.0", contract="preloaded-v1"
+            distribution="agentseek-api", version="0.3.1", contract="preloaded-v1"
         ):
             raise ContainerBuildError("The runtime manifest identity is incompatible.")
         object.__setattr__(self, "graphs", MappingProxyType(dict(self.graphs)))
@@ -1415,7 +1415,7 @@ def _parse_container_runtime_manifest_v1_object(
     return ContainerRuntimeManifestV1(
         schema_version=1,
         runtime=RuntimeManifestV1(
-            distribution="agentseek-api", version="0.3.0", contract="preloaded-v1"
+            distribution="agentseek-api", version="0.3.1", contract="preloaded-v1"
         ),
         graphs=graphs,
         dependencies=tuple(dependencies),
@@ -1570,7 +1570,7 @@ def _check_runtime_requirement(text: str, *, location: str) -> None:
         Version(_RUNTIME_VERSION), prereleases=True
     ):
         raise ContainerBuildError(
-            f"{location} excludes agentseek-api 0.3.0; migrate the project runtime pin to 0.3.0."
+            f"{location} excludes agentseek-api 0.3.1; migrate the project runtime pin to 0.3.1."
         )
 
 
@@ -1687,7 +1687,7 @@ def candidate_runtime_artifact(
     return RuntimeArtifactV1(
         distribution="agentseek-api",
         extra="embedded",
-        version="0.3.0",
+        version="0.3.1",
         source=RuntimeArtifactSource.CANDIDATE_WHEEL,
         candidate_wheel=wheel,
         candidate_sha256=expected_sha256,
@@ -2048,7 +2048,7 @@ def plan_container_image(
     manifest = ContainerRuntimeManifestV1(
         schema_version=1,
         runtime=RuntimeManifestV1(
-            distribution="agentseek-api", version="0.3.0", contract="preloaded-v1"
+            distribution="agentseek-api", version="0.3.1", contract="preloaded-v1"
         ),
         graphs=graphs,
         dependencies=tuple(runtime_roots),
@@ -2274,8 +2274,8 @@ def render_build_dockerfile(plan: ContainerBuildPlan) -> bytes:
         "if key in {'purelib','platlib'}};"
         "sys.exit('runtime module is outside site packages') if "
         "not roots or not any(module.is_relative_to(root) for root in roots) else None;"
-        "sys.exit('Python 3.12 or newer is required') if "
-        "sys.version_info[:2]<(3,12) else None"
+        "sys.exit('Python 3.12 through 3.13 is required') if "
+        "not (3,12)<=sys.version_info[:2]<(3,14) else None"
     )
     lines.append(_docker_exec_run(("python", "-c", runtime_check)))
     lines.extend(
@@ -2655,7 +2655,7 @@ def materialize_build_bundle(
         manifest = context / "manifest.v1.json"
         write_output(manifest, plan.manifest.to_json_bytes())
         constraints = context / "runtime-constraints.txt"
-        write_output(constraints, b"agentseek-api==0.3.0\n")
+        write_output(constraints, b"agentseek-api==0.3.1\n")
         dockerfile = context / "Dockerfile"
         write_output(dockerfile, bytes(dockerfile_bytes))
         inventory = tuple(
