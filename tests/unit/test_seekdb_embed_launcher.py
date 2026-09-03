@@ -46,9 +46,21 @@ def test_embed_launcher_reraises_nested_module_not_found(
         seekdb_embed_launcher._load_pylibseekdb()
 
 
-def test_embed_launcher_starts_service_and_bootstraps_database(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_embed_launcher_starts_bundled_server_and_bootstraps_database(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     monkeypatch.delenv("OCEANBASE_DB_NAME", raising=False)
     observed: dict[str, object] = {}
+
+    package_dir = tmp_path / "pylibseekdb"
+    package_dir.mkdir()
+    package_init = package_dir / "__init__.py"
+    package_init.touch()
+    server_binary = package_dir / (
+        "seekdb.exe" if seekdb_embed_launcher.os.name == "nt" else "seekdb"
+    )
+    server_binary.touch()
 
     class FakeCursor:
         def __enter__(self) -> "FakeCursor":
@@ -67,14 +79,23 @@ def test_embed_launcher_starts_service_and_bootstraps_database(monkeypatch: pyte
         def close(self) -> None:
             observed["closed"] = True
 
-    class FakeThread:
-        def __init__(self, *, target, args, daemon: bool) -> None:
-            observed["thread_target"] = target
-            observed["thread_args"] = args
-            observed["thread_daemon"] = daemon
+    class FakeProcess:
+        def poll(self) -> None:
+            return None
 
-        def start(self) -> None:
-            observed["thread_started"] = True
+        def terminate(self) -> None:
+            observed["terminated"] = True
+
+        def wait(self, *, timeout: float) -> int:
+            observed["wait_timeout"] = timeout
+            return 0
+
+        def kill(self) -> None:
+            observed["killed"] = True
+
+    def fake_popen(command: list[str]) -> FakeProcess:
+        observed["command"] = command
+        return FakeProcess()
 
     class FakeEvent:
         def __init__(self) -> None:
@@ -89,7 +110,7 @@ def test_embed_launcher_starts_service_and_bootstraps_database(monkeypatch: pyte
                 return False
             return True
 
-    fake_pylibseekdb = SimpleNamespace(open_with_service=lambda data_dir, port: None)
+    fake_pylibseekdb = SimpleNamespace(__file__=str(package_init))
 
     monkeypatch.setattr(seekdb_embed_launcher, "pylibseekdb", None)
     monkeypatch.setattr(
@@ -97,7 +118,7 @@ def test_embed_launcher_starts_service_and_bootstraps_database(monkeypatch: pyte
         "import_module",
         lambda name: fake_pylibseekdb if name == "pylibseekdb" else __import__(name),
     )
-    monkeypatch.setattr(seekdb_embed_launcher.threading, "Thread", FakeThread)
+    monkeypatch.setattr(seekdb_embed_launcher.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(seekdb_embed_launcher.threading, "Event", FakeEvent)
     monkeypatch.setattr(seekdb_embed_launcher, "_wait_for_port", lambda *args, **kwargs: None)
     monkeypatch.setattr(seekdb_embed_launcher.pymysql, "connect", lambda **kwargs: FakeConnection())
@@ -106,8 +127,15 @@ def test_embed_launcher_starts_service_and_bootstraps_database(monkeypatch: pyte
     monkeypatch.setattr(seekdb_embed_launcher.time, "sleep", lambda _seconds: None)
 
     assert seekdb_embed_launcher.main() == 0
-    assert observed["thread_started"] is True
-    assert observed["thread_daemon"] is True
-    assert observed["thread_args"] == ("/tmp/embed-dir", 2881)
+    assert observed["command"] == [
+        str(server_binary),
+        "--nodaemon",
+        "--port",
+        "2881",
+        "--base-dir",
+        "/tmp/embed-dir",
+    ]
     assert "CREATE DATABASE IF NOT EXISTS `seekdb`" == observed["query"]
     assert observed["closed"] is True
+    assert observed["terminated"] is True
+    assert observed["wait_timeout"] == 20.0
