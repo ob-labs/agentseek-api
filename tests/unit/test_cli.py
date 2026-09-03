@@ -1971,6 +1971,7 @@ def test_resolve_dev_urls_use_localhost_display_and_loopback_base_url() -> None:
     urls = _resolve_dev_urls(host="0.0.0.0", port=2024, studio_url=None)
 
     assert urls.api_url == "http://localhost:2024"
+    assert urls.check_url == "http://127.0.0.1:2024"
     assert urls.docs_url == "http://localhost:2024/docs"
     assert (
         urls.studio_url
@@ -1986,11 +1987,107 @@ def test_resolve_dev_urls_preserve_explicit_host_and_override_studio_origin() ->
     )
 
     assert urls.api_url == "http://devbox.local:3030"
+    assert urls.check_url == "http://devbox.local:3030"
     assert urls.docs_url == "http://devbox.local:3030/docs"
     assert (
         urls.studio_url
         == "https://smith.example.com/studio/?baseUrl=http://devbox.local:3030"
     )
+
+
+@pytest.mark.parametrize(
+    ("host", "expected_check_url"),
+    [
+        ("localhost", "http://127.0.0.1:2024"),
+        ("::", "http://[::1]:2024"),
+        ("[::]", "http://[::1]:2024"),
+    ],
+)
+def test_resolve_dev_urls_uses_loopback_address_for_readiness(
+    host: str,
+    expected_check_url: str,
+) -> None:
+    from agentseek_api.cli import _resolve_dev_urls
+
+    urls = _resolve_dev_urls(host=host, port=2024, studio_url=None)
+
+    assert urls.check_url == expected_check_url
+
+
+def test_wait_for_dev_server_ready_uses_extended_request_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    calls: list[tuple[str, float]] = []
+
+    def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
+        calls.append((url, timeout))
+        return FakeResponse()
+
+    monkeypatch.setattr(cli_module.urllib_request, "urlopen", fake_urlopen)
+    process = Mock()
+    process.poll.return_value = None
+
+    cli_module._wait_for_dev_server_ready(
+        "http://127.0.0.1:2024",
+        process=process,
+        sleep=lambda _seconds: None,
+    )
+
+    assert calls == [("http://127.0.0.1:2024/ok", 5.0)]
+
+
+def test_wait_for_dev_server_ready_retries_after_transient_probe_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeResponse:
+        status = 200
+
+        def __enter__(self) -> "FakeResponse":
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            pass
+
+    calls: list[tuple[str, float]] = []
+    responses = [
+        cli_module.urllib_error.URLError("connection refused"),
+        FakeResponse(),
+    ]
+
+    def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
+        calls.append((url, timeout))
+        response = responses.pop(0)
+        if isinstance(response, Exception):
+            raise response
+        return response
+
+    monkeypatch.setattr(cli_module.urllib_request, "urlopen", fake_urlopen)
+    process = Mock()
+    process.poll.return_value = None
+
+    cli_module._wait_for_dev_server_ready(
+        "http://127.0.0.1:2024",
+        process=process,
+        sleep=lambda _seconds: None,
+    )
+
+    assert calls == [
+        ("http://127.0.0.1:2024/ok", 5.0),
+        ("http://127.0.0.1:2024/health", 5.0),
+    ]
 
 
 def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) -> None:
@@ -2043,6 +2140,131 @@ def test_run_managed_dev_server_prints_banner_and_opens_browser(tmp_path: Path) 
     assert opened == [
         "https://smith.langchain.com/studio/?baseUrl=http://127.0.0.1:2024"
     ]
+
+
+def test_run_managed_dev_server_uses_check_url_for_readiness(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.returncode = 0
+            return self.returncode
+
+        def terminate(self) -> None:
+            raise AssertionError("readiness should not terminate the process")
+
+    checked: list[str] = []
+
+    def fake_wait(url: str, *, process, sleep) -> None:
+        checked.append(url)
+
+    cli_module._run_managed_dev_server(
+        command=["uvicorn", "agentseek_api.main:app"],
+        env={},
+        cwd=tmp_path,
+        urls=cli_module._resolve_dev_urls(
+            host="127.0.0.1", port=2024, studio_url=None
+        ),
+        stdout=io.StringIO(),
+        process_factory=lambda command, *, env, cwd: FakeProcess(),
+        wait_for_ready=fake_wait,
+        open_browser=False,
+        sleep=lambda _seconds: None,
+    )
+
+    assert checked == ["http://127.0.0.1:2024"]
+
+
+def test_run_managed_dev_server_terminates_after_readiness_deadline(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.terminate_calls = 0
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def wait(self) -> int:
+            self.returncode = 0
+            return self.returncode
+
+        def terminate(self) -> None:
+            self.terminate_calls += 1
+            self.returncode = -15
+
+    process = FakeProcess()
+    stdout = io.StringIO()
+
+    def fake_wait(*_args, **_kwargs) -> None:
+        raise cli_module.DevServerReadinessTimeout("readiness probe timed out")
+
+    with pytest.raises(cli_module.DevServerReadinessTimeout):
+        cli_module._run_managed_dev_server(
+            command=["uvicorn", "agentseek_api.main:app"],
+            env={},
+            cwd=tmp_path,
+            urls=cli_module._resolve_dev_urls(
+                host="127.0.0.1", port=2024, studio_url=None
+            ),
+            stdout=stdout,
+            process_factory=lambda command, *, env, cwd: process,
+            wait_for_ready=fake_wait,
+            open_browser=False,
+            sleep=lambda _seconds: None,
+        )
+
+    assert process.terminate_calls == 1
+
+
+def test_run_managed_dev_server_returns_exit_code_for_early_process_exit(
+    tmp_path: Path,
+) -> None:
+    from agentseek_api import cli as cli_module
+
+    class FakeProcess:
+        returncode = 17
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self) -> int:
+            return self.returncode
+
+        def terminate(self) -> None:
+            raise AssertionError("an exited process should not be terminated")
+
+    process = FakeProcess()
+
+    def fake_wait(*_args, **_kwargs) -> None:
+        raise cli_module.CliError("Development server exited before becoming ready")
+
+    exit_code = cli_module._run_managed_dev_server(
+        command=["uvicorn", "agentseek_api.main:app"],
+        env={},
+        cwd=tmp_path,
+        urls=cli_module._resolve_dev_urls(
+            host="127.0.0.1", port=2024, studio_url=None
+        ),
+        stdout=io.StringIO(),
+        process_factory=lambda command, *, env, cwd: process,
+        wait_for_ready=fake_wait,
+        open_browser=False,
+        sleep=lambda _seconds: None,
+    )
+
+    assert exit_code == 17
 
 
 def test_managed_dev_ascii_fallback_normalizes_non_ascii_urls_before_write(
