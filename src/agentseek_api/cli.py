@@ -11,8 +11,10 @@ import sys
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from urllib.parse import urlsplit
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
@@ -131,6 +133,13 @@ class CliError(RuntimeError):
     pass
 
 
+class DevServerReadinessTimeout(CliError):
+    """The dev process is alive but did not answer the readiness probe in time."""
+
+
+DEV_SERVER_READY_REQUEST_TIMEOUT_SECONDS = 5.0
+
+
 @dataclass
 class CliConfig:
     graphs: dict[str, object]
@@ -150,6 +159,7 @@ class CliConfig:
 @dataclass(frozen=True)
 class DevServerUrls:
     api_url: str
+    check_url: str
     docs_url: str
     studio_url: str
 
@@ -812,14 +822,25 @@ def _is_loopbackish_host(host: str) -> bool:
     return host in {"127.0.0.1", "localhost", "0.0.0.0", "::", "[::]"}
 
 
+def _resolve_dev_check_host(host: str) -> str:
+    if host in {"127.0.0.1", "localhost", "0.0.0.0"}:
+        return "127.0.0.1"
+    if host in {"::", "[::]"}:
+        return "::1"
+    return host
+
+
 def _resolve_dev_urls(*, host: str, port: int, studio_url: str | None) -> DevServerUrls:
     display_host = "localhost" if _is_loopbackish_host(host) else host
     studio_host = "127.0.0.1" if _is_loopbackish_host(host) else host
+    check_host = _resolve_dev_check_host(host)
     studio_origin = (studio_url or "https://smith.langchain.com").rstrip("/")
     api_url = f"http://{_format_http_host(display_host)}:{port}"
+    check_url = f"http://{_format_http_host(check_host)}:{port}"
     studio_base_url = f"http://{_format_http_host(studio_host)}:{port}"
     return DevServerUrls(
         api_url=api_url,
+        check_url=check_url,
         docs_url=f"{api_url}/docs",
         studio_url=f"{studio_origin}/studio/?baseUrl={studio_base_url}",
     )
@@ -850,6 +871,15 @@ def _wait_for_dev_server_ready(
     timeout_seconds: float = 30.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
+    host = urlsplit(api_url).hostname
+    try:
+        loopback = ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    urlopen = urllib_request.urlopen
+    if loopback:
+        # Readiness must reach the local child even when NO_PROXY omits its IP.
+        urlopen = urllib_request.build_opener(urllib_request.ProxyHandler({})).open
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
     ready_urls = [f"{api_url}/ok", f"{api_url}/health"]
@@ -860,13 +890,17 @@ def _wait_for_dev_server_ready(
             )
         for ready_url in ready_urls:
             try:
-                with urllib_request.urlopen(ready_url, timeout=2.0) as response:
+                with urlopen(
+                    ready_url, timeout=DEV_SERVER_READY_REQUEST_TIMEOUT_SECONDS
+                ) as response:
                     if 200 <= response.status < 300:
                         return
             except (urllib_error.URLError, TimeoutError, OSError) as exc:
                 last_error = exc
         sleep(0.2)
-    raise CliError(f"Timed out waiting for '{api_url}' to become ready: {last_error}")
+    raise DevServerReadinessTimeout(
+        f"Timed out waiting for '{api_url}' to become ready: {last_error}"
+    )
 
 
 def _default_process_factory(command: list[str], *, env: dict[str, str], cwd: str):
@@ -906,7 +940,7 @@ def _run_managed_dev_server(
             unicode_text=_render_dev_ready_banner(urls),
             ascii_text=_render_ascii_dev_ready_banner(urls),
         )
-        wait_for_ready(urls.api_url, process=process, sleep=sleep)
+        wait_for_ready(urls.check_url, process=process, sleep=sleep)
         if open_browser:
             if browser_opener is None:
                 import webbrowser
