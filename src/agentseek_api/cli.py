@@ -11,8 +11,10 @@ import sys
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass, field
+from ipaddress import ip_address
 from urllib import error as urllib_error
 from urllib import request as urllib_request
+from urllib.parse import urlsplit
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TextIO
@@ -869,6 +871,15 @@ def _wait_for_dev_server_ready(
     timeout_seconds: float = 30.0,
     sleep: Callable[[float], None] = time.sleep,
 ) -> None:
+    host = urlsplit(api_url).hostname
+    try:
+        loopback = ip_address(host).is_loopback
+    except ValueError:
+        loopback = host == "localhost"
+    urlopen = urllib_request.urlopen
+    if loopback:
+        # Readiness must reach the local child even when NO_PROXY omits its IP.
+        urlopen = urllib_request.build_opener(urllib_request.ProxyHandler({})).open
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
     ready_urls = [f"{api_url}/ok", f"{api_url}/health"]
@@ -879,7 +890,7 @@ def _wait_for_dev_server_ready(
             )
         for ready_url in ready_urls:
             try:
-                with urllib_request.urlopen(
+                with urlopen(
                     ready_url, timeout=DEV_SERVER_READY_REQUEST_TIMEOUT_SECONDS
                 ) as response:
                     if 200 <= response.status < 300:

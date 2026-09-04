@@ -2014,6 +2014,55 @@ def test_resolve_dev_urls_uses_loopback_address_for_readiness(
     assert urls.check_url == expected_check_url
 
 
+@pytest.mark.parametrize(
+    ("host", "expected_connection"),
+    [
+        ("localhost", "127.0.0.1:2024"),
+        ("127.0.0.1", "127.0.0.1:2024"),
+        ("127.0.0.2", "127.0.0.2:2024"),
+        ("::", "[::1]:2024"),
+        ("::1", "[::1]:2024"),
+        ("devbox.local", "proxy.example:3128"),
+        ("192.0.2.10", "proxy.example:3128"),
+    ],
+)
+def test_dev_readiness_bypasses_proxy_only_for_loopback(
+    monkeypatch: pytest.MonkeyPatch, host: str, expected_connection: str
+) -> None:
+    from urllib.response import addinfourl
+
+    from agentseek_api import cli as cli_module
+
+    for name in tuple(os.environ):
+        if name.lower().endswith("_proxy"):
+            monkeypatch.delenv(name)
+    monkeypatch.setenv("http_proxy", "http://proxy.example:3128")
+    monkeypatch.setenv("no_proxy", "localhost")
+    monkeypatch.setattr(cli_module.urllib_request, "_opener", None)
+    connections: list[str] = []
+
+    def fake_http_open(_handler, request):
+        # Keep urllib's proxy routing real; replace only the HTTP transport.
+        connections.append(request.host)
+        response = addinfourl(io.BytesIO(b"{}"), {}, request.full_url, code=200)
+        response.msg = "OK"
+        return response
+
+    monkeypatch.setattr(
+        cli_module.urllib_request.HTTPHandler, "http_open", fake_http_open
+    )
+    process = Mock()
+    process.poll.return_value = None
+    urls = cli_module._resolve_dev_urls(host=host, port=2024, studio_url=None)
+
+    cli_module._wait_for_dev_server_ready(urls.check_url, process=process)
+
+    assert connections == [expected_connection]
+    with cli_module.urllib_request.urlopen("http://remote.example/ok"):
+        pass
+    assert connections[-1] == "proxy.example:3128"
+
+
 def test_wait_for_dev_server_ready_uses_extended_request_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2030,11 +2079,11 @@ def test_wait_for_dev_server_ready_uses_extended_request_timeout(
 
     calls: list[tuple[str, float]] = []
 
-    def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
+    def fake_urlopen(_opener, url: str, *, timeout: float) -> FakeResponse:
         calls.append((url, timeout))
         return FakeResponse()
 
-    monkeypatch.setattr(cli_module.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(cli_module.urllib_request.OpenerDirector, "open", fake_urlopen)
     process = Mock()
     process.poll.return_value = None
 
@@ -2067,14 +2116,14 @@ def test_wait_for_dev_server_ready_retries_after_transient_probe_failure(
         FakeResponse(),
     ]
 
-    def fake_urlopen(url: str, *, timeout: float) -> FakeResponse:
+    def fake_urlopen(_opener, url: str, *, timeout: float) -> FakeResponse:
         calls.append((url, timeout))
         response = responses.pop(0)
         if isinstance(response, Exception):
             raise response
         return response
 
-    monkeypatch.setattr(cli_module.urllib_request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(cli_module.urllib_request.OpenerDirector, "open", fake_urlopen)
     process = Mock()
     process.poll.return_value = None
 
