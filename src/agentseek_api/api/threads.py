@@ -726,13 +726,23 @@ async def join_thread_stream(
         current_seq = after_seq
         yield ": stream-open\n\n"
 
-        for event in await load_thread_stream_events(
+        events = await load_thread_stream_events(
             thread_id,
             channels=payload.channels,
             namespaces=payload.namespaces,
             depth=payload.depth,
             after_seq=after_seq,
-        ):
+        )
+        if not _uses_redis_executor():
+            events = thread_protocol_broker.replay_records(
+                thread_id,
+                persisted=events,
+                channels=payload.channels,
+                namespaces=payload.namespaces,
+                depth=payload.depth,
+                after_seq=after_seq,
+            )
+        for event in events:
             seq = int(event.get("seq", 0))
             current_seq = max(current_seq, seq)
             event_name = str(event.get("method", "event"))
@@ -775,5 +785,4 @@ async def join_thread_stream(
             yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event)}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")
-
 

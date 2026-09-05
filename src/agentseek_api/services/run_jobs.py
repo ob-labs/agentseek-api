@@ -16,10 +16,12 @@ from agentseek_api.services.stream_persistence import (
     add_thread_stream_event_to_session,
     add_run_stream_event_to_session,
     append_redis_run_stream_event,
+    buffered_stream_persistence,
     next_run_stream_seq,
     next_thread_stream_seq,
     persist_run_stream_event,
     persist_thread_stream_event,
+    persist_thread_stream_events,
 )
 from agentseek_api.services.thread_checkpoint_store import checkpoint_to_payload, get_latest_checkpoint
 from agentseek_api.services.thread_protocol import apublish_lifecycle_event, publish_lifecycle_event, thread_protocol_broker
@@ -143,8 +145,7 @@ async def _publish_run_event(
 async def _persist_thread_snapshot(thread_id: str) -> None:
     if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
         return
-    for event in thread_protocol_broker.snapshot_records(thread_id):
-        await persist_thread_stream_event(thread_id, event)
+    await persist_thread_stream_events(thread_id, thread_protocol_broker.snapshot_records(thread_id))
 
 
 async def _publish_terminal_run_event(session: AsyncSession, run_id: str, *, status: str) -> None:
@@ -208,7 +209,8 @@ async def execute_run_job(job: RunExecutionJob) -> None:
                 }
                 if job.kwargs:
                     execute_kwargs["kwargs"] = job.kwargs
-                result = await execute_run(**execute_kwargs)
+                async with buffered_stream_persistence(run_id=job.run_id, thread_id=job.thread_id):
+                    result = await execute_run(**execute_kwargs)
                 await _persist_thread_snapshot(job.thread_id)
                 await execution_session.refresh(db_run)
                 if not _is_cancelled_run(db_run):

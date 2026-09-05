@@ -135,6 +135,36 @@ jobs:
       - name: Embedded seekdb serve smoke (SEEKDB_EMBED=true)
         run: uv run python scripts/test_cli_embed_serve_smoke.py
 
+      - name: Embedded seekdb stream persistence performance and replay
+        env:
+          PYTHONPATH: src
+        run: |
+          # Shared runners get timing headroom; SQL budgets catch both live
+          # writes and final history rechecks independently of host speed.
+          uv run python scripts/benchmark_stream_persistence.py \
+            --backend embedded --repeat 3 --messages 38 \
+            --max-api-seconds 3 --max-finalization-seconds 1 \
+            --max-metadata-commits 16 --max-snapshot-selects 1 \
+            --output /tmp/embedded-fresh.json
+          uv run python scripts/benchmark_stream_persistence.py \
+            --backend embedded --repeat 3 --messages 0 --history 38 \
+            --max-api-seconds 3 --max-finalization-seconds 1 \
+            --max-metadata-commits 16 --max-snapshot-selects 1 \
+            --output /tmp/embedded-history.json
+          uv run python scripts/benchmark_stream_persistence.py \
+            --backend embedded --repeat 3 --messages 128 \
+            --max-api-seconds 3 --max-finalization-seconds 1 \
+            --max-metadata-commits 24 --max-snapshot-selects 2 \
+            --output /tmp/embedded-larger.json
+
+      - name: Upload embedded seekdb performance measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-seekdb-performance
+          path: /tmp/embedded-*.json
+          if-no-files-found: ignore
+
   cli-docker-runtime:
     name: CLI Docker Runtime (Compose ${{ matrix.compose-version }})
     runs-on: ubuntu-latest

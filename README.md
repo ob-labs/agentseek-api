@@ -716,6 +716,23 @@ parent api build --config ./langgraph.json -t my-api:dev
 
 ### Durable execution
 
+- Inline mode publishes live stream events in memory immediately and batches
+  their SQL persistence per run. Batches flush at 128 events or 1 MiB of
+  serialized payloads, periodically after about 100 ms, and when execution
+  ends. Slow writes apply backpressure instead of growing the buffer without
+  bounds; an oversized event is written alone.
+- Pending inline events are drained before terminal events are published,
+  including when graph execution fails or is cancelled. SQL stream persistence
+  remains best effort on database failures. An abrupt process failure can lose
+  the unflushed event tail; completed-run checkpoints are saved separately.
+- To compare persistence overhead locally, run
+  [`scripts/benchmark_stream_persistence.py`](scripts/benchmark_stream_persistence.py).
+  It exercises the real API with temporary SQLite storage or native embedded
+  seekdb (`--backend embedded`), checks output/checkpoints/replay, and makes no
+  model-provider calls. SQL latency injection is optional. Use `--repeat` for
+  median/maximum timings; embedded CI also enforces SQL operation budgets.
+  See the [embedded performance report](docs/performance/embedded-seekdb-performance.md)
+  for measured latency, backend details, and reproduction commands.
 - Redis mode stores run stream events and protocol stream events in bounded
   Redis Streams, so replay does not depend on API-process memory and streaming
   writes do not put the metadata database on the hot path.
