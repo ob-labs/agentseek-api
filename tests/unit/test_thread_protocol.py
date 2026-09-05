@@ -5,6 +5,40 @@ from agentseek_api.services import thread_protocol as protocol
 from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
 
+@pytest.mark.parametrize(
+    ("channels", "namespaces", "depth", "after_seq", "expected"),
+    [
+        (["values", "messages", "input"], None, None, 0, [1, 2, 3, 4, 5, 6]),
+        (["messages"], [["root"]], 1, 1, [2]),
+        (["values"], None, 0, 1, [6]),
+        (["input"], [["root"]], 0, 0, [5]),
+    ],
+)
+def test_replay_merges_retained_and_persisted_events_with_filters(
+    channels, namespaces, depth, after_seq, expected
+):
+    broker = ThreadProtocolEventBroker(max_events_per_thread=5)
+    events = []
+    for method, namespace in [
+        ("values", []),
+        ("messages/partial", ["root", "child"]),
+        ("messages/partial", ["other"]),
+        ("messages/partial", ["root", "child", "grandchild"]),
+        ("input.requested", ["root"]),
+        ("values", "invalid"),
+    ]:
+        events.append(broker.publish(
+            "thread-1", {"method": method, "params": {"namespace": namespace}},
+            persist=False,
+        ))
+    # SQL has an evicted event and overlaps memory at seq 6; seqs 2-5 are buffered.
+    replay = broker.replay_records(
+        "thread-1", persisted=[events[5], events[0]], channels=channels,
+        namespaces=namespaces, depth=depth, after_seq=after_seq,
+    )
+    assert [event["seq"] for event in replay] == expected
+
+
 def test_thread_protocol_broker_prunes_old_events_per_thread() -> None:
     broker = ThreadProtocolEventBroker(max_events_per_thread=2)
 

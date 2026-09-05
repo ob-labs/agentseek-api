@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from typing import Any
 
 from redis.asyncio import Redis, from_url
@@ -12,6 +14,7 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import RunStreamEvent, ThreadStreamEvent
 from agentseek_api.settings import settings
 from agentseek_api.services.thread_protocol import _namespace_matches, protocol_channel_for_method
+from agentseek_api.services.stream_event_buffer import StreamEvent, StreamEventBuffer
 
 _RUN_STREAM_SEQ_KEY_PREFIX = "agentseek:runs:stream-seq"
 _THREAD_STREAM_SEQ_KEY_PREFIX = "agentseek:threads:stream-seq"
@@ -21,6 +24,7 @@ _THREAD_STREAM_ENVELOPE_FIELDS = frozenset({"type", "event_id", "seq"})
 _THREAD_SNAPSHOT_BATCH_SIZE = 500
 _redis_client: Redis | None = None
 logger = logging.getLogger(__name__)
+_stream_buffer: ContextVar[StreamEventBuffer | None] = ContextVar("stream_persistence_buffer", default=None)
 
 _APPEND_REDIS_STREAM_EVENT_SCRIPT = """
 local seq = redis.call('INCR', KEYS[1])
@@ -172,6 +176,12 @@ async def persist_run_stream_event(run_id: str, *, seq: int, payload: dict[str, 
         return
     if not _metadata_db_ready():
         return
+    if await _buffer_stream_event(StreamEvent("run", run_id, seq, payload)):
+        return
+    await _persist_run_stream_event(run_id, seq=seq, payload=payload)
+
+
+async def _persist_run_stream_event(run_id: str, *, seq: int, payload: dict[str, Any]) -> None:
     try:
         session_factory = db_manager.get_session_factory()
         async with session_factory() as session:
@@ -304,6 +314,13 @@ async def persist_thread_stream_event(thread_id: str, event: dict[str, Any] | No
         return
     if not _metadata_db_ready():
         return
+    if await _buffer_stream_event(StreamEvent("thread", thread_id, seq, event)):
+        return
+    await _persist_thread_stream_event(thread_id, event)
+
+
+async def _persist_thread_stream_event(thread_id: str, event: dict[str, Any]) -> None:
+    seq = int(event["seq"])
     try:
         session_factory = db_manager.get_session_factory()
         async with session_factory() as session:
@@ -322,6 +339,72 @@ async def persist_thread_stream_event(thread_id: str, event: dict[str, Any] | No
                 await session.commit()
     except Exception:
         return
+
+
+@asynccontextmanager
+async def buffered_stream_persistence(*, run_id: str, thread_id: str):
+    if _uses_redis_executor() or not _metadata_db_ready():
+        yield
+        return
+    async with StreamEventBuffer(_persist_stream_event_batch, run_id=run_id, thread_id=thread_id) as buffer:
+        token = _stream_buffer.set(buffer)
+        try:
+            yield
+        finally:
+            _stream_buffer.reset(token)
+
+
+async def _buffer_stream_event(record: StreamEvent) -> bool:
+    buffer = _stream_buffer.get()
+    if buffer is None:
+        return False
+    stream_id = buffer.run_id if record.kind == "run" else buffer.thread_id
+    if record.stream_id != stream_id:
+        return False
+    try:
+        return await buffer.append(record)
+    except Exception:
+        logger.warning("Failed to buffer stream event; persisting individually", exc_info=True)
+        return False
+
+
+async def _persist_stream_event_batch(records: list[StreamEvent]) -> None:
+    groups: dict[tuple[str, str], dict[int, StreamEvent]] = {}
+    for record in records:
+        groups.setdefault((record.kind, record.stream_id), {}).setdefault(record.seq, record)
+    try:
+        session_factory = db_manager.get_session_factory()
+        async with session_factory() as session:
+            inserted = False
+            for (kind, stream_id), events in groups.items():
+                model = RunStreamEvent if kind == "run" else ThreadStreamEvent
+                id_field, name_field = ("run_id", "event") if kind == "run" else ("thread_id", "method")
+                existing = set(await session.scalars(select(model.seq).where(
+                    getattr(model, id_field) == stream_id, model.seq.in_(list(events)),
+                )))
+                missing = [
+                    {
+                        id_field: stream_id,
+                        "seq": seq,
+                        name_field: str(record.payload.get(name_field, "message" if kind == "run" else "event")),
+                        "payload_json": record.payload,
+                    }
+                    for seq, record in events.items() if seq not in existing
+                ]
+                if missing:
+                    await session.execute(insert(model), missing)
+                    inserted = True
+            if inserted:
+                await session.commit()
+    except Exception:
+        logger.warning("Failed to persist live stream batch; retrying individually", exc_info=True)
+        # The failed session has closed before these idempotent retries. Bypass
+        # buffering here so an error cannot requeue its own batch indefinitely.
+        for record in records:
+            if record.kind == "run":
+                await _persist_run_stream_event(record.stream_id, seq=record.seq, payload=record.payload)
+            else:
+                await _persist_thread_stream_event(record.stream_id, record.payload)
 
 
 async def persist_thread_stream_events(thread_id: str, events: list[dict[str, Any]]) -> None:

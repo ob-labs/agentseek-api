@@ -167,6 +167,38 @@ class ThreadProtocolEventBroker:
             if int(event.get("seq", 0)) > after_seq
         ]
 
+    def replay_records(
+        self,
+        thread_id: str,
+        *,
+        persisted: list[dict[str, Any]],
+        channels: list[str],
+        namespaces: list[list[str]] | None,
+        depth: int | None,
+        after_seq: int,
+    ) -> list[dict[str, Any]]:
+        # SQL may already contain a later event from another execution context.
+        # Merge before advancing the replay cursor past an unflushed event.
+        records = {
+            int(event.get("seq", 0)): event
+            for event in self.snapshot_records(thread_id, after_seq=after_seq)
+        }
+        # Saved payloads are publication-time snapshots; producers may have
+        # since mutated the nested values retained by the live broker.
+        records.update({int(event.get("seq", 0)): event for event in persisted})
+        result = []
+        for seq, event in sorted(records.items()):
+            if seq <= after_seq:
+                continue
+            if protocol_channel_for_method(str(event.get("method", ""))) not in channels:
+                continue
+            namespace = event.get("params", {}).get("namespace", [])
+            if not isinstance(namespace, list):
+                namespace = []
+            if _namespace_matches(namespace, namespaces=namespaces, depth=depth):
+                result.append(event)
+        return result
+
     async def stream(
         self,
         thread_id: str,

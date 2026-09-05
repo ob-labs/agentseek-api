@@ -231,13 +231,23 @@ async def stream_thread_protocol_events(
 
     async def _event_iter() -> AsyncIterator[str]:
         current_seq = after_seq
-        for event in await load_thread_stream_events(
+        events = await load_thread_stream_events(
             thread_id,
             channels=payload.channels,
             namespaces=payload.namespaces,
             depth=payload.depth,
             after_seq=after_seq,
-        ):
+        )
+        if not _uses_redis_executor():
+            events = thread_protocol_broker.replay_records(
+                thread_id,
+                persisted=events,
+                channels=payload.channels,
+                namespaces=payload.namespaces,
+                depth=payload.depth,
+                after_seq=after_seq,
+            )
+        for event in events:
             seq = int(event.get("seq", 0))
             current_seq = max(current_seq, seq)
             method = str(event.get("method", "event"))

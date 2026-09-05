@@ -403,13 +403,23 @@ def _build_create_run_stream_response(
             if include_metadata:
                 yield _protocol_event_sse(event_name="metadata", data={"run_id": created.run_id, "attempt": 1})
 
-            for event in await load_thread_stream_events(
+            events = await load_thread_stream_events(
                 thread_id,
                 channels=protocol_channels,
                 namespaces=None,
                 depth=None,
                 after_seq=after_seq,
-            ):
+            )
+            if not _uses_redis_executor():
+                events = thread_protocol_broker.replay_records(
+                    thread_id,
+                    persisted=events,
+                    channels=protocol_channels,
+                    namespaces=None,
+                    depth=None,
+                    after_seq=after_seq,
+                )
+            for event in events:
                 current_seq = max(current_seq, int(event.get("seq", 0)))
                 if event.get("params", {}).get("run_id") != created.run_id:
                     continue
