@@ -1,0 +1,8 @@
+{
+  "env": {
+    "ASSISTANT_EXAMPLE_MODE": "config"
+  },
+  "graphs": {
+    "assistant_config": "./graph.py:graph"
+  }
+}

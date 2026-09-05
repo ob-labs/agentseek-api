@@ -1,0 +1,483 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+      - "feature/**"
+      - "release/**"
+      - "hotfix/**"
+    paths-ignore:
+      - "**/*.md"
+  pull_request:
+    branches:
+      - develop
+      - main
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fast-tests:
+    name: Fast Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Check lockfile
+        run: uv lock --check
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Coverage-backed unit + integration suite
+        run: >-
+          uv run pytest tests/unit tests/integration
+          -m 'not docker'
+          --cov=src/agentseek_api
+          --cov-report=term-missing
+          --cov-fail-under=90
+          -q
+
+  cli-compatibility:
+    name: CLI Compatibility (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Installed CLI reports version
+        run: uv run agentseek-api version
+
+      - name: CLI auto-discovers agentseek.json for dockerfile
+        run: uv run python scripts/test_cli_config_autodiscovery.py
+
+      - name: Dockerfile command renders a runnable config
+        run: uv run python scripts/test_cli_config_autodiscovery.py --config examples/external_graph/manifest.json
+
+      - name: CLI config, host environment, and process tests
+        run: >-
+          uv run pytest
+          tests/unit/test_cli.py
+          tests/unit/test_graph_manifest.py
+          tests/unit/test_dotenv_adapter.py
+          tests/unit/test_runtime_environment.py
+          tests/unit/test_runtime_entrypoint.py
+          tests/unit/test_process_supervisor.py
+          tests/unit/test_sqlite_checkpointer.py
+          tests/unit/test_container_policy.py
+          tests/unit/test_secure_temp.py
+          tests/integration/test_cli_runtime_processes.py
+          tests/integration/test_metadata_db_config.py
+          -q
+
+      - name: Sync embedded seekdb extra for serve smoke
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
+        run: uv sync --dev --extra embedded
+
+      - name: CLI serve smoke boots a live API
+        if: runner.os == 'Linux' || (runner.os == 'macOS' && runner.arch == 'ARM64')
+        run: uv run python scripts/test_cli_serve_smoke.py
+
+      - name: Minimum direct dependency compatibility
+        if: runner.os == 'Linux'
+        run: uv run python scripts/test_minimum_cli_dependencies.py
+
+  embedded-seekdb-smoke:
+    name: Embedded seekdb Smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync with embedded extra
+        run: uv sync --dev --extra embedded
+
+      - name: Embedded seekdb serve smoke (SEEKDB_EMBED=true)
+        run: uv run python scripts/test_cli_embed_serve_smoke.py
+
+      - name: Embedded seekdb stream persistence performance and replay
+        env:
+          PYTHONPATH: src
+        run: |
+          # Shared runners get timing headroom; SQL budgets catch both live
+          # writes and final history rechecks independently of host speed.
+          uv run python scripts/benchmark_stream_persistence.py \
+            --backend embedded --repeat 3 --messages 38 \
+            --max-api-seconds 3 --max-finalization-seconds 1 \
+            --max-metadata-commits 16 --max-snapshot-selects 1 \
+            --output /tmp/embedded-fresh.json
+          uv run python scripts/benchmark_stream_persistence.py \
+            --backend embedded --repeat 3 --messages 0 --history 38 \
+            --max-api-seconds 3 --max-finalization-seconds 1 \
+            --max-metadata-commits 16 --max-snapshot-selects 1 \
+            --output /tmp/embedded-history.json
+          uv run python scripts/benchmark_stream_persistence.py \
+            --backend embedded --repeat 3 --messages 128 \
+            --max-api-seconds 3 --max-finalization-seconds 1 \
+            --max-metadata-commits 24 --max-snapshot-selects 2 \
+            --output /tmp/embedded-larger.json
+
+      - name: Upload embedded seekdb performance measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: embedded-seekdb-performance
+          path: /tmp/embedded-*.json
+          if-no-files-found: ignore
+
+  cli-docker-runtime:
+    name: CLI Docker Runtime (Compose ${{ matrix.compose-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        compose-version:
+          - runner-current
+          - v2.24.0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Install Compose floor
+        if: matrix.compose-version == 'v2.24.0'
+        uses: docker/setup-compose-action@2fe291b7677a45ee1269ec56a42604c143505e7e # v1
+        with:
+          version: v2.24.0
+
+      - name: Record Compose version
+        run: docker compose version --short
+
+      - name: Container environment boundary
+        run: uv run python scripts/test_container_env_boundary.py
+
+      - name: Docker and Compose regression suite
+        run: uv run pytest tests/unit/test_docker_runtime.py -m docker -q
+
+      - name: CLI Docker smoke
+        run: make test-cli-docker
+
+  sample-graphs:
+    name: Sample Graphs
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: In-process sample graph validation
+        run: make test-samples
+
+  cli-dev-sample-graphs:
+    name: CLI Dev Sample Graphs
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: seekdb
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -proot --silent"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: CLI dev smoke covers docs and Studio-style localhost auth
+        env:
+          OCEANBASE_HOST: 127.0.0.1
+          OCEANBASE_PORT: "3306"
+          OCEANBASE_USER: root
+          OCEANBASE_PASSWORD: root
+          OCEANBASE_DB_NAME: seekdb
+        run: uv run python scripts/test_cli_dev_studio_smoke.py
+
+      - name: Run sample graphs through agentseek-api dev
+        env:
+          MYSQL_HOST: 127.0.0.1
+          MYSQL_PORT: "3306"
+          MYSQL_USER: root
+          MYSQL_PASSWORD: root
+          MYSQL_DB: seekdb
+        run: make test-cli-dev-samples
+
+  mysql-family-checkpoint-validation:
+    name: MySQL-Family Checkpoint Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref_name == 'develop' ||
+      github.ref_name == 'main' ||
+      startsWith(github.ref_name, 'release/') ||
+      startsWith(github.ref_name, 'hotfix/')
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: seekdb
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+            url: mysql+aiomysql://root:@127.0.0.1:2881/seekdb
+          - name: oceanbase
+            docker_backend: oceanbase
+            image: oceanbase/oceanbase-ce:latest
+            mode: slim
+            user: root@test
+            password: ""
+            port: "2881"
+            db_name: seekdb
+            url: mysql+aiomysql://root%40test:@127.0.0.1:2881/seekdb
+          - name: mysql
+            docker_backend: mysql
+            image: mysql:8.4
+            user: root
+            password: root
+            port: "3306"
+            db_name: seekdb
+            url: mysql+aiomysql://root:root@127.0.0.1:3306/seekdb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: MySQL-family checkpoint validation (${{ matrix.backend.name }})
+        env:
+          SEEKDB_MODE: docker
+          SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
+          SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+          OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode || '' }}
+          OCEANBASE_USER: ${{ matrix.backend.user }}
+          OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
+          OCEANBASE_PORT: ${{ matrix.backend.port }}
+          OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
+          SEEKDB_URL: ${{ matrix.backend.url }}
+        run: make test-checkpoints
+
+  redis-durable-execution:
+    name: Redis Durable Execution (${{ matrix.backend.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref_name == 'develop' ||
+      github.ref_name == 'main' ||
+      startsWith(github.ref_name, 'release/') ||
+      startsWith(github.ref_name, 'hotfix/')
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: seekdb
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: oceanbase
+            docker_backend: oceanbase
+            image: oceanbase/oceanbase-ce:latest
+            mode: slim
+            user: root@test
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: mysql
+            docker_backend: mysql
+            image: mysql:8.4
+            user: root
+            password: root
+            port: "3306"
+            db_name: seekdb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: Redis durable execution stack (${{ matrix.backend.name }})
+        env:
+          SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
+          SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+          OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode || '' }}
+          OCEANBASE_USER: ${{ matrix.backend.user }}
+          OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
+          OCEANBASE_PORT: ${{ matrix.backend.port }}
+          OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
+        run: make test-redis-docker
+
+  pgsql-metadata-checkpoint-validation:
+    name: PostgreSQL Metadata + Checkpoint Validation
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.ref_name == 'develop' ||
+      github.ref_name == 'main' ||
+      startsWith(github.ref_name, 'release/') ||
+      startsWith(github.ref_name, 'hotfix/')
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: agentseek
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d agentseek"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+    strategy:
+      fail-fast: false
+      matrix:
+        backend:
+          - name: seekdb
+            docker_backend: seekdb
+            image: oceanbase/seekdb:latest
+            user: root
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: oceanbase
+            docker_backend: oceanbase
+            image: oceanbase/oceanbase-ce:latest
+            mode: slim
+            user: root@test
+            password: ""
+            port: "2881"
+            db_name: seekdb
+          - name: mysql
+            docker_backend: mysql
+            image: mysql:8.4
+            user: root
+            password: root
+            port: "3306"
+            db_name: seekdb
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup UV
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          enable-cache: true
+          cache-python: true
+          python-version: "3.12"
+
+      - name: Sync dependencies
+        run: uv sync --dev
+
+      - name: PostgreSQL metadata with checkpoint validation (${{ matrix.backend.name }})
+        env:
+          SEEKDB_MODE: docker
+          SEEKDB_DOCKER_BACKEND: ${{ matrix.backend.docker_backend }}
+          SEEKDB_DOCKER_IMAGE: ${{ matrix.backend.image }}
+          OCEANBASE_DOCKER_MODE: ${{ matrix.backend.mode || '' }}
+          OCEANBASE_USER: ${{ matrix.backend.user }}
+          OCEANBASE_PASSWORD: ${{ matrix.backend.password }}
+          OCEANBASE_PORT: ${{ matrix.backend.port }}
+          OCEANBASE_DB_NAME: ${{ matrix.backend.db_name }}
+          METADATA_DB_URL: postgresql://postgres:postgres@127.0.0.1:5432/agentseek
+          METADATA_DB_BACKEND: postgresql
+        run: make test-checkpoints

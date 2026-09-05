@@ -1,0 +1,43 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from agentseek_api.constants import DEFAULT_API_PORT
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(extra="ignore")
+
+    APP_NAME: str = "AgentSeek API"
+    PORT: int = DEFAULT_API_PORT
+    METADATA_DB_URL: str | None = None
+    METADATA_DB_BACKEND: str = "auto"
+    SEEKDB_URL: str = "mysql+aiomysql://root%40test:@localhost:2881/seekdb"
+    EXECUTOR_BACKEND: str = "inline"
+    REDIS_URL: str = "redis://127.0.0.1:6379/0"
+    REDIS_RUN_QUEUE_KEY: str = "agentseek:runs:pending"
+    REDIS_RUN_PROCESSING_KEY: str = "agentseek:runs:processing"
+    WORKER_CONCURRENT_JOBS: int = 10
+    REDIS_WORKER_POLL_TIMEOUT_SECONDS: int = 1
+    REDIS_WORKER_LOCK_KEY: str = "agentseek:worker:active"
+    REDIS_WORKER_LOCK_TTL_SECONDS: int = 30
+    REDIS_STREAM_MAXLEN: int = 10000
+    REDIS_STREAM_TTL_SECONDS: int = 3600
+    REDIS_SCHEDULER_LOCK_KEY: str = "agentseek:scheduler:active"
+    REDIS_SCHEDULER_LOCK_TTL_SECONDS: int = 30
+    SCHEDULER_STARTED_TICK_STALE_AFTER_SECONDS: int | None = None
+    SCHEDULER_POLL_INTERVAL_SECONDS: float = 1.0
+    SCHEDULER_CLAIM_LIMIT: int = 10
+    AGENTSEEK_GRAPHS: str | None = None
+    AUTH_MODULE_PATH: str | None = None
+    STUDIO_AUTH_LOCAL_DEV: bool = False
+
+    OCEANBASE_HOST: str = "localhost"
+    OCEANBASE_PORT: str = "2881"
+    OCEANBASE_USER: str = "root@test"
+    OCEANBASE_PASSWORD: str = ""
+    OCEANBASE_DB_NAME: str = "seekdb"
+
+    SEEKDB_EMBED: bool = False
+    SEEKDB_EMBED_DIR: str = ""
+
+
+settings = Settings()
