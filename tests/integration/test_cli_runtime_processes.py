@@ -268,7 +268,7 @@ def test_preloaded_runtime_child_ignores_hostile_cwd_and_pythonpath(
                 "schema_version": 1,
                 "runtime": {
                     "distribution": "agentseek-api",
-                    "version": "0.3.1",
+                    "version": "0.3.2",
                     "contract": "preloaded-v1",
                 },
                 "dependencies": [],
@@ -331,7 +331,7 @@ def test_preloaded_runtime_child_reaches_settings_and_manifest_graph_from_hostil
                 "schema_version": 1,
                 "runtime": {
                     "distribution": "agentseek-api",
-                    "version": "0.3.1",
+                    "version": "0.3.2",
                     "contract": "preloaded-v1",
                 },
                 "dependencies": [],

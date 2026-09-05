@@ -8,7 +8,7 @@ def test_redis_runtime_builds_image_from_exact_candidate_wheel() -> None:
     assert 'mktemp -d "$ROOT_DIR/.tmp/agentseek-redis-candidate.XXXXXX"' in script
     assert "${TMPDIR:-/tmp}/agentseek-redis-candidate" not in script
     assert 'uv build --wheel --out-dir "$CANDIDATE_DIR"' in script
-    assert "agentseek_api-0.3.1-*.whl" in script
+    assert "agentseek_api-0.3.2-*.whl" in script
     assert "candidate_runtime_artifact" in script
     assert "runtime_artifact=artifact" in script
     assert 'rm -rf -- "$CANDIDATE_DIR"' in script

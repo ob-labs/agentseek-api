@@ -43,7 +43,7 @@ def write_sanitized_manifest(root: Path) -> Path:
                 "schema_version": 1,
                 "runtime": {
                     "distribution": "agentseek-api",
-                    "version": "0.3.1",
+                    "version": "0.3.2",
                     "contract": "preloaded-v1",
                 },
                 "dependencies": [],

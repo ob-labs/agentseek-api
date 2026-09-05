@@ -401,7 +401,7 @@ Redis 实例同时运行。
 - `org.agentseek.environment-contract=preloaded-v1`
 - `org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json`
 - `org.agentseek.runtime-distribution=agentseek-api`
-- `org.agentseek.runtime-version=0.3.1`
+- `org.agentseek.runtime-version=0.3.2`
 
 manifest、已安装 distribution、entrypoint 与标签必须一致。系统不提供旧镜像
 回退：传给 `up --image` 前必须完成迁移与校验；否则应继续用旧 launcher 配合

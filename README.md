@@ -439,7 +439,7 @@ Custom images must expose all four exact labels:
 - `org.agentseek.environment-contract=preloaded-v1`
 - `org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json`
 - `org.agentseek.runtime-distribution=agentseek-api`
-- `org.agentseek.runtime-version=0.3.1`
+- `org.agentseek.runtime-version=0.3.2`
 
 The manifest, installed distribution, entrypoint, and labels must agree. There
 is no legacy-image fallback: migrate and attest the image before passing it to

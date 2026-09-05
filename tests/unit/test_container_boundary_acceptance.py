@@ -516,8 +516,8 @@ def test_cli_config_autodiscovery_executes_the_bundle_contract() -> None:
 def test_cli_docker_smoke_asserts_the_canonical_candidate_filename() -> None:
     text = CLI_DOCKER_SCRIPT.read_text(encoding="utf-8")
 
-    assert 'dockerfile.index("agentseek_api-0.3.1-py3-none-any.whl[embedded]")' in text
-    assert 'dockerfile.index("agentseek-api-0.3.1.whl[embedded]")' not in text
+    assert 'dockerfile.index("agentseek_api-0.3.2-py3-none-any.whl[embedded]")' in text
+    assert 'dockerfile.index("agentseek-api-0.3.2.whl[embedded]")' not in text
 
 
 def test_cli_docker_smoke_launches_from_the_generated_project() -> None:

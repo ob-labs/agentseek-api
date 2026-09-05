@@ -351,11 +351,11 @@ def test_candidate_renderer_stages_a_pep427_valid_wheel_filename(
     tmp_path: Path,
 ) -> None:
     text = render_build_dockerfile(_candidate_build_plan(tmp_path)).decode("utf-8")
-    canonical = "agentseek_api-0.3.1-py3-none-any.whl"
+    canonical = "agentseek_api-0.3.2-py3-none-any.whl"
 
     assert f'"/opt/agentseek/runtime/{canonical}"' in text
     assert f'"/opt/agentseek/runtime/{canonical}[embedded]"' in text
-    assert "/opt/agentseek/runtime/agentseek-api-0.3.1.whl" not in text
+    assert "/opt/agentseek/runtime/agentseek-api-0.3.2.whl" not in text
 
 
 def test_windows_binary_flag_is_used_for_bundle_file_io(
@@ -385,8 +385,8 @@ def test_dockerfile_uses_manifest_labels_and_buildkit_pip_secret(
     assert "org.agentseek.environment-contract=preloaded-v1" in text
     assert "org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json" in text
     assert "org.agentseek.runtime-distribution=agentseek-api" in text
-    assert "org.agentseek.runtime-version=0.3.1" in text
-    assert "agentseek-api[embedded]==0.3.1" in text
+    assert "org.agentseek.runtime-version=0.3.2" in text
+    assert "agentseek-api[embedded]==0.3.2" in text
     assert 'python", "-m", "pip", "check' in text
     assert "importlib.metadata" in text
     assert "sysconfig.get_paths" in text
@@ -442,7 +442,7 @@ def test_generated_image_command_ignores_hostile_workdir_and_pythonpath(
     )
 
     assert completed.returncode == 0
-    assert completed.stdout == "agentseek-api 0.3.1\n"
+    assert completed.stdout == "agentseek-api 0.3.2\n"
     assert marker.exists() is False
 
 
@@ -602,7 +602,7 @@ def test_renderer_preserves_plan_fields_and_authoritative_order(tmp_path: Path) 
     assert '# agentseek-image-distro="bookworm"' in text
     user_install = text.index("/deps/agent")
     custom = text.index("print('trusted')")
-    runtime_install = text.rindex("agentseek-api[embedded]==0.3.1")
+    runtime_install = text.rindex("agentseek-api[embedded]==0.3.2")
     manifest = text.index("COPY manifest.v1.json")
     labels = text.index("LABEL org.agentseek.environment-contract")
     assert user_install < custom < runtime_install < manifest < labels
@@ -643,7 +643,7 @@ def test_candidate_hash_verifier_has_success_and_failure_paths_under_optimize(
     plan = _candidate_build_plan(tmp_path)
     script = _generated_python_check(
         render_build_dockerfile(plan).decode(),
-        "agentseek_api-0.3.1-py3-none-any.whl",
+        "agentseek_api-0.3.2-py3-none-any.whl",
     )
     assert plan.runtime_artifact.candidate_wheel is not None
     candidate = tmp_path / "candidate-check.whl"
@@ -657,7 +657,7 @@ def test_candidate_hash_verifier_has_success_and_failure_paths_under_optimize(
         "OriginalPath=pathlib.Path\n"
         f"actual=OriginalPath({str(candidate)!r})\n"
         "pathlib.Path=lambda value: actual if value=="
-        "'/opt/agentseek/runtime/agentseek_api-0.3.1-py3-none-any.whl' "
+        "'/opt/agentseek/runtime/agentseek_api-0.3.2-py3-none-any.whl' "
         "else OriginalPath(value)"
     )
 
@@ -669,7 +669,7 @@ def test_candidate_hash_verifier_has_success_and_failure_paths_under_optimize(
 _VALID_MANIFEST = (
     b'{"dependencies":["/deps/agent"],"graphs":{"chat":"chat.graph:graph"},'
     b'"runtime":{"contract":"preloaded-v1","distribution":"agentseek-api",'
-    b'"version":"0.3.1"},"schema_version":1}\n'
+    b'"version":"0.3.2"},"schema_version":1}\n'
 )
 
 
@@ -740,7 +740,7 @@ def test_runtime_verifier_has_success_and_failure_paths_under_optimize(
         if check == "ownership" and not valid
         else "agentseek_api/cli.py"
     )
-    version = "9.9.9" if check == "version" and not valid else "0.3.1"
+    version = "9.9.9" if check == "version" and not valid else "0.3.2"
     setup = "\n".join(
         (
             "import agentseek_api.cli,importlib.metadata,pathlib,sys,sysconfig",
@@ -789,7 +789,7 @@ def test_renderer_json_escapes_install_operands_and_candidate_source(
     assert '"package @ https://example.invalid/pkg.whl#sha256=' in text
     assert 'COPY ["runtime/candidate runtime.whl", "/opt/agentseek/runtime/' in text
     assert text.index("candidate runtime.whl") < text.index(
-        "agentseek_api-0.3.1-py3-none-any.whl[embedded]"
+        "agentseek_api-0.3.2-py3-none-any.whl[embedded]"
     )
 
 
@@ -826,7 +826,7 @@ def test_bundle_excludes_env_and_records_only_selected_regular_files(
 def test_published_runtime_artifact_is_exact_and_path_free() -> None:
     artifact = PUBLISHED_RUNTIME_ARTIFACT
     assert artifact.source is RuntimeArtifactSource.PUBLISHED_INDEX
-    assert artifact.requirement == "agentseek-api[embedded]==0.3.1"
+    assert artifact.requirement == "agentseek-api[embedded]==0.3.2"
     assert artifact.candidate_wheel is None
     assert artifact.candidate_sha256 is None
 
@@ -956,7 +956,7 @@ def test_static_incompatible_runtime_pin_fails_with_migration_guidance(
     (project / "requirements.txt").write_text(
         "agentseek-api==0.2.2\n", encoding="utf-8"
     )
-    with pytest.raises(Exception, match=r"0\.3\.1.*migrat"):
+    with pytest.raises(Exception, match=r"0\.3\.2.*migrat"):
         plan_container_image(config_path=project / "agentseek.json")
 
 
@@ -1007,11 +1007,11 @@ def test_generated_up_auth_preserves_empty_and_rewrites_local_file(
 
 
 def test_candidate_wheel_hash_and_metadata_are_verified(tmp_path: Path) -> None:
-    wheel = tmp_path / "agentseek_api-0.3.1-py3-none-any.whl"
+    wheel = tmp_path / "agentseek_api-0.3.2-py3-none-any.whl"
     with zipfile.ZipFile(wheel, "w") as archive:
         archive.writestr(
-            "agentseek_api-0.3.1.dist-info/METADATA",
-            "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.1\n",
+            "agentseek_api-0.3.2.dist-info/METADATA",
+            "Metadata-Version: 2.1\nName: agentseek-api\nVersion: 0.3.2\n",
         )
     digest = hashlib.sha256(wheel.read_bytes()).hexdigest()
     artifact = candidate_runtime_artifact(wheel, digest)
@@ -1259,7 +1259,7 @@ def test_compatible_static_runtime_pin_is_accepted_and_constrained(
         output_root=tmp_path / "bundle",
     )
     assert (bundle.context / "runtime-constraints.txt").read_text() == (
-        "agentseek-api==0.3.1\n"
+        "agentseek-api==0.3.2\n"
     )
 
 
@@ -1301,7 +1301,7 @@ def test_pip_config_is_retained_only_as_secret_source_not_copied(
     assert b"pip-canary" not in bundle.archive_bytes()
 
 
-def _write_candidate_wheel(path: Path, *, version: str = "0.3.1") -> str:
+def _write_candidate_wheel(path: Path, *, version: str = "0.3.2") -> str:
     with zipfile.ZipFile(path, "w") as archive:
         archive.writestr(
             f"agentseek_api-{version}.dist-info/METADATA",
@@ -1329,7 +1329,7 @@ def test_candidate_inconsistent_states_and_swaps_fail_closed(tmp_path: Path) -> 
         RuntimeArtifactV1(
             distribution="agentseek-api",
             extra="embedded",
-            version="0.3.1",
+            version="0.3.2",
             source=RuntimeArtifactSource.PUBLISHED_INDEX,
             candidate_wheel=wheel,
             candidate_sha256=digest,

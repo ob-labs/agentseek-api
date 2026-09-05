@@ -355,7 +355,7 @@ if ! uv build --wheel --out-dir "$CANDIDATE_DIR"; then
   echo "Candidate runtime wheel build failed." >&2
   exit 1
 fi
-CANDIDATE_WHEELS=("$CANDIDATE_DIR"/agentseek_api-0.3.1-*.whl)
+CANDIDATE_WHEELS=("$CANDIDATE_DIR"/agentseek_api-0.3.2-*.whl)
 if [[ "${#CANDIDATE_WHEELS[@]}" -ne 1 || ! -f "${CANDIDATE_WHEELS[0]}" ]]; then
   echo "Candidate runtime wheel selection failed." >&2
   exit 1

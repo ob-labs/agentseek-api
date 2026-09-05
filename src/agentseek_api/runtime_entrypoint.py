@@ -22,8 +22,8 @@ TARGET_MODULES = {
 
 TARGET_DISTRIBUTIONS = {
     "uvicorn": ("uvicorn", "uvicorn", None),
-    "worker": ("agentseek-api", "agentseek_api", "0.3.1"),
-    "scheduler": ("agentseek-api", "agentseek_api", "0.3.1"),
+    "worker": ("agentseek-api", "agentseek_api", "0.3.2"),
+    "scheduler": ("agentseek-api", "agentseek_api", "0.3.2"),
 }
 
 
@@ -75,7 +75,7 @@ def _owned_distribution_locations(
 
 def _owned_runtime_locations() -> tuple[frozenset[Path], tuple[Path, ...]]:
     return _owned_distribution_locations(
-        "agentseek-api", "agentseek_api", expected_version="0.3.1"
+        "agentseek-api", "agentseek_api", expected_version="0.3.2"
     )
 
 
