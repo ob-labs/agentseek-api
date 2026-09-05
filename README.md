@@ -731,7 +731,7 @@ parent api build --config ./langgraph.json -t my-api:dev
   seekdb (`--backend embedded`), checks output/checkpoints/replay, and makes no
   model-provider calls. SQL latency injection is optional. Use `--repeat` for
   median/maximum timings; embedded CI also enforces SQL operation budgets.
-  See the [embedded performance results](docs/performance/issue-78-embedded-seekdb.md)
+  See the [embedded performance report](docs/performance/embedded-seekdb-performance.md)
   for measured latency, backend details, and reproduction commands.
 - Redis mode stores run stream events and protocol stream events in bounded
   Redis Streams, so replay does not depend on API-process memory and streaming
