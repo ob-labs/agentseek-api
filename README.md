@@ -727,8 +727,12 @@ parent api build --config ./langgraph.json -t my-api:dev
   the unflushed event tail; completed-run checkpoints are saved separately.
 - To compare persistence overhead locally, run
   [`scripts/benchmark_stream_persistence.py`](scripts/benchmark_stream_persistence.py).
-  It exercises the real API with temporary SQLite storage and injected SQL
-  latency, checks output/checkpoints/replay, and makes no model-provider calls.
+  It exercises the real API with temporary SQLite storage or native embedded
+  seekdb (`--backend embedded`), checks output/checkpoints/replay, and makes no
+  model-provider calls. SQL latency injection is optional. Use `--repeat` for
+  median/maximum timings; embedded CI also enforces SQL operation budgets.
+  See the [embedded performance results](docs/performance/issue-78-embedded-seekdb.md)
+  for measured latency, backend details, and reproduction commands.
 - Redis mode stores run stream events and protocol stream events in bounded
   Redis Streams, so replay does not depend on API-process memory and streaming
   writes do not put the metadata database on the hot path.
