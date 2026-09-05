@@ -5,7 +5,7 @@ import logging
 from typing import Any
 
 from redis.asyncio import Redis, from_url
-from sqlalchemy import delete, select
+from sqlalchemy import delete, insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from agentseek_api.core.database import db_manager
@@ -18,6 +18,7 @@ _THREAD_STREAM_SEQ_KEY_PREFIX = "agentseek:threads:stream-seq"
 _RUN_STREAM_KEY_PREFIX = "agentseek:runs:stream"
 _THREAD_STREAM_KEY_PREFIX = "agentseek:threads:stream"
 _THREAD_STREAM_ENVELOPE_FIELDS = frozenset({"type", "event_id", "seq"})
+_THREAD_SNAPSHOT_BATCH_SIZE = 500
 _redis_client: Redis | None = None
 logger = logging.getLogger(__name__)
 
@@ -321,6 +322,49 @@ async def persist_thread_stream_event(thread_id: str, event: dict[str, Any] | No
                 await session.commit()
     except Exception:
         return
+
+
+async def persist_thread_stream_events(thread_id: str, events: list[dict[str, Any]]) -> None:
+    """Recover a buffered SQL snapshot without rechecking each event separately."""
+    if not events or _uses_redis_executor() or not _metadata_db_ready():
+        return
+    events_by_seq: dict[int, dict[str, Any]] = {}
+    for event in events:
+        seq = int(event.get("seq", 0))
+        if seq > 0:
+            events_by_seq.setdefault(seq, event)
+    snapshot = list(events_by_seq.values())
+    for offset in range(0, len(snapshot), _THREAD_SNAPSHOT_BATCH_SIZE):
+        batch = snapshot[offset : offset + _THREAD_SNAPSHOT_BATCH_SIZE]
+        try:
+            session_factory = db_manager.get_session_factory()
+            async with session_factory() as session:
+                existing = set(await session.scalars(
+                    select(ThreadStreamEvent.seq).where(
+                        ThreadStreamEvent.thread_id == thread_id,
+                        ThreadStreamEvent.seq.in_([int(event["seq"]) for event in batch]),
+                    )
+                ))
+                missing = [
+                    {
+                        "thread_id": thread_id,
+                        "seq": int(event["seq"]),
+                        "method": str(event.get("method", "event")),
+                        "payload_json": dict(event),
+                    }
+                    for event in batch
+                    if int(event["seq"]) not in existing
+                ]
+                if missing:
+                    await session.execute(insert(ThreadStreamEvent), missing)
+                    await session.commit()
+        except Exception:
+            # A background publisher can insert after our lookup. Roll back the
+            # batch before retrying individually so one conflict cannot lose
+            # the other events. This also retains best-effort failure handling.
+            logger.warning("Failed to persist thread event batch; retrying individually", exc_info=True)
+            for event in batch:
+                await persist_thread_stream_event(thread_id, event)
 
 
 async def load_thread_stream_events(
