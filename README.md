@@ -451,7 +451,7 @@ AgentSeek release is also 0.1.4; both follow the shipped 0.1.3 releases.
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP
 Store API and the injected LangGraph `BaseStore` runtime for TTL and semantic
-search. This repo uses the published `langchain-oceanbase==0.6.3` package from
+search. This repo uses the published `langchain-oceanbase>=0.6.4,<0.7` package from
 PyPI.
 
 Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:

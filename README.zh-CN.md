@@ -412,7 +412,7 @@ manifest、已安装 distribution、entrypoint 与标签必须一致。系统不
 CLI 层会尽量容忍 LangGraph 在端点级别使用的配置键，例如 `http` 与
 `api_version`。Store 配置会被 HTTP Store API 以及注入的 LangGraph
 `BaseStore` 运行时用于 TTL 与语义检索。本仓库使用 PyPI 上发布的
-`langchain-oceanbase==0.6.3` 包。
+`langchain-oceanbase>=0.6.4,<0.7` 包。
 
 配置驱动的自定义鉴权可以放在 `agentseek.json` 或 `langgraph.json` 中：
 
