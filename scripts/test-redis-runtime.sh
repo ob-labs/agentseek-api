@@ -456,11 +456,7 @@ echo "worker concurrency probe suite started" >&2
 
 WORKER_CONCURRENT_JOBS=10
 start_worker
-# Diagnostic stress for the intermittent post-merge failure; removed after
-# the stored run error identifies the failing boundary.
-for attempt in {1..10}; do
-  run_probe --mode fanout
-done
+run_probe --mode fanout
 
 WORKER_CONCURRENT_JOBS=2
 start_worker
