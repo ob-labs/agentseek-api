@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 import pytest_asyncio
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -12,10 +13,12 @@ from agentseek_api.settings import settings
 
 
 @pytest_asyncio.fixture
-async def durability_db(tmp_path, monkeypatch):
+async def durability_db(tmp_path, monkeypatch, request):
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{tmp_path}/durability.db",
-        pool_size=1, max_overflow=0, pool_timeout=0.1,
+        # Concurrent recovery needs independent connections. Reserve the
+        # one-connection pool for the nested-checkout regression below.
+        pool_size=getattr(request, "param", 2), max_overflow=0, pool_timeout=5,
     )
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
@@ -29,6 +32,7 @@ async def durability_db(tmp_path, monkeypatch):
     await engine.dispose()
 
 
+@pytest.mark.parametrize("durability_db", [1], indirect=True)
 async def test_first_append_uses_one_pool_connection(durability_db):
     seq, _ = await stream_persistence.append_run_stream_event_atomic("pool", {"event": "start"})
     assert seq == 1
