@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 from sqlalchemy import delete, select, update
+from sqlalchemy.orm.exc import StaleDataError
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, StreamDelivery
@@ -75,7 +76,19 @@ async def _deliver(operation_id):
             async with asyncio.timeout(5):
                 row.records = [await append_redis_envelope(**envelope, retain=True) for envelope in envelopes]
         return envelopes, row.records
-    committed = await retry_transaction(deliver)
+    for attempt in range(8):
+        try:
+            committed = await retry_transaction(deliver)
+            break
+        except StaleDataError:
+            # A competing dispatcher can acknowledge/delete this outbox row
+            # before our ORM acknowledgment flush (observed on OceanBase).
+            # The failed transaction is already rolled back and closed. Reload
+            # the winner in a fresh session; stable Redis operation IDs make
+            # replay safe. Do not retry arbitrary ORM writes this way.
+            if attempt == 7:
+                raise
+            await asyncio.sleep(min(0.005 * 2 ** attempt, 0.2))
     if committed is None:
         return None
     envelopes, records = committed

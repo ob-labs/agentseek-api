@@ -257,6 +257,57 @@ async def test_delivery_reloads_after_competing_dispatcher_wins(run_storage, mon
         await redis.aclose()
 
 
+@pytest.mark.parametrize("cleanup", ["deleted", "acknowledged"])
+async def test_protocol_pair_recovers_stale_ack_without_duplicate_events(run_storage, monkeypatch, cleanup):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.orm.exc import StaleDataError
+    from agentseek_api.core.orm import StreamDelivery
+    from agentseek_api.services import redis_delivery
+
+    redis = from_url(_TEST_REDIS_URL, decode_responses=True)
+    identity = uuid4().hex
+    monkeypatch.setattr(stream_module, "_redis_client", redis)
+    commit = AsyncSession.commit
+    raced = False
+    winner = None
+
+    async def competing_ack_before_commit(session):
+        nonlocal raced, winner
+        if not raced and any(isinstance(row, StreamDelivery) for row in session.dirty):
+            raced = True
+            # Reproduce the failed SQL acknowledgment after Redis accepted both
+            # envelopes. Release SQLite's writer lock so a real competing
+            # dispatcher can commit the winning acknowledgment/cleanup.
+            await session.rollback()
+            if cleanup == "acknowledged":
+                async def fail_expiry(**kwargs):
+                    raise RuntimeError("cleanup temporarily unavailable")
+                monkeypatch.setattr(stream_module, "expire_redis_envelope", fail_expiry)
+            winner = await redis_delivery._deliver(identity)
+            if cleanup == "acknowledged":
+                markers = await redis.keys(f"*{identity}*:op:*")
+                assert markers
+                await redis.delete(*markers)
+            raise StaleDataError("UPDATE stream_deliveries expected 1 row; 0 matched")
+        await commit(session)
+
+    monkeypatch.setattr(AsyncSession, "commit", competing_ack_before_commit)
+    try:
+        observed = await stream_module.append_redis_protocol_event(
+            operation_id=identity, run_id=identity, thread_id=identity,
+            payload={"method": "values", "params": {"data": ["once"]}},
+        )
+        assert raced and winner is not None
+        assert observed == winner
+        assert await redis.xlen(stream_module._run_stream_key(identity)) == 1
+        assert await redis.xlen(stream_module._thread_stream_key(identity)) == 1
+    finally:
+        keys = await redis.keys(f"*{identity}*")
+        if keys:
+            await redis.delete(*keys)
+        await redis.aclose()
+
+
 @pytest.mark.parametrize("race", ["delete", "resume"])
 async def test_terminal_marker_cleanup_survives_run_replacement(run_storage, monkeypatch, race):
     from agentseek_api.core.orm import Run

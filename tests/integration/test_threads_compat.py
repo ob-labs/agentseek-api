@@ -1,4 +1,22 @@
+import asyncio
+
+import pytest
 from fastapi.testclient import TestClient
+
+
+@pytest.fixture(params=[False, True], ids=["inline", "background"])
+def thread_executor(request, monkeypatch):
+    if request.param:
+        from agentseek_api.services.run_jobs import execute_run_job
+
+        class DelayedExecutor:
+            async def submit(self, job):
+                async def execute():
+                    await asyncio.sleep(0.1)
+                    await execute_run_job(job)
+                asyncio.create_task(execute())
+
+        monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", DelayedExecutor)
 
 
 def _create_thread(
@@ -13,7 +31,15 @@ def _create_thread(
     return response.json()["thread_id"]
 
 
-def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
+def _wait_for_run(client: TestClient, thread_id: str, response) -> None:
+    assert response.status_code == 200
+    run_id = response.json()["run_id"]
+    completed = client.get(f"/threads/{thread_id}/runs/{run_id}/wait", headers={"x-user-id": "u1"})
+    assert completed.status_code == 200
+    assert completed.json()["status"] == "success"
+
+
+def test_threads_search_count_patch_copy_and_prune(client: TestClient, thread_executor) -> None:
     assistant = client.post("/assistants", json={"name": "copy-source", "graph_id": "default"})
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
@@ -31,7 +57,7 @@ def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
         json={"assistant_id": assistant_id, "input": {"message": "copy history"}},
         headers={"x-user-id": "u1"},
     )
-    assert run.status_code == 200
+    _wait_for_run(client, thread_id, run)
 
     search = client.post("/threads/search", json={"metadata": {"topic": "alpha"}}, headers={"x-user-id": "u1"})
     assert search.status_code == 200
@@ -71,7 +97,7 @@ def test_threads_search_count_patch_copy_and_prune(client: TestClient) -> None:
     assert copied_get.status_code == 404
 
 
-def test_thread_state_and_history_endpoints(client: TestClient) -> None:
+def test_thread_state_and_history_endpoints(client: TestClient, thread_executor) -> None:
     assistant = client.post("/assistants", json={"name": "stateful", "graph_id": "default"})
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
@@ -82,7 +108,7 @@ def test_thread_state_and_history_endpoints(client: TestClient) -> None:
         json={"assistant_id": assistant_id, "input": {"message": "hello"}},
         headers={"x-user-id": "u1"},
     )
-    assert run.status_code == 200
+    _wait_for_run(client, thread_id, run)
 
     state = client.get(f"/threads/{thread_id}/state", headers={"x-user-id": "u1"})
     assert state.status_code == 200
@@ -100,7 +126,7 @@ def test_thread_state_and_history_endpoints(client: TestClient) -> None:
     assert history_body[0]["checkpoint"]["thread_id"] == thread_id
 
 
-def test_threads_prune_keep_latest_removes_older_runs_but_keeps_thread(client: TestClient) -> None:
+def test_threads_prune_keep_latest_removes_older_runs_but_keeps_thread(client: TestClient, thread_executor) -> None:
     assistant = client.post("/assistants", json={"name": "keep-latest", "graph_id": "default"})
     assert assistant.status_code == 200
     assistant_id = assistant.json()["assistant_id"]
@@ -112,13 +138,13 @@ def test_threads_prune_keep_latest_removes_older_runs_but_keeps_thread(client: T
         json={"assistant_id": assistant_id, "input": {"message": "first"}},
         headers={"x-user-id": "u1"},
     )
+    _wait_for_run(client, thread_id, first)
     second = client.post(
         f"/threads/{thread_id}/runs",
         json={"assistant_id": assistant_id, "input": {"message": "second"}},
         headers={"x-user-id": "u1"},
     )
-    assert first.status_code == 200
-    assert second.status_code == 200
+    _wait_for_run(client, thread_id, second)
 
     pruned = client.post(
         "/threads/prune",
