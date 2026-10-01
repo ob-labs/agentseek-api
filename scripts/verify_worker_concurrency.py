@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -133,6 +134,11 @@ class ProbeClient:
         status = payload.get("status")
         if not isinstance(status, str) or not status:
             raise AssertionError(f"run response omitted status: {payload!r}")
+        if status == "error":
+            print(json.dumps({
+                "thread_id": run.thread_id, "run_id": run.run_id,
+                "status": status, "last_error": payload.get("last_error"),
+            }), file=sys.stderr, flush=True)
         return status
 
     def queue_snapshot(self) -> QueueSnapshot:

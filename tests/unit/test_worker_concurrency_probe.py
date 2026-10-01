@@ -233,6 +233,23 @@ class FakeRedisClient:
         return None
 
 
+def test_failed_run_probe_reports_server_error(probe_module: ModuleType, capsys) -> None:
+    class FailedHttpClient(FakeHttpClient):
+        def get(self, path: str) -> FakeResponse:
+            return FakeResponse({"status": "error", "last_error": "StaleDataError: lost delivery"})
+
+    client = probe_module.ProbeClient(
+        base_url="http://127.0.0.1:2024",
+        redis_url="redis://127.0.0.1:6379/0",
+        http_client=FailedHttpClient(),
+        redis_client=FakeRedisClient(),
+    )
+    assert client.run_status(probe_module.RunRef("thread-1", "run-1")) == "error"
+    diagnostic = capsys.readouterr().err
+    assert "thread-1" in diagnostic and "run-1" in diagnostic
+    assert "StaleDataError: lost delivery" in diagnostic
+
+
 def test_probe_client_uses_stress_graph_http_contract(probe_module: ModuleType) -> None:
     http_client = FakeHttpClient()
     redis_client = FakeRedisClient()
