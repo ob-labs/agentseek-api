@@ -430,11 +430,16 @@ def seed_shutdown_probe(
         sleep=sleep,
         monotonic=monotonic,
     )
-    validate_statuses(
+    # Queue reservation precedes the SQL execution claim; processing tokens
+    # alone do not prove that both long jobs have reached running yet.
+    _wait_for_expected_statuses(
         client,
         {name: runs[name] for name in ("long-a", "long-b")},
         {"long-a": "running", "long-b": "running"},
         concurrency=2,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
     )
     return runs
 

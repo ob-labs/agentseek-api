@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import signal
+from contextlib import AsyncExitStack
 from uuid import uuid4
 
 from agentseek_api.core.database import db_manager
 from agentseek_api.services.redis_queue import RedisRunQueue
 from agentseek_api.services.run_jobs import RunExecutionJob, execute_run_job
+from agentseek_api.services.run_dispatch import run_recovery_service
 from agentseek_api.settings import settings
 
 
@@ -47,6 +49,10 @@ async def _execute_reserved_job(
     job_failed: asyncio.Event,
 ) -> None:
     try:
+        if lock_lost.is_set():
+            raise RuntimeError("Redis worker lost its active lease.")
+        job.owner_id = worker_id
+        job.recover_running = True
         await execute_run_job(job)
         if lock_lost.is_set() or not await queue.ack_if_worker_lock_owner(
             worker_id, token
@@ -225,6 +231,7 @@ async def run_worker(
     job_slots = asyncio.Semaphore(concurrent_jobs)
     active_jobs: set[asyncio.Task[None]] = set()
     job_failed = asyncio.Event()
+    recovery = AsyncExitStack()
 
     try:
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -247,6 +254,7 @@ async def run_worker(
             )
         )
         await run_queue.requeue_inflight()
+        await recovery.enter_async_context(run_recovery_service(queue=run_queue))
         timeout_seconds = (
             poll_timeout_seconds
             if poll_timeout_seconds is not None
@@ -322,6 +330,7 @@ async def run_worker(
             )
         _raise_if_worker_lock_lost(lock_lost, heartbeat_task)
     finally:
+        await recovery.aclose()
         for signum in registered_signals:
             loop.remove_signal_handler(signum)
         if active_jobs:

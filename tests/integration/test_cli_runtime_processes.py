@@ -508,7 +508,7 @@ def test_invalid_runtime_setting_is_redacted_and_fresh_child_exits(
         str(config_path),
     ]
     if role == "dev":
-        arguments.append("--no-reload")
+        arguments.extend(["--no-reload", "--no-browser"])
 
     result = _run_python(
         *arguments,
@@ -545,7 +545,7 @@ def test_invalid_port_reaches_runtime_child_with_cp1252_stdout(
         str(config_path),
     ]
     if role == "dev":
-        arguments.append("--no-reload")
+        arguments.extend(["--no-reload", "--no-browser"])
 
     result = _run_python(
         *arguments,

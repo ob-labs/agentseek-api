@@ -282,9 +282,17 @@ def benchmark(client):
         )
 
     persisted = client.portal.call(load_history)
-    assert persisted == buffered, (len(persisted), len(buffered))
+    # Compare the wire snapshot: Python tuples (for example user permissions)
+    # become JSON arrays during persistence and SSE serialization.
+    assert persisted == json.loads(safe_json_dumps(buffered)), (len(persisted), len(buffered))
     expected_run_events = [
-        (seq, json.loads(safe_json_dumps({"run_id": run_id, **payload})))
+        (
+            seq,
+            payload.get("method", payload.get("event", "message")),
+            json.loads(safe_json_dumps(
+                payload["params"]["data"] if "method" in payload else {"run_id": run_id, **payload}
+            )),
+        )
         for seq, payload in run_broker.snapshot_records(run_id)
     ]
     run_broker._events.pop(run_id, None)
@@ -296,7 +304,7 @@ def benchmark(client):
             line.split(": ", 1) for line in frame.splitlines() if ": " in line
         )
         if "data" in fields:
-            replayed_run_events.append((int(fields["id"]), json.loads(fields["data"])))
+            replayed_run_events.append((int(fields["id"]), fields["event"], json.loads(fields["data"])))
     assert replayed_run_events == expected_run_events
     report = {
         "source": agentseek_api.__file__,

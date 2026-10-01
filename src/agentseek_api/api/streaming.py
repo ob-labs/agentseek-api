@@ -11,6 +11,7 @@ from agentseek_api.core.database import db_manager
 from agentseek_api.core.orm import Run, Thread
 from agentseek_api.models.auth import User
 from agentseek_api.models.protocol import ProtocolCommandRequest, ProtocolEventStreamRequest
+from agentseek_api.services.stream_modes import normalize_stream_modes
 from agentseek_api.services.run_preparation import (
     ActiveThreadRunConflictError,
     prepare_and_submit_run,
@@ -134,11 +135,29 @@ async def handle_protocol_command(
             )
 
         try:
+            run_kwargs: dict[str, Any] | None = None
+            if payload.params.get("stream_mode") is not None:
+                # Validate stream mode before submission: an invalid value is a
+                # client error (400), not a missing resource (404).
+                try:
+                    stream_modes = normalize_stream_modes(payload.params.get("stream_mode"))
+                except ValueError as exc:
+                    return _protocol_error(
+                        request_id=payload.id,
+                        code="invalid_argument",
+                        message=str(exc),
+                        status_code=400,
+                    )
+                run_kwargs = {"stream_modes": stream_modes}
+            if payload.params.get("stream_subgraphs"):
+                run_kwargs = run_kwargs or {}
+                run_kwargs["stream_subgraphs"] = True
             run = await prepare_and_submit_run(
                 thread_id=thread_id,
                 assistant_id=assistant_id,
                 payload=_coerce_protocol_input(payload.params.get("input")),
                 user=user,
+                kwargs=run_kwargs,
             )
         except ValueError as exc:
             return _protocol_error(request_id=payload.id, code="invalid_argument", message=str(exc), status_code=404)
@@ -230,63 +249,14 @@ async def stream_thread_protocol_events(
     await _get_thread_row(thread_id=thread_id, user=user)
 
     async def _event_iter() -> AsyncIterator[str]:
-        current_seq = after_seq
-        events = await load_thread_stream_events(
-            thread_id,
-            channels=payload.channels,
-            namespaces=payload.namespaces,
-            depth=payload.depth,
-            after_seq=after_seq,
-        )
-        if not _uses_redis_executor():
-            events = thread_protocol_broker.replay_records(
-                thread_id,
-                persisted=events,
-                channels=payload.channels,
-                namespaces=payload.namespaces,
-                depth=payload.depth,
-                after_seq=after_seq,
-            )
-        for event in events:
-            seq = int(event.get("seq", 0))
-            current_seq = max(current_seq, seq)
-            method = str(event.get("method", "event"))
-            body = safe_json_dumps(event)
-            yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
-
-        if _uses_redis_executor():
-            async for event in iter_with_sse_keepalives(
-                _iter_persisted_thread_events(
-                    thread_id=thread_id,
-                    payload=payload,
-                    user_id=user.identity,
-                    after_seq=current_seq,
-                )
-            ):
-                if event is None:
-                    yield sse_keepalive_comment()
-                    continue
-                seq = int(event.get("seq", 0))
-                method = str(event.get("method", "event"))
-                body = safe_json_dumps(event)
-                yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
-            return
-
-        async for event in iter_with_sse_keepalives(
-            thread_protocol_broker.stream(
-                thread_id,
-                channels=payload.channels,
-                namespaces=payload.namespaces,
-                depth=payload.depth,
-                since=current_seq,
-            )
-        ):
+        async for event in iter_with_sse_keepalives(_iter_persisted_thread_events(
+            thread_id=thread_id, payload=payload, after_seq=after_seq, user_id=user.identity,
+        )):
             if event is None:
                 yield sse_keepalive_comment()
                 continue
             seq = int(event.get("seq", 0))
             method = str(event.get("method", "event"))
-            body = safe_json_dumps(event)
-            yield f"id: {seq}\nevent: {method}\ndata: {body}\n\n"
+            yield f"id: {seq}\nevent: {method}\ndata: {safe_json_dumps(event)}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")

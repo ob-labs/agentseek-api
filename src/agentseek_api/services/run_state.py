@@ -1,4 +1,5 @@
 import asyncio
+from bisect import bisect_left
 from collections import defaultdict, deque
 from collections.abc import AsyncIterator
 from typing import Any
@@ -18,9 +19,13 @@ class RunEventBroker:
         event_payload = {"event": event, **payload}
         if seq is None:
             seq = self._next_seq[run_id]
+
         self._next_seq[run_id] = max(self._next_seq[run_id], seq + 1)
-        self._events[run_id].append(event_payload)
-        self._seqs[run_id].append(seq)
+        index = bisect_left(self._seqs[run_id], seq)
+        if index < len(self._seqs[run_id]) and self._seqs[run_id][index] == seq:
+            return seq, dict(self._events[run_id][index])
+        self._events[run_id].insert(index, event_payload)
+        self._seqs[run_id].insert(index, seq)
         if event == "start":
             self._completed_runs.discard(run_id)
             try:
@@ -33,6 +38,26 @@ class RunEventBroker:
             self._prune_completed_runs()
         self._signals[run_id].set()
         return seq, dict(event_payload)
+
+    def publish_protocol(self, run_id: str, payload: dict[str, Any], *, seq: int | None = None) -> tuple[int, dict[str, Any]]:
+        """Publish a protocol-v2 event into the run's ordered log.
+
+        In inline mode this makes the run broker the single run-scoped log
+        shared by both lifecycle records (start/end) and protocol frames
+        (values/updates/messages/tools), so the replay endpoint reads one
+        monotonic ``seq`` cursor instead of mixing two sequence domains.
+        """
+        if seq is None:
+            seq = self._next_seq[run_id]
+
+        self._next_seq[run_id] = max(self._next_seq[run_id], seq + 1)
+        index = bisect_left(self._seqs[run_id], seq)
+        if index < len(self._seqs[run_id]) and self._seqs[run_id][index] == seq:
+            return seq, dict(self._events[run_id][index])
+        self._events[run_id].insert(index, payload)
+        self._seqs[run_id].insert(index, seq)
+        self._signals[run_id].set()
+        return seq, dict(payload)
 
     def snapshot(self, run_id: str) -> list[dict[str, Any]]:
         return [dict(event) for event in self._events.get(run_id, [])]

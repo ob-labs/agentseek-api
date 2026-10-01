@@ -87,7 +87,7 @@ requires-dist = [
     { name = "langchain-oceanbase", specifier = ">=0.6.4,<0.7" },
     { name = "langchain-oceanbase", extras = ["pyseekdb"], marker = "extra == 'embedded'", specifier = ">=0.6.4,<0.7" },
     { name = "langchain-openai", specifier = ">=1.0.0" },
-    { name = "langgraph", specifier = ">=1.0.6" },
+    { name = "langgraph", specifier = ">=1.2.0" },
     { name = "langgraph-sdk", specifier = ">=0.3.5" },
     { name = "mcp", specifier = ">=1.27.1,<2" },
     { name = "packaging", specifier = ">=24.0" },

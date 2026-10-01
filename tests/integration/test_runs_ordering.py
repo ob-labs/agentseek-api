@@ -1,6 +1,24 @@
 from fastapi.testclient import TestClient
 
 
+def test_ordering_setup_waits_for_background_runs(client: TestClient, monkeypatch) -> None:
+    import asyncio
+    from agentseek_api.services.run_jobs import execute_run_job
+
+    class DelayedExecutor:
+        async def submit(self, job):
+            async def execute():
+                await asyncio.sleep(0.05)
+                await execute_run_job(job)
+            asyncio.create_task(execute())
+
+    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", DelayedExecutor)
+    thread_id, _, run_ids = _setup_thread_with_runs(client, count=2)
+    assert len(run_ids) == 2
+    assert all(client.get(f"/threads/{thread_id}/runs/{run_id}").json()["status"] == "success"
+               for run_id in run_ids)
+
+
 def _setup_thread_with_runs(client: TestClient, count: int = 3) -> tuple[str, str, list[str]]:
     assistant = client.post("/assistants", json={"name": "order-assistant", "graph_id": "default"})
     assert assistant.status_code == 200
@@ -17,7 +35,13 @@ def _setup_thread_with_runs(client: TestClient, count: int = 3) -> tuple[str, st
             json={"assistant_id": assistant_id, "input": {"index": i}},
         )
         assert resp.status_code == 200
-        run_ids.append(resp.json()["run_id"])
+        run_id = resp.json()["run_id"]
+        # POST returns an accepted run, not a guarantee that it has finished.
+        # Recovery may claim it before even the synchronous test executor does.
+        completed = client.get(f"/threads/{thread_id}/runs/{run_id}/wait")
+        assert completed.status_code == 200
+        assert completed.json()["status"] == "success"
+        run_ids.append(run_id)
     return thread_id, assistant_id, run_ids
 
 

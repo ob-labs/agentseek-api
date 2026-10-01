@@ -100,7 +100,7 @@ def test_thread_run_wait_and_stream_creation_routes(client: TestClient) -> None:
     joined = client.get(streamed.headers["location"])
     assert joined.status_code == 200
     joined_events = _parse_sse_events(joined.text)
-    assert [event["event"] for event in joined_events] == ["metadata"]
+    assert [event["event"] for event in joined_events] == ["metadata", "end"]
     assert "event: start" not in joined.text
     assert "event: message_chunk" not in joined.text
 
@@ -206,7 +206,7 @@ def test_stateless_wait_stream_and_batch_routes(client: TestClient) -> None:
     joined = client.get(streamed.headers["location"])
     assert joined.status_code == 200
     joined_events = _parse_sse_events(joined.text)
-    assert [event["event"] for event in joined_events] == ["metadata"]
+    assert [event["event"] for event in joined_events] == ["metadata", "end"]
     fetched = client.get(streamed.headers["content-location"])
     assert fetched.status_code == 200
     assert fetched.json()["run_id"] == run_id
@@ -353,7 +353,7 @@ def test_join_stream_accepts_official_json_array_stream_mode_query_without_repla
 
     assert streamed.status_code == 200
     events = _parse_sse_events(streamed.text)
-    assert [event["event"] for event in events] == ["metadata"]
+    assert [event["event"] for event in events] == ["metadata", "end"]
 
 
 def test_join_stream_rejects_blank_stream_mode_query(client: TestClient) -> None:
@@ -615,21 +615,15 @@ def test_create_run_stream_filters_protocol_events_to_created_run(client: TestCl
     async def fake_create_run(*args, **kwargs):
         return created
 
-    async def fake_stream(*args, **kwargs):
-        yield {
-            "seq": 1,
-            "method": "updates",
-            "params": {"run_id": "foreign-run", "data": {"output": {"echo": {"message": "foreign"}}}},
-        }
-        yield {
-            "seq": 2,
-            "method": "updates",
-            "params": {"run_id": "created-run", "data": {"output": {"echo": {"message": "created"}}}},
-        }
-
+    async def seed_logs():
+        from agentseek_api.services.stream_persistence import append_run_stream_event_atomic
+        for identity, message in (("foreign-run", "foreign"), ("created-run", "created")):
+            await append_run_stream_event_atomic(identity, {
+                "method": "updates",
+                "params": {"run_id": identity, "data": {"output": {"echo": {"message": message}}}},
+            })
+    client.portal.call(seed_logs)
     monkeypatch.setattr("agentseek_api.api.runs.create_run", fake_create_run)
-    monkeypatch.setattr("agentseek_api.api.runs.thread_protocol_broker.latest_seq", lambda _thread_id: 0)
-    monkeypatch.setattr("agentseek_api.api.runs.thread_protocol_broker.stream", fake_stream)
 
     response = client.post(
         f"/threads/{thread_id}/runs/stream",
@@ -882,3 +876,32 @@ def test_create_run_compat_openapi_documents_wait_and_stream_routes() -> None:
     assert "stream_resumable" in stateless_schema["properties"]
     assert "feedback_keys" in stateless_schema["properties"]
     assert "durability" in stateless_schema["properties"]
+
+
+def test_create_run_stream_events_mode_emits_raw_astream_events(client: TestClient) -> None:
+    """HTTP-level regression for ``stream_mode=events``.
+
+    The events channel must surface each raw ``astream_events()`` item (SSE
+    ``event: events`` with the raw event discriminator in ``data.event``), not
+    just the translated side effects.
+    """
+    assistant_id = _create_assistant(client, graph_id="stress_test")
+    thread_id = _create_thread(client)
+
+    response = client.post(
+        f"/threads/{thread_id}/runs/stream",
+        json={"assistant_id": assistant_id, "input": {"delay": 0.0, "steps": 1}, "stream_mode": "events"},
+    )
+
+    assert response.status_code == 200
+    events = _parse_sse_events(response.text)
+    raw_events = [event for event in events if event["event"] == "events"]
+    assert raw_events, "expected raw astream_events() items on the events channel"
+    raw_names = {
+        event["data"].get("event")
+        for event in raw_events
+        if isinstance(event["data"], dict)
+    }
+    assert any(name in raw_names for name in ("on_chain_start", "on_chain_stream")), (
+        f"expected raw on_chain_* events, got: {raw_names}"
+    )

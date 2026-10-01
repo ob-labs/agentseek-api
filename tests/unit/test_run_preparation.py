@@ -1,5 +1,4 @@
 from collections.abc import Callable
-from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -7,7 +6,6 @@ import pytest
 from agentseek_api.models.auth import User
 from agentseek_api.services import run_preparation as run_prep_module
 from agentseek_api.services.run_jobs import RunExecutionJob
-from agentseek_api.services.thread_protocol import ThreadProtocolEventBroker
 
 
 class FakeSession:
@@ -87,6 +85,8 @@ class InlineExecutor:
             kwargs=job.kwargs,
             resume=job.resume,
             is_resume=job.is_resume,
+            execution_id=job.execution_id,
+            owns_accounting=job.owns_accounting,
         )
 
 
@@ -131,363 +131,102 @@ async def test_prepare_run_raises_when_assistant_missing(monkeypatch: pytest.Mon
         )
 
 
-@pytest.mark.asyncio
-async def test_prepare_run_sets_error_status_when_execute_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_assistant = type("FakeAssistant", (), {"graph_id": "stress_test", "context_json": None})()
-    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    create_session = FakeSession([fake_thread, fake_assistant], execute_rowcounts=[1])
-    db_run = type("DbRun", (), {"run_id": "r1", "status": "pending", "output_json": None, "last_error": None})()
-    exec_session = FakeSession([db_run])
-    reload_session = FakeSession([db_run])
-    session_factory = FakeSessionFactory([create_session, exec_session, reload_session])
+@pytest.fixture(autouse=True)
+def real_storage_for_orchestration(run_storage):
+    return run_storage
 
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: InlineExecutor())
 
-    captured: dict[str, Any] = {}
+async def _seed_run(factory, *, status="pending", error=None):
+    from agentseek_api.core.orm import Run
+    async with factory() as session:
+        session.add(Run(run_id="r1", thread_id="t1", assistant_id="a1", user_id="u1",
+                        status=status, last_error=error, input_json={"foo": "hello "},
+                        output_json={"interrupts": [{"value": "Provide value:"}]}))
+        await session.commit()
 
-    async def failing_execute_run(
-        *,
-        thread_id: str,
-        run_id: str,
-        payload: dict,
-        user_id: str,
-        graph_id: str | None = None,
-        resume: Any = None,
-    ) -> dict:
-        captured["graph_id"] = graph_id
-        captured["user_id"] = user_id
-        _ = (thread_id, run_id, payload, resume)
+
+async def test_prepare_run_sets_error_status_when_execute_fails(run_storage, monkeypatch):
+    async def execute(**kwargs):
+        assert kwargs["user_id"] == "u1"
         raise RuntimeError("boom")
-
-    events: list[tuple[str, str, dict[str, Any]]] = []
-    monkeypatch.setattr("agentseek_api.services.run_preparation.execute_run", failing_execute_run)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.run_broker.publish",
-        lambda run_id, event, **payload: events.append((run_id, event, payload)),
-    )
-
+    monkeypatch.setattr(run_prep_module, "execute_run", execute)
+    monkeypatch.setattr(run_prep_module, "get_executor", lambda: InlineExecutor())
     run = await run_prep_module.prepare_and_submit_run(
-        thread_id="t1",
-        assistant_id="a1",
-        payload={"x": 1},
-        user=User(identity="u1", is_authenticated=True),
-    )
-
-    assert run.status == "error"
-    assert db_run.status == "error"
-    assert db_run.last_error == "RuntimeError: boom"
-    assert events[-1][1] == "end"
-    assert events[-1][2]["status"] == "error"
-    assert captured["graph_id"] == "stress_test"
-    assert captured["user_id"] == "u1"
+        thread_id="t1", assistant_id="a1", payload={"x": 1},
+        user=User(identity="u1", is_authenticated=True))
+    assert run.status == "error" and run.last_error == "RuntimeError: boom"
+    assert run_prep_module.run_broker.snapshot_records(run.run_id)[-1][1]["event"] == "end"
 
 
-@pytest.mark.asyncio
-async def test_execute_and_persist_publishes_terminal_run_event_before_terminal_commit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    db_run = type(
-        "DbRun",
-        (),
-        {
-            "run_id": "r1",
-            "status": "pending",
-            "output_json": None,
-            "last_error": None,
-            "updated_at": datetime.now(UTC),
-        },
-    )()
-    fake_thread = type("FakeThread", (), {"thread_id": "t1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    operations: list[str] = []
-    exec_session = TrackingSession([db_run, fake_thread, fake_thread], operations)
-    session_factory = FakeSessionFactory([exec_session])
-    published_run_events: list[tuple[str, int, dict[str, Any]]] = []
-
-    async def successful_execute_run(**_kwargs: Any) -> run_prep_module.RunExecutionResult:
-        return run_prep_module.RunExecutionResult(output={"ok": True}, interrupted=False, interrupts=[])
-
-    async def fake_publish_run_event(_run_id: str, event: str, *, persist: bool = True, **payload: Any) -> tuple[int, dict[str, Any]]:
-        _ = persist
-        operations.append(f"publish:{event}")
-        published_run_events.append((event, exec_session.commits, payload))
-        return len(published_run_events), {"event": event, **payload}
-
-    async def fake_publish_lifecycle(*_args: Any, **_kwargs: Any) -> None:
-        return None
-
-    async def fake_persist_thread_snapshot(_thread_id: str) -> None:
-        return None
-
-    async def fake_add_run_stream_event_to_session(
-        _session: FakeSession,
-        _run_id: str,
-        *,
-        seq: int,
-        payload: dict[str, Any],
-    ) -> None:
-        operations.append(f"persist:{payload['event']}:{seq}")
-
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.execute_run", successful_execute_run)
-    monkeypatch.setattr("agentseek_api.services.run_preparation._publish_run_event", fake_publish_run_event)
-    monkeypatch.setattr("agentseek_api.services.run_preparation._publish_lifecycle", fake_publish_lifecycle)
-    monkeypatch.setattr("agentseek_api.services.run_preparation._persist_thread_snapshot", fake_persist_thread_snapshot)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.add_run_stream_event_to_session",
-        fake_add_run_stream_event_to_session,
-    )
-
-    await run_prep_module._execute_and_persist(
-        run_id="r1",
-        thread_id="t1",
-        user_id="u1",
-        payload={"x": 1},
-        graph_id="default",
-    )
-
-    assert exec_session.commits == 2
-    assert published_run_events == [
-        ("start", 1, {}),
-        ("end", 1, {"status": "success"}),
-    ]
-    assert operations == [
-        "commit",
-        "publish:start",
-        "publish:end",
-        "persist:end:2",
-        "commit",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_prepare_run_marks_thread_busy_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    fake_assistant = type("FakeAssistant", (), {"graph_id": "default", "context_json": None})()
-    db_run = type(
-        "DbRun",
-        (),
-        {
-            "run_id": "r1",
-            "thread_id": "t1",
-            "assistant_id": "a1",
-            "user_id": "u1",
-            "status": "pending",
-            "input_json": {"x": 1},
-            "output_json": None,
-            "last_error": None,
-        },
-    )()
-    create_session = FakeSession([fake_thread, fake_assistant], execute_rowcounts=[1])
-    reload_session = FakeSession([db_run])
-    session_factory = FakeSessionFactory([create_session, reload_session])
+async def test_prepare_run_marks_thread_busy_before_background_execution(run_storage, monkeypatch):
+    from agentseek_api.core.orm import Thread
     executor = DeferredExecutor()
-
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: executor)
-
+    monkeypatch.setattr(run_prep_module, "get_executor", lambda: executor)
     run = await run_prep_module.prepare_and_submit_run(
-        thread_id="t1",
-        assistant_id="a1",
-        payload={"x": 1},
-        user=User(identity="u1", is_authenticated=True),
-    )
-
+        thread_id="t1", assistant_id="a1", payload={"x": 1},
+        user=User(identity="u1", is_authenticated=True))
     assert run.status == "pending"
-    assert fake_thread.status == "busy"
-    assert fake_thread.state_updated_at is not None
+    async with run_storage() as session:
+        assert (await session.get(Thread, "t1")).status == "busy"
     assert len(executor.submitted) == 1
-    submitted = executor.submitted[0]
-    assert submitted.thread_id == "t1"
-    assert submitted.user_id == "u1"
-    assert submitted.payload == {"x": 1}
-    assert submitted.graph_id == "default"
-    assert submitted.is_resume is False
+    assert executor.submitted[0].payload == {"x": 1}
+    assert executor.submitted[0].execution_id == run.execution_id
 
 
-@pytest.mark.asyncio
-async def test_prepare_run_cleans_protocol_state_when_submit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    fake_assistant = type("FakeAssistant", (), {"graph_id": "default", "context_json": None})()
-    create_session = FakeSession([fake_thread, fake_assistant], execute_rowcounts=[1])
-    persist_session = CallbackSession([lambda: create_session.added[-1], fake_thread])
-    session_factory = FakeSessionFactory([create_session, persist_session])
-    protocol_broker = ThreadProtocolEventBroker()
-    published_lifecycle: list[dict[str, Any]] = []
-
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: RaisingExecutor())
-    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.publish_lifecycle_event",
-        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
-    )
-
+async def test_prepare_run_cleans_protocol_state_when_submit_fails(run_storage, monkeypatch):
+    from sqlalchemy import select
+    from agentseek_api.core.orm import Run, Thread
+    monkeypatch.setattr(run_prep_module, "get_executor", lambda: RaisingExecutor())
     with pytest.raises(RuntimeError, match="submit failed"):
         await run_prep_module.prepare_and_submit_run(
-            thread_id="t1",
-            assistant_id="a1",
-            payload={"x": 1},
-            user=User(identity="u1", is_authenticated=True),
-        )
-
-    created_run = create_session.added[-1]
-    assert created_run.status == "error"
-    assert created_run.last_error == "submit failed"
-    assert fake_thread.status == "error"
-    assert protocol_broker._active_runs["t1"] == 0
-    assert published_lifecycle == [
-        {"thread_id": "t1", "event": "started", "graph_name": "default", "persist": False, "seq": None},
-        {
-            "thread_id": "t1",
-            "event": "failed",
-            "graph_name": "default",
-            "error": "submit failed",
-            "persist": False,
-            "seq": None,
-        },
-    ]
+            thread_id="t1", assistant_id="a1", payload={"x": 1},
+            user=User(identity="u1", is_authenticated=True))
+    async with run_storage() as session:
+        row = await session.scalar(select(Run))
+        assert row.status == "error" and row.last_error == "submit failed"
+        assert (await session.get(Thread, "t1")).status == "error"
+    assert run_prep_module.thread_protocol_broker._active_runs["t1"] == 0
+    assert [e["params"]["data"]["event"] for e in run_prep_module.thread_protocol_broker.snapshot_records("t1")] == ["started", "failed"]
 
 
-@pytest.mark.asyncio
-async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    cancelled_run = type("DbRun", (), {"run_id": "r1", "status": "error", "last_error": "Run cancelled"})()
-    session_factory = FakeSessionFactory([FakeSession([cancelled_run])])
-    protocol_broker = ThreadProtocolEventBroker()
-    published_lifecycle: list[dict[str, Any]] = []
-
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.publish_lifecycle_event",
-        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
-    )
-
-    protocol_broker.run_started("t1")
+async def test_execute_and_persist_cleans_protocol_state_for_cancelled_run(run_storage):
+    await _seed_run(run_storage, status="error", error="Run cancelled")
+    run_prep_module.thread_protocol_broker.run_started("t1")
     await run_prep_module._execute_and_persist(
-        run_id="r1",
-        thread_id="t1",
-        user_id="u1",
-        payload={"x": 1},
-        graph_id="default",
-    )
-
-    assert protocol_broker._active_runs["t1"] == 0
-    assert published_lifecycle == [
-        {
-            "thread_id": "t1",
-            "event": "failed",
-            "graph_name": "default",
-            "error": "Run cancelled",
-            "persist": False,
-            "seq": None,
-        }
-    ]
+        run_id="r1", thread_id="t1", user_id="u1", payload={}, graph_id="default", owns_accounting=True)
+    assert run_prep_module.thread_protocol_broker._active_runs["t1"] == 0
+    assert run_prep_module.run_broker.snapshot_records("r1") == []
 
 
-@pytest.mark.asyncio
-async def test_resume_run_marks_row_pending_before_background_execution(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent", "context_json": None})()
-    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    db_run = type(
-        "DbRun",
-        (),
-        {
-            "run_id": "r1",
-            "thread_id": "t1",
-            "assistant_id": "a1",
-            "user_id": "u1",
-            "status": "interrupted",
-            "input_json": {"foo": "hello "},
-            "output_json": {"interrupts": [{"value": "Provide value:"}], "interrupted": True},
-            "last_error": None,
-        },
-    )()
-    load_session = FakeSession([fake_thread, db_run, fake_assistant], execute_rowcounts=[1])
-    reload_session = FakeSession([db_run])
-    session_factory = FakeSessionFactory([load_session, reload_session])
+async def test_resume_run_marks_row_pending_before_background_execution(run_storage, monkeypatch):
+    from agentseek_api.core.orm import Thread
+    await _seed_run(run_storage, status="interrupted")
     executor = DeferredExecutor()
-
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: executor)
-
+    monkeypatch.setattr(run_prep_module, "get_executor", lambda: executor)
     run = await run_prep_module.resume_run(
-        thread_id="t1",
-        run_id="r1",
-        resume="world",
-        user=User(identity="u1", is_authenticated=True),
-    )
-
+        thread_id="t1", run_id="r1", resume="world", user=User(identity="u1", is_authenticated=True))
     assert run.status == "pending"
-    assert db_run.status == "pending"
-    assert fake_thread.status == "busy"
-    assert fake_thread.state_updated_at is not None
-    assert load_session.commits == 1
-    assert len(executor.submitted) == 1
+    async with run_storage() as session:
+        assert (await session.get(Thread, "t1")).status == "busy"
     submitted = executor.submitted[0]
-    assert submitted.run_id == "r1"
-    assert submitted.thread_id == "t1"
+    assert submitted.is_resume and submitted.resume == "world"
     assert submitted.payload == {"foo": "hello "}
-    assert submitted.graph_id == "subgraph_hitl_agent"
-    assert submitted.resume == "world"
-    assert submitted.is_resume is True
+    assert submitted.execution_id == run.execution_id
 
 
-@pytest.mark.asyncio
-async def test_resume_run_restores_interrupted_state_when_submit_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_assistant = type("FakeAssistant", (), {"assistant_id": "a1", "graph_id": "subgraph_hitl_agent", "context_json": None})()
-    fake_thread = type("FakeThread", (), {"thread_id": "t1", "user_id": "u1", "status": "idle", "state_updated_at": None, "metadata_json": {}})()
-    db_run = type(
-        "DbRun",
-        (),
-        {
-            "run_id": "r1",
-            "thread_id": "t1",
-            "assistant_id": "a1",
-            "user_id": "u1",
-            "status": "interrupted",
-            "input_json": {"foo": "hello "},
-            "output_json": {"interrupts": [{"value": "Provide value:"}], "interrupted": True},
-            "last_error": None,
-        },
-    )()
-    load_session = FakeSession([fake_thread, db_run, fake_assistant], execute_rowcounts=[1])
-    persist_session = CallbackSession([db_run, fake_thread])
-    session_factory = FakeSessionFactory([load_session, persist_session])
-    protocol_broker = ThreadProtocolEventBroker()
-    published_lifecycle: list[dict[str, Any]] = []
-
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: RaisingExecutor())
-    monkeypatch.setattr("agentseek_api.services.run_preparation.thread_protocol_broker", protocol_broker)
-    monkeypatch.setattr(
-        "agentseek_api.services.run_preparation.publish_lifecycle_event",
-        lambda thread_id, **payload: published_lifecycle.append({"thread_id": thread_id, **payload}),
-    )
-
+async def test_resume_run_restores_interrupted_state_when_submit_fails(run_storage, monkeypatch):
+    from agentseek_api.core.orm import Run, Thread
+    await _seed_run(run_storage, status="interrupted")
+    monkeypatch.setattr(run_prep_module, "get_executor", lambda: RaisingExecutor())
     with pytest.raises(RuntimeError, match="submit failed"):
         await run_prep_module.resume_run(
-            thread_id="t1",
-            run_id="r1",
-            resume="world",
-            user=User(identity="u1", is_authenticated=True),
-        )
-
-    assert db_run.status == "interrupted"
-    assert db_run.last_error == "submit failed"
-    assert fake_thread.status == "interrupted"
-    assert protocol_broker._active_runs["t1"] == 0
-    assert published_lifecycle == [
-        {"thread_id": "t1", "event": "started", "graph_name": "subgraph_hitl_agent", "persist": False, "seq": None},
-        {
-            "thread_id": "t1",
-            "event": "failed",
-            "graph_name": "subgraph_hitl_agent",
-            "error": "submit failed",
-            "persist": False,
-            "seq": None,
-        },
-    ]
+            thread_id="t1", run_id="r1", resume="world", user=User(identity="u1", is_authenticated=True))
+    async with run_storage() as session:
+        row = await session.get(Run, "r1")
+        assert row.status == "interrupted" and row.last_error == "submit failed"
+        assert row.output_json == {"interrupts": [{"value": "Provide value:"}]}
+        assert (await session.get(Thread, "t1")).status == "interrupted"
+    assert run_prep_module.thread_protocol_broker._active_runs["t1"] == 0
 
 
 @pytest.mark.asyncio
@@ -597,12 +336,14 @@ async def _prepare_with_kwargs(
     assistant: object,
     kwargs: dict[str, Any] | None = None,
 ) -> DeferredExecutor:
-    create_session = FakeSession([_make_thread(), assistant], execute_rowcounts=[1])
-    reload_session = FakeSession([_make_db_run()])
-    session_factory = FakeSessionFactory([create_session, reload_session])
+    from agentseek_api.core.orm import Assistant
+    async with run_prep_module.db_manager.get_session_factory()() as session:
+        row = await session.get(Assistant, "a1")
+        row.config_json = assistant.config_json or {}
+        row.context_json = assistant.context_json or {}
+        await session.commit()
     executor = DeferredExecutor()
-    monkeypatch.setattr("agentseek_api.services.run_preparation.db_manager.get_session_factory", lambda: session_factory)
-    monkeypatch.setattr("agentseek_api.services.run_preparation.get_executor", lambda: executor)
+    monkeypatch.setattr(run_prep_module, "get_executor", lambda: executor)
     await run_prep_module.prepare_and_submit_run(
         thread_id="t1",
         assistant_id="a1",

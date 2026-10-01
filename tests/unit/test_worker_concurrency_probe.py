@@ -435,6 +435,33 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
     )
 
 
+def test_shutdown_seed_waits_for_claim_after_queue_reservation(probe_module: ModuleType) -> None:
+    clock = FakeClock()
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=1, processing=2)],
+        statuses={"long-a": ["pending", "running"], "long-b": ["pending", "running"]},
+    )
+    runs = probe_module.seed_shutdown_probe(
+        client, timeout_seconds=1, sleep=clock.sleep, monotonic=clock.monotonic,
+    )
+    assert set(runs) == {"long-a", "long-b", "queued"}
+    assert clock.now > 0
+
+
+def test_shutdown_seed_times_out_if_reserved_job_never_starts(probe_module: ModuleType) -> None:
+    clock = FakeClock()
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=1, processing=2)],
+        statuses={"long-a": "pending", "long-b": "running"},
+    )
+    with pytest.raises(AssertionError, match=r"long-a.*timed out.*pending"):
+        probe_module.seed_shutdown_probe(
+            client, timeout_seconds=0.1, sleep=clock.sleep, monotonic=clock.monotonic,
+        )
+
+
 def test_shutdown_seed_requires_both_long_runs_to_still_be_running(
     probe_module: ModuleType,
 ) -> None:
@@ -444,7 +471,7 @@ def test_shutdown_seed_requires_both_long_runs_to_still_be_running(
         statuses={"long-a": "running", "long-b": "success"},
     )
 
-    with pytest.raises(AssertionError, match=r"long-b='success'.*'running'"):
+    with pytest.raises(AssertionError, match=r"long-b.*success.*running"):
         probe_module.seed_shutdown_probe(client, timeout_seconds=1.0, sleep=lambda _: None)
 
 

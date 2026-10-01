@@ -102,6 +102,9 @@ class ThreadProtocolEventBroker:
         self._mark_active(thread_id)
         if seq is None:
             seq = self._next_seq[thread_id]
+        for existing in self._events.get(thread_id, []):
+            if existing["seq"] == seq:
+                return dict(existing)
         self._next_seq[thread_id] = max(self._next_seq[thread_id], seq + 1)
         event = {
             "type": "event",
@@ -110,6 +113,7 @@ class ThreadProtocolEventBroker:
             **payload,
         }
         self._events[thread_id].append(event)
+        self._events[thread_id].sort(key=lambda item: item["seq"])
         self._prune_thread_events(thread_id)
         self._signals[thread_id].set()
         return event
@@ -119,7 +123,7 @@ class ThreadProtocolEventBroker:
         thread_id: str,
         payload: dict[str, Any],
         *,
-        persist: bool = True,
+        persist: bool = False,
         seq: int | None = None,
     ) -> dict[str, Any]:
         event = self._record_event(thread_id, payload, seq=seq)
@@ -241,21 +245,76 @@ class ThreadProtocolEventBroker:
 thread_protocol_broker = ThreadProtocolEventBroker()
 
 
-async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-    if settings.EXECUTOR_BACKEND.strip().lower() != "redis":
-        return await thread_protocol_broker.apublish(thread_id, payload)
-    try:
-        from agentseek_api.services.stream_persistence import append_redis_thread_stream_event
+async def _persist_protocol_to_run_stream(run_id: str, payload: dict[str, Any]) -> None:
+    """Append a protocol event to the run's ordered stream.
 
-        seq, _ = await append_redis_thread_stream_event(thread_id, payload)
-    except Exception:
-        logger.warning(
-            "Failed to atomically append Redis thread stream event",
-            extra={"thread_id": thread_id},
-            exc_info=True,
-        )
-        seq = None
-    return thread_protocol_broker.publish(thread_id, payload, persist=False, seq=seq)
+    Keeps the run stream (the source for ``GET /runs/{id}/stream``) as a single
+    run-scoped, monotonically sequenced log of both lifecycle records and
+    protocol frames, so the replay cursor is one domain instead of mixing run
+    and thread sequence spaces. Durable before expose: the event row (and its
+    seq) is committed first; the in-memory broker is only updated afterwards.
+    """
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
+        from agentseek_api.services.stream_persistence import append_redis_run_stream_event
+
+        try:
+            await append_redis_run_stream_event(run_id, payload)
+        except Exception:
+            logger.warning(
+                "Failed to atomically append Redis run stream event",
+                extra={"run_id": run_id},
+                exc_info=True,
+            )
+        return
+    from agentseek_api.services.run_state import run_broker
+    from agentseek_api.services.stream_persistence import append_run_stream_event_atomic
+
+    seq, _ = await append_run_stream_event_atomic(run_id, payload)
+    run_broker.publish_protocol(run_id, payload, seq=seq)
+
+
+async def _apublish_thread_event(thread_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    from uuid import uuid4
+    from agentseek_api.services import stream_persistence as persistence
+    from agentseek_api.services.run_state import run_broker
+    from agentseek_api.services.transaction_retry import retry_transaction
+
+    run_id = (payload.get("params") or {}).get("run_id")
+    if settings.EXECUTOR_BACKEND.strip().lower() == "redis":
+        if run_id:
+            records = await persistence.append_redis_protocol_event(
+                operation_id=str(uuid4()), run_id=run_id, thread_id=thread_id, payload=payload)
+            if not records:
+                return dict(payload)  # Cancelled/deleted generations are deliberately dropped.
+            run_record, thread_record = records
+            # Required dual writes are complete before either notification.
+            run_broker.publish_protocol(run_id, run_record[1], seq=run_record[0])
+            seq, saved = thread_record
+        else:
+            seq, saved = await persistence.append_redis_thread_stream_event(thread_id, payload)
+        return thread_protocol_broker.publish(thread_id, saved, persist=False, seq=seq)
+
+    buffer = persistence._stream_buffer.get()
+    if buffer is not None and buffer.thread_id == thread_id and (not run_id or buffer.run_id == run_id):
+        from agentseek_api.services.stream_event_buffer import StreamEvent
+        records = [StreamEvent("thread", thread_id, 0, payload,
+            lambda seq, saved: thread_protocol_broker.publish(thread_id, saved, persist=False, seq=seq),
+        )]
+        if run_id:
+            records.append(StreamEvent("run", run_id, 0, payload,
+                lambda seq, saved: run_broker.publish_protocol(run_id, saved, seq=seq)))
+        if await buffer.append_many(records):
+            return dict(payload)
+    if not run_id:
+        seq, saved = await persistence.append_thread_stream_event_atomic(thread_id, payload)
+    else:
+        async def append_pair(session):
+            run_record = await persistence.add_run_stream_event_to_session(session, run_id, payload=payload)
+            thread_record = await persistence.add_thread_stream_event_to_session(session, thread_id, payload=payload)
+            return run_record, thread_record
+        run_record, (seq, saved) = await retry_transaction(append_pair)
+        run_broker.publish_protocol(run_id, run_record[1], seq=run_record[0])
+    return thread_protocol_broker.publish(thread_id, saved, persist=False, seq=seq)
 
 
 def publish_lifecycle_event(
@@ -265,7 +324,7 @@ def publish_lifecycle_event(
     graph_name: str | None = None,
     error: str | None = None,
     namespace: list[str] | None = None,
-    persist: bool = True,
+    persist: bool = False,
     seq: int | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {"event": event}
@@ -356,6 +415,7 @@ async def apublish_tool_event(
     output_payload: Any | None = None,
     error_message: str | None = None,
     namespace: list[str] | None = None,
+    run_id: str | None = None,
 ) -> dict[str, Any]:
     data: dict[str, Any] = {"event": tool_event, "tool_call_id": tool_call_id}
     if tool_name is not None:
@@ -373,6 +433,8 @@ async def apublish_tool_event(
     }
     if node is not None:
         params["node"] = node
+    if run_id is not None:
+        params["run_id"] = run_id
     return await _apublish_thread_event(thread_id, {"method": "tools", "params": params})
 
 
@@ -382,6 +444,7 @@ def publish_values_event(
     values: Any,
     namespace: list[str] | None = None,
     run_id: str | None = None,
+    persist: bool = False,
 ) -> dict[str, Any]:
     params: dict[str, Any] = {
         "namespace": namespace or [],
@@ -396,6 +459,7 @@ def publish_values_event(
             "method": "values",
             "params": params,
         },
+        persist=persist,
     )
 
 

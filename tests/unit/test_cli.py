@@ -1393,7 +1393,7 @@ def test_onboard_banner_falls_back_before_writing_to_cp1252_stream(
     stdout = _EncodingTextStream("cp1252")
     arguments = [role]
     if role == "dev":
-        arguments.append("--no-reload")
+        arguments.extend(["--no-reload", "--no-browser"])
 
     exit_code = main(
         arguments,
@@ -1466,7 +1466,7 @@ def test_dev_command_prefers_agentseek_json_over_langgraph_json(tmp_path: Path) 
     _write_basic_langgraph_config(tmp_path)
     capture = _RunCapture()
 
-    exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
+    exit_code = main(["dev", "--no-browser", "--no-reload"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
     assert capture.command[1:] == [
@@ -1751,6 +1751,7 @@ def test_dev_command_accepts_langgraph_cli_flags_and_env_file(
     exit_code = main(
         [
             "dev",
+            "--no-browser",
             "--config",
             str(config_path),
             "--host",
@@ -1815,7 +1816,7 @@ def test_dev_command_loads_config_env_mapping_and_auth_path(
     capture = _RunCapture()
 
     exit_code = main(
-        ["dev", "--config", str(config_path), "--no-reload"],
+        ["dev", "--no-browser", "--config", str(config_path), "--no-reload"],
         runner=capture,
         cwd=tmp_path,
     )
@@ -1857,6 +1858,7 @@ def test_dev_command_merges_config_env_file_before_cli_env_file(
     exit_code = main(
         [
             "dev",
+            "--no-browser",
             "--config",
             str(config_path),
             "--env-file",
@@ -1891,6 +1893,7 @@ def test_dev_command_preserves_dotenv_default_and_bare_variable_syntax(
     exit_code = main(
         [
             "dev",
+            "--no-browser",
             "--config",
             str(config_path),
             "--env-file",
@@ -1913,7 +1916,7 @@ def test_dev_command_rejects_unsupported_langgraph_flags(tmp_path: Path) -> None
     _write_basic_langgraph_config(tmp_path)
     stderr = io.StringIO()
 
-    exit_code = main(["dev", "--tunnel"], cwd=tmp_path, stderr=stderr)
+    exit_code = main(["dev", "--no-browser", "--tunnel"], cwd=tmp_path, stderr=stderr)
 
     assert exit_code == 2
     assert (
@@ -1935,7 +1938,7 @@ def test_dev_command_forces_local_studio_auth_after_inherited_env(
     monkeypatch.setenv("STUDIO_AUTH_LOCAL_DEV", "false")
     capture = _RunCapture()
 
-    exit_code = main(["dev", "--no-reload"], runner=capture, cwd=tmp_path)
+    exit_code = main(["dev", "--no-browser", "--no-reload"], runner=capture, cwd=tmp_path)
 
     assert exit_code == 0
     assert capture.env is not None
@@ -2419,7 +2422,7 @@ def test_dev_command_rejects_missing_explicit_config(tmp_path: Path) -> None:
     stderr = io.StringIO()
 
     exit_code = main(
-        ["dev", "--config", str(tmp_path / "missing.json")], cwd=tmp_path, stderr=stderr
+        ["dev", "--no-browser", "--config", str(tmp_path / "missing.json")], cwd=tmp_path, stderr=stderr
     )
 
     assert exit_code == 2

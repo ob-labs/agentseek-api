@@ -1,4 +1,5 @@
 import asyncio
+import logging
 
 from agentseek_api.services.redis_queue import RedisRunQueue
 from agentseek_api.services.run_jobs import RunExecutionJob, execute_run_job
@@ -11,8 +12,23 @@ class ExecutorFacade:
 
 
 class InlineExecutor(ExecutorFacade):
+    def __init__(self) -> None:
+        self.tasks: set[asyncio.Task] = set()
+
     async def submit(self, job: RunExecutionJob) -> None:
-        asyncio.create_task(execute_run_job(job))
+        task = asyncio.create_task(execute_run_job(job), name=f"run:{job.run_id}")
+        self.tasks.add(task)
+        def finished(task):
+            self.tasks.discard(task)
+            if not task.cancelled() and task.exception() is not None:
+                logging.getLogger(__name__).error("Run execution left recoverable work", exc_info=task.exception())
+        task.add_done_callback(finished)
+
+    async def close(self) -> None:
+        tasks = list(self.tasks)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 class RedisExecutor(ExecutorFacade):
@@ -24,6 +40,15 @@ class RedisExecutor(ExecutorFacade):
 
 
 _executor: ExecutorFacade | None = None
+
+
+async def close_executor() -> None:
+    global _executor
+    executor, _executor = _executor, None
+    if isinstance(executor, InlineExecutor):
+        await executor.close()
+    elif isinstance(executor, RedisExecutor):
+        await executor.queue.close()
 
 
 def get_executor() -> ExecutorFacade:

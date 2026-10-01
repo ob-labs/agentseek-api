@@ -158,3 +158,15 @@ async def test_normal_close_does_not_abort_an_in_flight_database_write():
     assert interrupted == []
     assert attempts == 1
     assert saved == [1]
+async def test_logical_pair_is_not_split_by_batch_limit():
+    from agentseek_api.services.stream_event_buffer import StreamEvent, StreamEventBuffer
+    batches = []
+
+    async def write(records):
+        batches.append(list(records))
+
+    pair = [StreamEvent("run", "r", 0, {"method": "values"}),
+            StreamEvent("thread", "t", 0, {"method": "values"})]
+    async with StreamEventBuffer(write, run_id="r", thread_id="t", max_events=1) as buffer:
+        await buffer.append_many(pair)
+    assert batches == [pair]

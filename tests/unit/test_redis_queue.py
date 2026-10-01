@@ -216,3 +216,22 @@ async def test_redis_queue_contains_run_checks_pending_and_processing_lists() ->
     assert await queue.contains_run(run_id="run-1") is True
     assert await queue.contains_run(run_id="run-2") is True
     assert await queue.contains_run(run_id="missing") is False
+
+
+async def test_queue_generation_lookup_and_inflight_recovery():
+    client = FakeRedis()
+    queue = RedisRunQueue(client=client, queue_key="pending", processing_key="processing")
+    legacy = _job("r")
+    await queue.enqueue(legacy)
+    assert await queue.contains_run(run_id="r", execution_id="r")
+    assert not await queue.contains_run(run_id="r", execution_id="resumed")
+    reserved = await queue.reserve(timeout_seconds=0)
+    client.lists["pending"] = ["invalid-json"]
+    assert await queue.contains_run(run_id="r", execution_id="r")
+    client.lists["pending"] = []
+    assert await queue.requeue_inflight() == 1
+    assert await queue.requeue_inflight() == 0
+    assert (await queue.reserve(timeout_seconds=0))[1] == reserved[1]
+    await queue.ack(reserved[1])
+    assert not await queue.contains_run(run_id="r")
+    assert await queue.reserve(timeout_seconds=0) is None

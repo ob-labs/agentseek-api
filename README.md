@@ -823,8 +823,8 @@ The design intent is:
 - `live-provider-streaming.yml` proves that the same API surfaces still work
   when a real provider is in the loop
 
-The live-provider workflow is the canonical proof for real SSE
-`message_chunk` events from provider-backed graphs, and it now also covers
+The live-provider workflow is the canonical proof for incremental SSE
+`messages/partial` events from provider-backed graphs, and it also covers
 provider-backed Store, MCP, and HITL flows in a tiered backend matrix:
 
 - seekdb: full Streaming + Store + MCP + HITL acceptance
