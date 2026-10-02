@@ -1,5 +1,6 @@
 import asyncio
 import json
+import pytest
 
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
@@ -28,6 +29,7 @@ class FakeRedisCounter:
     def __init__(self) -> None:
         self.counts: dict[str, int] = {}
         self.streams: dict[str, list[tuple[str, dict[str, str]]]] = {}
+        self.operations: dict[str, list[object]] = {}
 
     async def incr(self, key: str) -> int:
         value = self.counts.get(key, 0) + 1
@@ -61,9 +63,15 @@ class FakeRedisCounter:
         return True
 
     async def eval(self, script: str, numkeys: int, *args: str) -> list[object]:
-        assert numkeys == 2
+        assert numkeys in {2, 3}
         assert "XADD" in script
-        seq_key, stream_key, encoded_payload, maxlen, ttl_seconds, event_prefix = args
+        operation_key = None
+        if numkeys == 3:
+            seq_key, stream_key, operation_key, encoded_payload, maxlen, ttl_seconds, event_prefix = args
+            if operation_key in self.operations:
+                return self.operations[operation_key]
+        else:
+            seq_key, stream_key, encoded_payload, maxlen, ttl_seconds, event_prefix = args
         seq = await self.incr(seq_key)
         payload = json.loads(encoded_payload)
         if event_prefix:
@@ -77,7 +85,10 @@ class FakeRedisCounter:
             approximate=True,
         )
         await self.expire(stream_key, int(ttl_seconds))
-        return [seq, encoded_event]
+        result = [seq, encoded_event]
+        if operation_key:
+            self.operations[operation_key] = result
+        return result
 
 
 def _parse_sse(stream_text: str) -> list[dict[str, object]]:
@@ -232,8 +243,8 @@ def test_run_stream_polls_persisted_events_in_redis_mode(client: TestClient, mon
     monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(runs_api, "load_run_stream_events", fake_load_run_stream_events)
     monkeypatch.setattr(runs_api, "_is_run_terminal", fake_is_run_terminal)
-    monkeypatch.setattr(runs_api.run_broker, "snapshot_records", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(runs_api.run_broker, "stream_records", unexpected_stream_records)
+    monkeypatch.setattr(run_broker, "snapshot_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(run_broker, "stream_records", unexpected_stream_records)
 
     response = client.portal.call(
         runs_api.stream_run,
@@ -249,7 +260,8 @@ def test_run_stream_polls_persisted_events_in_redis_mode(client: TestClient, mon
     assert events[-1]["data"]["status"] == "success"
 
 
-def test_create_run_stream_polls_persisted_protocol_events_in_redis_mode(client: TestClient, monkeypatch) -> None:
+@pytest.mark.parametrize("backend", ["inline", "redis"])
+def test_create_run_stream_polls_persisted_protocol_events_in_redis_mode(client: TestClient, monkeypatch, backend) -> None:
     assistant = client.post("/assistants", json={"name": "persisted-create-stream", "graph_id": "default"})
     assert assistant.status_code == 200
     thread = client.post("/threads", json={"metadata": {"case": "persisted-create-stream"}})
@@ -278,26 +290,17 @@ def test_create_run_stream_polls_persisted_protocol_events_in_redis_mode(client:
     async def fake_wait_run(*args, **kwargs):
         return finished
 
-    async def fake_load_thread_stream_events(
-        requested_thread_id: str,
-        *,
-        channels: list[str],
-        namespaces,
-        depth,
-        after_seq: int = 0,
-    ) -> list[dict[str, object]]:
-        _ = (channels, namespaces, depth)
-        assert requested_thread_id == thread_id
+    async def fake_load_thread_stream_events(requested_run_id, *, after_seq=0):
+        assert requested_run_id == "create-run"
         load_calls["count"] += 1
         if load_calls["count"] == 1:
             return []
         if load_calls["count"] == 2 and after_seq == 0:
             return [
-                {
-                    "seq": 1,
+                (1, {
                     "method": "updates",
                     "params": {"run_id": "create-run", "data": {"output": {"echo": {"message": "created"}}}},
-                }
+                })
             ]
         return []
 
@@ -314,14 +317,14 @@ def test_create_run_stream_polls_persisted_protocol_events_in_redis_mode(client:
 
         return _iter()
 
-    monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", backend)
     monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(runs_api, "create_run", fake_create_run)
     monkeypatch.setattr(runs_api, "_wait_run_terminal", fake_wait_run)
-    monkeypatch.setattr(runs_api, "load_thread_stream_events", fake_load_thread_stream_events)
+    monkeypatch.setattr(runs_api, "load_run_stream_events", fake_load_thread_stream_events)
     monkeypatch.setattr(runs_api, "_is_run_terminal", fake_is_run_terminal)
-    monkeypatch.setattr(runs_api.thread_protocol_broker, "latest_seq", lambda _thread_id: 0)
-    monkeypatch.setattr(runs_api.thread_protocol_broker, "stream", unexpected_protocol_stream)
+    monkeypatch.setattr(thread_protocol_broker, "latest_seq", lambda _thread_id: 0)
+    monkeypatch.setattr(thread_protocol_broker, "stream", unexpected_protocol_stream)
 
     response = client.post(
         f"/threads/{thread_id}/runs/stream",
@@ -367,8 +370,8 @@ def test_run_stream_polls_persisted_events_for_terminal_rows_in_redis_mode(clien
     monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(runs_api, "load_run_stream_events", fake_load_run_stream_events)
     monkeypatch.setattr(runs_api, "_is_run_terminal", fake_is_run_terminal)
-    monkeypatch.setattr(runs_api.run_broker, "snapshot_records", lambda *_args, **_kwargs: [])
-    monkeypatch.setattr(runs_api.run_broker, "stream_records", unexpected_stream_records)
+    monkeypatch.setattr(run_broker, "snapshot_records", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(run_broker, "stream_records", unexpected_stream_records)
 
     response = client.portal.call(
         runs_api.stream_run,
@@ -420,7 +423,8 @@ def test_protocol_stream_replays_persisted_events_after_broker_state_is_cleared(
     assert "values" in {event["event"] for event in replay_events}
 
 
-def test_thread_protocol_stream_polls_persisted_events_in_redis_mode(client: TestClient, monkeypatch) -> None:
+@pytest.mark.parametrize("backend", ["inline", "redis"])
+def test_thread_protocol_stream_polls_persisted_events_in_redis_mode(client: TestClient, monkeypatch, backend) -> None:
     thread_id = client.portal.call(_seed_thread)
     load_calls = {"count": 0}
 
@@ -467,7 +471,7 @@ def test_thread_protocol_stream_polls_persisted_events_in_redis_mode(client: Tes
 
         return _iter()
 
-    monkeypatch.setattr(streaming_api.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(streaming_api.settings, "EXECUTOR_BACKEND", backend)
     monkeypatch.setattr(streaming_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
     monkeypatch.setattr(streaming_api, "load_thread_stream_events", fake_load_thread_stream_events)
     monkeypatch.setattr(streaming_api, "_thread_has_active_runs", fake_thread_has_active_runs)
@@ -502,7 +506,7 @@ def test_thread_protocol_stream_sends_keepalive_while_inline_broker_is_idle(clie
 
     monkeypatch.setattr(sse_module, "DEFAULT_SSE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
     monkeypatch.setattr(streaming_api.settings, "EXECUTOR_BACKEND", "inline")
-    monkeypatch.setattr(streaming_api.thread_protocol_broker, "stream", delayed_stream)
+    monkeypatch.setattr(streaming_api, "_iter_persisted_thread_events", delayed_stream)
 
     response = client.portal.call(
         streaming_api.stream_thread_protocol_events,
@@ -537,22 +541,14 @@ def test_create_run_stream_sends_keepalive_while_protocol_broker_is_idle(client:
     )
 
     async def delayed_protocol_stream(*args, **kwargs):
-        _ = (args, kwargs)
         await asyncio.sleep(0.01)
-        yield {
-            "seq": 1,
+        yield (1, {
             "method": "updates",
             "params": {"run_id": run_id, "namespace": [], "timestamp": 1, "data": {"phase": "done"}},
-        }
-
-    async def no_persisted_protocol_events(*args, **kwargs):
-        _ = (args, kwargs)
-        return []
+        })
 
     monkeypatch.setattr(sse_module, "DEFAULT_SSE_KEEPALIVE_INTERVAL_SECONDS", 0.001)
-    monkeypatch.setattr(runs_api.settings, "EXECUTOR_BACKEND", "inline")
-    monkeypatch.setattr(runs_api, "load_thread_stream_events", no_persisted_protocol_events)
-    monkeypatch.setattr(runs_api.thread_protocol_broker, "stream", delayed_protocol_stream)
+    monkeypatch.setattr(runs_api, "_iter_persisted_run_records", delayed_protocol_stream)
 
     response = runs_api._build_create_run_stream_response(
         thread_id=thread_id,
@@ -580,7 +576,7 @@ def test_redis_create_run_stream_replays_tool_message_tuple_for_sdk_subscribers(
     monkeypatch.setattr(stream_module, "_redis_client", fake_redis)
     monkeypatch.setattr(runs_api, "REDIS_STREAM_POLL_INTERVAL_SECONDS", 0)
 
-    thread_id, run_id = client.portal.call(lambda: _seed_run(status="success"))
+    thread_id, run_id = client.portal.call(lambda: _seed_run(status="running"))
     created = RunRead(
         run_id=run_id,
         thread_id=thread_id,
@@ -631,6 +627,13 @@ def test_redis_create_run_stream_replays_tool_message_tuple_for_sdk_subscribers(
     )
     thread_protocol_broker.delete_thread(thread_id)
 
+    async def complete_run():
+        async with db_manager.get_session_factory()() as session:
+            row = await session.get(Run, run_id)
+            row.status = "success"
+            await session.commit()
+    client.portal.call(complete_run)
+
     response = runs_api._build_create_run_stream_response(
         thread_id=thread_id,
         created=created,
@@ -648,6 +651,55 @@ def test_redis_create_run_stream_replays_tool_message_tuple_for_sdk_subscribers(
     events = _parse_sse(body)
     assert [event["event"] for event in events] == ["metadata", "messages"]
     assert events[1]["data"] == [tool_message, metadata]
+
+
+def test_redis_protocol_publication_after_cancellation_is_ignored(client, monkeypatch):
+    monkeypatch.setattr(stream_module.settings, "EXECUTOR_BACKEND", "redis")
+    monkeypatch.setattr(stream_module, "_redis_client", FakeRedisCounter())
+    thread_id, run_id = client.portal.call(lambda: _seed_run(status="error"))
+    client.portal.call(lambda: apublish_messages_complete(
+        thread_id, messages=[{"id": "late", "content": "late"}], run_id=run_id))
+    assert client.portal.call(stream_module.load_run_stream_events, run_id) == []
+
+
+def test_filtered_run_stream_uses_durable_run_cursors_and_terminal_reconnect(client):
+    from agentseek_api.services.terminal_delivery import TerminalResult, finish_run
+    from agentseek_api.services.thread_protocol import apublish_values_event
+
+    thread_id, run_id = client.portal.call(lambda: _seed_run(status="running"))
+
+    async def produce():
+        # Earlier thread activity must not become this run's cursor domain.
+        for _ in range(4):
+            await stream_module.append_thread_stream_event_atomic(thread_id, {"method": "values", "params": {"data": {}}})
+        await apublish_values_event(thread_id, values={"answer": 42}, run_id=run_id)
+        job = run_jobs_module.RunExecutionJob(run_id=run_id, thread_id=thread_id,
+            user_id="default_user", graph_id="default", payload={})
+        await finish_run(job, TerminalResult(status="error", error="ValueError: broken"))
+    client.portal.call(produce)
+    url = f"/threads/{thread_id}/runs/{run_id}/stream"
+    raw = _parse_sse(client.get(url, headers={"Last-Event-ID": "0"}).text)
+    filtered = _parse_sse(client.get(url + "?stream_mode=values", headers={"Last-Event-ID": "0"}).text)
+    raw_values = next(event for event in raw if event["event"] == "values")
+    filtered_values = next(event for event in filtered if event["event"] == "values")
+    assert filtered_values["id"] == raw_values["id"]
+    end = next(event for event in raw if event["event"] == "end")
+    error = next(event for event in filtered if event["event"] == "error")
+    assert error["id"] == end["id"]
+    assert error["data"]["message"] == "broken"
+    replay = client.get(url + "?stream_mode=values", headers={"Last-Event-ID": end["id"]})
+    assert _parse_sse(replay.text) == []
+
+
+def test_cancel_persists_terminal_record_before_stream_reconnect(client):
+    thread_id, run_id = client.portal.call(lambda: _seed_run(status="running"))
+    url = f"/threads/{thread_id}/runs/{run_id}"
+    assert client.post(url + "/cancel").status_code == 200
+    events = _parse_sse(client.get(url + "/stream?stream_mode=values", headers={"Last-Event-ID": "0"}).text)
+    errors = [event for event in events if event["event"] == "error"]
+    assert len(errors) == 1
+    assert errors[0]["data"]["message"] == "Run cancelled"
+    assert _parse_sse(client.get(url + "/stream?stream_mode=values", headers={"Last-Event-ID": errors[0]["id"]}).text) == []
 
 
 def test_run_stream_persistence_uses_shared_seq_after_broker_reset(client: TestClient, monkeypatch) -> None:
@@ -702,7 +754,10 @@ def test_protocol_events_are_persisted_when_published(client: TestClient) -> Non
     assert thread.status_code == 200
     thread_id = thread.json()["thread_id"]
 
-    publish_values_event(thread_id, values={"early": True})
+    # Explicitly request persistence: the synchronous publish helpers default
+    # to ``persist=False`` (they exist for tests/back-compat and must not
+    # silently hit the non-atomic persistence path).
+    publish_values_event(thread_id, values={"early": True}, persist=True)
     thread_protocol_broker.delete_thread(thread_id)
 
     replay = client.post(f"/threads/{thread_id}/stream/events", json={"channels": ["values"]})
@@ -841,3 +896,59 @@ def test_stream_ignores_malformed_last_event_id(client: TestClient) -> None:
         headers={"Last-Event-ID": "not-an-int"},
     )
     assert run_stream_response.status_code == 404
+
+
+def test_run_stream_midrun_reconnect_is_exactly_once_in_redis(midrun_app_factory, midrun_reconnect_flow) -> None:
+    """HTTP-level regression for the Redis executor path: a client connecting
+    to GET /runs/{id}/stream mid-run, disconnecting, then reconnecting with
+    Last-Event-ID must not replay delivered frames and must not lose frames
+    produced while disconnected. The Redis stream store is faked with
+    FakeRedisCounter so the test runs without a live Redis instance."""
+    import asyncio
+
+    fake_redis = FakeRedisCounter()
+    app = midrun_app_factory(executor_backend="redis", redis_client=fake_redis)
+    asyncio.run(midrun_reconnect_flow(app))
+
+
+def test_thread_protocol_cold_broker_keeps_monotonic_seq_inline(client: TestClient) -> None:
+    """A thread-level protocol event published after the in-memory broker state
+    is cleared must keep allocating from the persisted seq watermark, not
+    restart at 1.
+
+    Regression for the thread-domain analogue of the run-domain cold-broker
+    bug: ``next_thread_stream_seq`` used to return None on the inline executor,
+    so a cleared ``thread_protocol_broker`` reused seqs already persisted to the
+    DB (e.g. ``1..N, N+1 colliding with an earlier row``), corrupting the
+    ``since``/``Last-Event-ID`` resume cursor for ``/threads/{id}/stream/events``.
+    """
+    thread_id = "thread-cold-broker-inline"
+
+    # First lifecycle event: persisted as seq 1.
+    client.portal.call(
+        lambda: run_jobs_module._publish_lifecycle(thread_id, event="started", graph_name="default")
+    )
+
+    # Simulate a cold broker: drop every in-memory trace of this thread,
+    # including the seq counter.
+    thread_protocol_broker._events.pop(thread_id, None)
+    thread_protocol_broker._signals.pop(thread_id, None)
+    thread_protocol_broker._next_seq.pop(thread_id, None)
+    thread_protocol_broker._active_runs.pop(thread_id, None)
+
+    # Second lifecycle event after the broker reset must continue at seq 2.
+    client.portal.call(
+        lambda: run_jobs_module._publish_lifecycle(thread_id, event="completed", graph_name="default")
+    )
+
+    # Persisted rows must reflect both, in order, without a seq collision.
+    persisted = client.portal.call(
+        lambda: stream_module.load_thread_stream_events(
+            thread_id,
+            channels=["lifecycle"],
+            namespaces=None,
+            depth=None,
+        )
+    )
+    assert [event["seq"] for event in persisted] == [1, 2]
+    assert [event["params"]["data"]["event"] for event in persisted] == ["started", "completed"]

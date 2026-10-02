@@ -77,6 +77,7 @@ uv run agentseek-api dev \
   --host 127.0.0.1 \
   --port "$EXAMPLE_API_PORT" \
   --no-reload \
+  --no-browser \
   >"$SERVER_LOG" 2>&1 &
 echo "$!" >"$PID_FILE"
 

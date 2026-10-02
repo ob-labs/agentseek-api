@@ -42,6 +42,7 @@ from agentseek_api.core.mcp_config import is_mcp_enabled
 from agentseek_api.mcp_server import MCPMount, build_mcp_mount
 from agentseek_api.services.default_assistants import ensure_default_assistants
 from agentseek_api.services.langgraph_service import get_langgraph_service
+from agentseek_api.services.run_dispatch import run_recovery_service
 from agentseek_api.settings import settings
 
 _FASTAPI_DEFAULT_PATHS = frozenset({
@@ -56,11 +57,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await ensure_default_assistants()
     try:
         async with AsyncExitStack() as stack:
+            await stack.enter_async_context(run_recovery_service())
             mcp_mount: MCPMount | None = getattr(_app.state, "mcp_mount", None)
             if mcp_mount is not None:
                 await stack.enter_async_context(mcp_mount.session_manager.run())
             yield
     finally:
+        from agentseek_api.services.executor import close_executor
+        await close_executor()
         await db_manager.close()
 
 

@@ -268,7 +268,7 @@ def test_preloaded_runtime_child_ignores_hostile_cwd_and_pythonpath(
                 "schema_version": 1,
                 "runtime": {
                     "distribution": "agentseek-api",
-                    "version": "0.3.2",
+                    "version": "0.3.3",
                     "contract": "preloaded-v1",
                 },
                 "dependencies": [],
@@ -331,7 +331,7 @@ def test_preloaded_runtime_child_reaches_settings_and_manifest_graph_from_hostil
                 "schema_version": 1,
                 "runtime": {
                     "distribution": "agentseek-api",
-                    "version": "0.3.2",
+                    "version": "0.3.3",
                     "contract": "preloaded-v1",
                 },
                 "dependencies": [],
@@ -508,7 +508,7 @@ def test_invalid_runtime_setting_is_redacted_and_fresh_child_exits(
         str(config_path),
     ]
     if role == "dev":
-        arguments.append("--no-reload")
+        arguments.extend(["--no-reload", "--no-browser"])
 
     result = _run_python(
         *arguments,
@@ -545,7 +545,7 @@ def test_invalid_port_reaches_runtime_child_with_cp1252_stdout(
         str(config_path),
     ]
     if role == "dev":
-        arguments.append("--no-reload")
+        arguments.extend(["--no-reload", "--no-browser"])
 
     result = _run_python(
         *arguments,

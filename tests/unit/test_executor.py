@@ -72,6 +72,23 @@ async def test_redis_executor_enqueues_job() -> None:
     assert queue.enqueued == [job]
 
 
+async def test_inline_executor_shutdown_cancels_and_drains_owned_tasks(monkeypatch):
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+    async def execute(job):
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            stopped.set()
+    monkeypatch.setattr(executor_module, "execute_run_job", execute)
+    facade = InlineExecutor()
+    await facade.submit(RunExecutionJob(run_id="r", thread_id="t", user_id="u", payload={}, graph_id="g"))
+    await started.wait()
+    await facade.close()
+    assert stopped.is_set()
+
+
 @pytest.mark.asyncio
 async def test_executor_facade_not_implemented() -> None:
     from agentseek_api.services.executor import ExecutorFacade

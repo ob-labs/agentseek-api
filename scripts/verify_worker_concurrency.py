@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -133,6 +134,11 @@ class ProbeClient:
         status = payload.get("status")
         if not isinstance(status, str) or not status:
             raise AssertionError(f"run response omitted status: {payload!r}")
+        if status == "error":
+            print(json.dumps({
+                "thread_id": run.thread_id, "run_id": run.run_id,
+                "status": status, "last_error": payload.get("last_error"),
+            }), file=sys.stderr, flush=True)
         return status
 
     def queue_snapshot(self) -> QueueSnapshot:
@@ -430,11 +436,16 @@ def seed_shutdown_probe(
         sleep=sleep,
         monotonic=monotonic,
     )
-    validate_statuses(
+    # Queue reservation precedes the SQL execution claim; processing tokens
+    # alone do not prove that both long jobs have reached running yet.
+    _wait_for_expected_statuses(
         client,
         {name: runs[name] for name in ("long-a", "long-b")},
         {"long-a": "running", "long-b": "running"},
         concurrency=2,
+        timeout_seconds=timeout_seconds,
+        sleep=sleep,
+        monotonic=monotonic,
     )
     return runs
 

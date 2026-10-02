@@ -233,6 +233,23 @@ class FakeRedisClient:
         return None
 
 
+def test_failed_run_probe_reports_server_error(probe_module: ModuleType, capsys) -> None:
+    class FailedHttpClient(FakeHttpClient):
+        def get(self, path: str) -> FakeResponse:
+            return FakeResponse({"status": "error", "last_error": "StaleDataError: lost delivery"})
+
+    client = probe_module.ProbeClient(
+        base_url="http://127.0.0.1:2024",
+        redis_url="redis://127.0.0.1:6379/0",
+        http_client=FailedHttpClient(),
+        redis_client=FakeRedisClient(),
+    )
+    assert client.run_status(probe_module.RunRef("thread-1", "run-1")) == "error"
+    diagnostic = capsys.readouterr().err
+    assert "thread-1" in diagnostic and "run-1" in diagnostic
+    assert "StaleDataError: lost delivery" in diagnostic
+
+
 def test_probe_client_uses_stress_graph_http_contract(probe_module: ModuleType) -> None:
     http_client = FakeHttpClient()
     redis_client = FakeRedisClient()
@@ -435,6 +452,33 @@ def test_shutdown_seed_and_check_cover_two_inflight_and_one_queued(probe_module:
     )
 
 
+def test_shutdown_seed_waits_for_claim_after_queue_reservation(probe_module: ModuleType) -> None:
+    clock = FakeClock()
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=1, processing=2)],
+        statuses={"long-a": ["pending", "running"], "long-b": ["pending", "running"]},
+    )
+    runs = probe_module.seed_shutdown_probe(
+        client, timeout_seconds=1, sleep=clock.sleep, monotonic=clock.monotonic,
+    )
+    assert set(runs) == {"long-a", "long-b", "queued"}
+    assert clock.now > 0
+
+
+def test_shutdown_seed_times_out_if_reserved_job_never_starts(probe_module: ModuleType) -> None:
+    clock = FakeClock()
+    client = _client(
+        probe_module,
+        queue_snapshots=[probe_module.QueueSnapshot(pending=1, processing=2)],
+        statuses={"long-a": "pending", "long-b": "running"},
+    )
+    with pytest.raises(AssertionError, match=r"long-a.*timed out.*pending"):
+        probe_module.seed_shutdown_probe(
+            client, timeout_seconds=0.1, sleep=clock.sleep, monotonic=clock.monotonic,
+        )
+
+
 def test_shutdown_seed_requires_both_long_runs_to_still_be_running(
     probe_module: ModuleType,
 ) -> None:
@@ -444,7 +488,7 @@ def test_shutdown_seed_requires_both_long_runs_to_still_be_running(
         statuses={"long-a": "running", "long-b": "success"},
     )
 
-    with pytest.raises(AssertionError, match=r"long-b='success'.*'running'"):
+    with pytest.raises(AssertionError, match=r"long-b.*success.*running"):
         probe_module.seed_shutdown_probe(client, timeout_seconds=1.0, sleep=lambda _: None)
 
 

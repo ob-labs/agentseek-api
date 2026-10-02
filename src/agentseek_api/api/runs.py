@@ -1,7 +1,6 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
@@ -23,10 +22,8 @@ from agentseek_api.services.run_preparation import (
     prepare_and_submit_run,
     resume_run,
 )
-from agentseek_api.services.run_state import run_broker
 from agentseek_api.services.stream_persistence import (
     delete_run_stream_events,
-    load_thread_stream_events,
     load_run_stream_events,
     parse_last_event_id,
 )
@@ -35,7 +32,7 @@ from agentseek_api.services.stream_modes import (
     SUPPORTED_RUN_STREAM_MODES,
     normalize_stream_modes as _normalize_stream_modes_shared,
 )
-from agentseek_api.services.thread_protocol import thread_protocol_broker
+from agentseek_api.services.thread_protocol import protocol_channel_for_method
 from agentseek_api.settings import settings
 
 router = APIRouter(prefix="/threads/{thread_id}/runs", tags=["Thread Runs"])
@@ -79,7 +76,7 @@ def _to_read_model(run: Run) -> RunRead:
         run_id=run.run_id,
         thread_id=run.thread_id,
         assistant_id=run.assistant_id,
-        status=run.status,
+        status="running" if run.status == "terminal_pending" else run.status,
         output=run.output_json,
         interrupts=interrupts,
         last_error=run.last_error,
@@ -311,55 +308,6 @@ def _interrupt_stream_event_name(stream_modes: list[str]) -> str | None:
     return None
 
 
-def _protocol_stream_request(*, stream_modes: list[str]):
-    from agentseek_api.models.protocol import ProtocolEventStreamRequest
-
-    return ProtocolEventStreamRequest(channels=_protocol_channels_for_stream_modes(stream_modes))
-
-
-def _protocol_channels_for_stream_modes(stream_modes: list[str]) -> list[str]:
-    channels = list(stream_modes)
-    if "input" not in channels:
-        channels.append("input")
-    return channels
-
-
-async def _iter_persisted_protocol_run_events(
-    *,
-    thread_id: str,
-    run_id: str,
-    stream_modes: list[str],
-    after_seq: int,
-) -> AsyncIterator[dict[str, Any]]:
-    payload = _protocol_stream_request(stream_modes=stream_modes)
-    current_seq = after_seq
-    terminal_idle_polls = 0
-    while True:
-        events = await load_thread_stream_events(
-            thread_id,
-            channels=payload.channels,
-            namespaces=payload.namespaces,
-            depth=payload.depth,
-            after_seq=current_seq,
-        )
-        matching_events = [event for event in events if event.get("params", {}).get("run_id") == run_id]
-        if matching_events:
-            terminal_idle_polls = 0
-            for event in matching_events:
-                current_seq = max(current_seq, int(event.get("seq", 0)))
-                yield event
-            continue
-
-        if await _is_run_terminal(run_id=run_id, thread_id=thread_id):
-            terminal_idle_polls += 1
-            if terminal_idle_polls >= REDIS_STREAM_TERMINAL_IDLE_POLLS:
-                return
-        else:
-            terminal_idle_polls = 0
-
-        await asyncio.sleep(REDIS_STREAM_POLL_INTERVAL_SECONDS)
-
-
 _SSE_EVENT_NAME_MAP: dict[str, str] = {
     "messages-tuple": "messages",
 }
@@ -384,121 +332,47 @@ def _build_create_run_stream_response(
     replay_existing: bool = True,
     cancel_on_disconnect: bool = False,
 ) -> StreamingResponse:
-    protocol_channels = _protocol_channels_for_stream_modes(
-        [mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES]
-    )
-    # When the client asked for ``messages``, the official LangGraph wire
-    # contract is ``messages/metadata`` + ``messages/partial`` only. The
-    # protocol-v2 block stream (message-start / content-block-* / message-finish)
-    # is internal noise to that client and would fight the partial accumulator,
-    # so suppress it here.
-    suppress_block_messages = "messages" in stream_modes
-
-    def _is_block_message_event(event: dict[str, Any]) -> bool:
-        return str(event.get("method", "")) == "messages"
+    protocol_channels = {
+        *[mode for mode in stream_modes if mode in SUPPORTED_RUN_STREAM_MODES], "input"
+    }
 
     async def _event_iter() -> AsyncIterator[str]:
         try:
             current_seq = after_seq
+            saw_interrupt = False
             if include_metadata:
                 yield _protocol_event_sse(event_name="metadata", data={"run_id": created.run_id, "attempt": 1})
-
-            events = await load_thread_stream_events(
-                thread_id,
-                channels=protocol_channels,
-                namespaces=None,
-                depth=None,
-                after_seq=after_seq,
-            )
-            if not _uses_redis_executor():
-                events = thread_protocol_broker.replay_records(
-                    thread_id,
-                    persisted=events,
-                    channels=protocol_channels,
-                    namespaces=None,
-                    depth=None,
-                    after_seq=after_seq,
-                )
-            for event in events:
-                current_seq = max(current_seq, int(event.get("seq", 0)))
-                if event.get("params", {}).get("run_id") != created.run_id:
+            if not replay_existing:
+                existing = await load_run_stream_events(created.run_id, after_seq=current_seq)
+                # Joining without a cursor skips historical protocol frames, but
+                # must still report an already committed terminal outcome.
+                current_seq = max((seq for seq, event in existing if event.get("event") != "end"), default=current_seq)
+            async for item in iter_with_sse_keepalives(_iter_persisted_run_records(
+                run_id=created.run_id, thread_id=thread_id, after_seq=current_seq,
+            )):
+                if item is None:
+                    yield sse_keepalive_comment()
                     continue
-                if not replay_existing:
+                seq, event = item
+                if event.get("event") == "end":
+                    if event.get("status") == "error":
+                        yield _protocol_event_sse(seq=seq, event_name="error",
+                            data=_format_run_error(event.get("error"), created.run_id))
+                    else:
+                        interrupt_event = _interrupt_stream_event_name(stream_modes)
+                        if event.get("status") == "interrupted" and event.get("interrupts") and interrupt_event and not saw_interrupt:
+                            yield _protocol_event_sse(seq=seq, event_name=interrupt_event,
+                                data={"__interrupt__": event["interrupts"]})
+                        else:
+                            yield _protocol_event_sse(seq=seq, event_name="end", data={})
                     continue
-                if suppress_block_messages and _is_block_message_event(event):
+                method = str(event.get("method", ""))
+                if protocol_channel_for_method(method) not in protocol_channels or method == "messages":
                     continue
-                yield _protocol_event_sse(
-                    seq=current_seq,
-                    event_name=str(event.get("method", "message")),
-                    data=event.get("params", {}).get("data", {}),
-                )
-
-            if _uses_redis_executor():
-                async for event in iter_with_sse_keepalives(
-                    _iter_persisted_protocol_run_events(
-                        thread_id=thread_id,
-                        run_id=created.run_id,
-                        stream_modes=protocol_channels,
-                        after_seq=current_seq,
-                    )
-                ):
-                    if event is None:
-                        yield sse_keepalive_comment()
-                        continue
-                    current_seq = max(current_seq, int(event.get("seq", 0)))
-                    if suppress_block_messages and _is_block_message_event(event):
-                        continue
-                    yield _protocol_event_sse(
-                        seq=current_seq,
-                        event_name=str(event.get("method", "message")),
-                        data=event.get("params", {}).get("data", {}),
-                    )
-            else:
-                async for event in iter_with_sse_keepalives(
-                    thread_protocol_broker.stream(
-                        thread_id,
-                        channels=protocol_channels,
-                        namespaces=None,
-                        depth=None,
-                        since=current_seq,
-                    )
-                ):
-                    if event is None:
-                        yield sse_keepalive_comment()
-                        continue
-                    event_run_id = event.get("params", {}).get("run_id")
-                    if event_run_id != created.run_id:
-                        continue
-                    current_seq = max(current_seq, int(event.get("seq", 0)))
-                    if suppress_block_messages and _is_block_message_event(event):
-                        continue
-                    yield _protocol_event_sse(
-                        seq=current_seq,
-                        event_name=str(event.get("method", "message")),
-                        data=event.get("params", {}).get("data", {}),
-                    )
-
-            final_run = (
-                created
-                if created.status in TERMINAL_RUN_STATUSES
-                else await _wait_run_terminal(thread_id, created.run_id, user, timeout_seconds=None)
-            )
-            if final_run.status == "error":
-                current_seq += 1
-                yield _protocol_event_sse(
-                    seq=current_seq,
-                    event_name="error",
-                    data=_format_run_error(final_run.last_error, created.run_id),
-                )
-                return
-            interrupt_event = _interrupt_stream_event_name(stream_modes)
-            if final_run.status == "interrupted" and final_run.interrupts and interrupt_event is not None:
-                current_seq += 1
-                yield _protocol_event_sse(
-                    seq=current_seq,
-                    event_name=interrupt_event,
-                    data={"__interrupt__": final_run.interrupts},
-                )
+                event_data = event.get("params", {}).get("data", {})
+                if isinstance(event_data, dict) and "__interrupt__" in event_data:
+                    saw_interrupt = True
+                yield _protocol_event_sse(seq=seq, event_name=method, data=event_data)
         finally:
             # When the client disconnects mid-stream, Starlette closes this
             # generator and we transition the run to a terminal state if it's
@@ -528,7 +402,7 @@ async def _is_run_terminal(*, run_id: str, thread_id: str) -> bool:
         status = await session.scalar(
             select(Run.status).where(Run.run_id == run_id, Run.thread_id == thread_id)
         )
-    return status in TERMINAL_RUN_STATUSES
+    return status is None or status in TERMINAL_RUN_STATUSES
 
 
 async def _iter_persisted_run_records(
@@ -625,7 +499,7 @@ async def list_runs(
     await _verify_thread_access(thread_id, user)
     query = select(Run).where(Run.thread_id == thread_id)
     if status is not None:
-        query = query.where(Run.status == status)
+        query = query.where(Run.status.in_(["running", "terminal_pending"]) if status == "running" else Run.status == status)
     query = query.order_by(Run.created_at.desc()).limit(limit).offset(offset)
     session_factory = db_manager.get_session_factory()
     async with session_factory() as session:
@@ -726,7 +600,7 @@ async def create_run_stream(
     user: User = Depends(get_current_user),
 ) -> StreamingResponse:
     stream_modes = _normalize_stream_modes(payload.stream_mode)
-    after_seq = thread_protocol_broker.latest_seq(thread_id)
+    after_seq = 0
     created = await create_run(thread_id, payload, user)
     return _build_create_run_stream_response(
         thread_id=thread_id,
@@ -781,15 +655,13 @@ async def _cancel_active_run(
             return False
         if row.status in TERMINAL_RUN_STATUSES:
             return False
-        row.status = "error"
-        row.last_error = "Run cancelled"
-        thread = await session.scalar(
-            select(Thread).where(Thread.thread_id == thread_id)
-        )
-        if thread is not None:
-            thread.status = "error"
-            thread.state_updated_at = datetime.now(UTC)
-        await session.commit()
+    from agentseek_api.services.run_jobs import RunExecutionJob
+    from agentseek_api.services.terminal_delivery import TerminalResult, finish_run
+    cancelled = await finish_run(RunExecutionJob(
+        run_id=run_id, thread_id=thread_id, user_id=user_id, graph_id="default", payload=None,
+    ), TerminalResult(status="error", error="Run cancelled"), cancel=True)
+    if not cancelled:
+        return False
     await _best_effort_delete_for_runs([run_id])
     return True
 
@@ -898,48 +770,21 @@ async def stream_run(
             )
 
     async def _event_iter() -> AsyncIterator[str]:
-        current_seq = after_seq
-        use_redis_executor = _uses_redis_executor()
-        records_by_seq: dict[int, dict[str, object]] = {
-            seq: payload for seq, payload in await load_run_stream_events(run_id, after_seq=after_seq)
-        }
-        records_by_seq.update({seq: payload for seq, payload in run_broker.snapshot_records(run_id, after_seq=after_seq)})
-        for seq in sorted(records_by_seq):
-            event = records_by_seq[seq]
-            current_seq = max(current_seq, seq)
-            event_name = str(event.get("event", "message"))
-            event_payload: dict[str, object] = {"run_id": run_id, **event}
-            payload = safe_json_dumps(event_payload)
-            yield f"id: {seq}\nevent: {event_name}\ndata: {payload}\n\n"
-
-        if use_redis_executor:
-            async for item in iter_with_sse_keepalives(
-                _iter_persisted_run_records(
-                    run_id=run_id,
-                    thread_id=thread_id,
-                    after_seq=current_seq,
-                )
-            ):
-                if item is None:
-                    yield sse_keepalive_comment()
-                    continue
-                seq, event = item
-                event_name = str(event.get("event", "message"))
-                event_payload = {"run_id": run_id, **event}
-                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
-            return
-
-        if row.status in TERMINAL_RUN_STATUSES:
-            return
-
-        async for item in iter_with_sse_keepalives(run_broker.stream_records(run_id, after_seq=current_seq)):
+        # Brokers are notifications only. Read the durable cursor domain on
+        # both backends, including when notifications are delayed or lost.
+        async for item in iter_with_sse_keepalives(_iter_persisted_run_records(
+            run_id=run_id, thread_id=thread_id, after_seq=after_seq,
+        )):
             if item is None:
                 yield sse_keepalive_comment()
                 continue
             seq, event = item
-            event_name = str(event.get("event", "message"))
-            event_payload = {"run_id": run_id, **event}
-            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event_payload)}\n\n"
+            if "method" in event:
+                yield _protocol_event_sse(seq=seq, event_name=str(event["method"]),
+                    data=event.get("params", {}).get("data", {}))
+            else:
+                yield _protocol_event_sse(seq=seq, event_name=str(event.get("event", "message")),
+                    data={"run_id": run_id, **event})
 
     return StreamingResponse(
         _event_iter(),

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 from urllib import error as urllib_error
+from urllib import parse as urllib_parse
 from urllib import request as urllib_request
 
 
@@ -49,6 +51,67 @@ def _stream_payloads(stream_text: str) -> list[dict[str, object]]:
         for line in stream_text.splitlines()
         if line.startswith("data: ")
     ]
+
+
+def _sse_frames(stream_text: str) -> list[tuple[int | None, str, dict[str, object]]]:
+    """Parse SSE text into (id, event, data) frames. ``id`` may be absent."""
+    frames: list[tuple[int | None, str, dict[str, object]]] = []
+    current_id: int | None = None
+    current_event = ""
+    current_data: list[str] = []
+    for line in stream_text.splitlines():
+        if line.startswith("id: "):
+            current_id = int(line[len("id: "):].strip())
+        elif line.startswith("event: "):
+            current_event = line[len("event: "):].strip()
+        elif line.startswith("data: "):
+            current_data.append(line[len("data: "):].strip())
+        elif line == "" and current_data:
+            frames.append((current_id, current_event, json.loads("".join(current_data))))
+            current_id, current_event, current_data = None, "", []
+    return frames
+
+
+def _read_sse_prefix_then_disconnect(
+    *,
+    base_url: str,
+    path: str,
+    headers: dict[str, str],
+    max_frames: int,
+    timeout_seconds: float = 15.0,
+) -> list[tuple[int | None, str, dict[str, object]]]:
+    """Connect to an SSE endpoint, read up to ``max_frames`` frames, then close
+    the connection to simulate a client disconnecting mid-run.
+
+    ``urllib`` (used by ``_request``) blocks until the whole body is read, so a
+    mid-stream disconnect has to be driven with a lower-level ``http.client``
+    connection that we can tear down after a few frames.
+    """
+    parsed = urllib_parse.urlsplit(base_url)
+    conn = http.client.HTTPConnection(parsed.hostname, parsed.port, timeout=timeout_seconds)
+    frames: list[tuple[int | None, str, dict[str, object]]] = []
+    try:
+        conn.request("GET", path, headers=headers)
+        response = conn.getresponse()
+        current_id: int | None = None
+        current_event = ""
+        current_data: list[str] = []
+        for raw_line in response:
+            line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+            if line.startswith("id: "):
+                current_id = int(line[len("id: "):].strip())
+            elif line.startswith("event: "):
+                current_event = line[len("event: "):].strip()
+            elif line.startswith("data: "):
+                current_data.append(line[len("data: "):].strip())
+            elif line == "" and current_data:
+                frames.append((current_id, current_event, json.loads("".join(current_data))))
+                current_id, current_event, current_data = None, "", []
+                if len(frames) >= max_frames:
+                    break
+    finally:
+        conn.close()
+    return frames
 
 
 
@@ -234,8 +297,13 @@ def _assert_common_flow(base_url: str) -> None:
     assert isinstance(stream_body, str)
     assert "text/event-stream" in stream_content_type
     payloads = _stream_payloads(stream_body)
-    assert any(payload["event"] == "start" for payload in payloads)
-    assert any(payload["event"] == "end" and payload.get("status") == "success" for payload in payloads)
+    assert any(isinstance(payload, dict) and payload.get("event") == "start" for payload in payloads)
+    assert any(
+        isinstance(payload, dict)
+        and payload.get("event") == "end"
+        and payload.get("status") == "success"
+        for payload in payloads
+    )
 
     _, stateless_run, _ = _request(
         base_url=base_url,
@@ -326,7 +394,7 @@ def _assert_common_flow(base_url: str) -> None:
     end_statuses = {
         payload["status"]
         for payload in _stream_payloads(resumed_stream)
-        if payload["event"] == "end"
+        if isinstance(payload, dict) and payload.get("event") == "end"
     }
     assert "success" in end_statuses
     stress_waited, _ = _assert_sample_run(
@@ -358,7 +426,12 @@ def _assert_common_flow(base_url: str) -> None:
     react_output = react_waited["output"]
     assert isinstance(react_output, dict)
     assert "42" in str(react_output["final_text"])
-    assert any(payload["event"] == "tool_start" and payload["name"] == "lookup" for payload in react_payloads)
+    assert any(
+        isinstance(payload, dict)
+        and payload.get("event") == "tool-started"
+        and payload.get("tool_name") == "lookup"
+        for payload in react_payloads
+    )
 
     stress_tool_waited, stress_tool_payloads = _assert_sample_run(
         base_url=base_url,
@@ -372,9 +445,106 @@ def _assert_common_flow(base_url: str) -> None:
     tool_messages = [message for message in stress_tool_output["transcript"] if message["type"] == "ToolMessage"]
     assert len(tool_messages) == 3
     tool_starts = [
-        payload for payload in stress_tool_payloads if payload["event"] == "tool_start" and payload["name"] == "slow_process"
+        payload
+        for payload in stress_tool_payloads
+        if isinstance(payload, dict)
+        and payload.get("event") == "tool-started"
+        and payload.get("tool_name") == "slow_process"
     ]
     assert len(tool_starts) == 3
+
+    _assert_run_stream_reconnect_exactly_once(base_url=base_url, user_headers=alice)
+
+
+def _assert_run_stream_reconnect_exactly_once(*, base_url: str, user_headers: dict[str, str]) -> None:
+    """Regression for the run-stream reconnect contract.
+
+    A client that connects to ``GET /runs/{id}/stream`` while the run is still
+    executing, disconnects, and reconnects with ``Last-Event-ID`` must not
+    replay frames already delivered and must not lose frames produced while it
+    was disconnected (exactly-once). This runs against the real HTTP boundary
+    and, in the redis-durable job, against the real Redis run-stream store —
+    the path the in-process pytest regression covers with a faked store.
+    """
+    _, assistant, _ = _request(
+        base_url=base_url,
+        path="/assistants",
+        method="POST",
+        payload={"name": "docker-reconnect", "graph_id": "stress_tool_agent"},
+    )
+    assert isinstance(assistant, dict)
+    assistant_id = str(assistant["assistant_id"])
+
+    _, thread, _ = _request(
+        base_url=base_url,
+        path="/threads",
+        method="POST",
+        payload={"metadata": {"suite": "docker-reconnect"}},
+        headers=user_headers,
+    )
+    assert isinstance(thread, dict)
+    thread_id = str(thread["thread_id"])
+
+    # ~4.5s total runtime (3 steps * 1.5s) guarantees a mid-run window.
+    _, run, _ = _request(
+        base_url=base_url,
+        path=f"/threads/{thread_id}/runs",
+        method="POST",
+        payload={"assistant_id": assistant_id, "input": {"delay": 1.5, "steps": 3}},
+        headers=user_headers,
+    )
+    assert isinstance(run, dict)
+    run_id = str(run["run_id"])
+
+    stream_path = f"/threads/{thread_id}/runs/{run_id}/stream"
+
+    # Phase 1: connect mid-run, read a few frames, then disconnect.
+    phase1 = _read_sse_prefix_then_disconnect(
+        base_url=base_url,
+        path=stream_path,
+        headers=user_headers,
+        max_frames=3,
+    )
+    if not phase1:
+        phase1 = _read_sse_prefix_then_disconnect(
+            base_url=base_url,
+            path=stream_path,
+            headers=user_headers,
+            max_frames=3,
+        )
+    assert phase1, "expected to observe the run stream while the run is still active"
+    phase1_ids = [frame_id for frame_id, _, _ in phase1 if frame_id is not None]
+    last_id = int(phase1_ids[-1])
+
+    _, waited, _ = _request(
+        base_url=base_url,
+        path=f"/threads/{thread_id}/runs/{run_id}/wait",
+        headers=user_headers,
+    )
+    assert isinstance(waited, dict)
+    assert waited["status"] == "success"
+
+    # Phase 2: reconnect with Last-Event-ID and assert exactly-once.
+    _, phase2_body, _ = _request(
+        base_url=base_url,
+        path=stream_path,
+        headers={**user_headers, "Last-Event-ID": str(last_id)},
+    )
+    assert isinstance(phase2_body, str)
+    phase2_ids = [frame_id for frame_id, _, _ in _sse_frames(phase2_body) if frame_id is not None]
+
+    assert all(frame_id > last_id for frame_id in phase2_ids), (
+        f"reconnect replayed an already-delivered id: phase1={phase1_ids} phase2={phase2_ids}"
+    )
+    all_ids = phase1_ids + phase2_ids
+    assert len(all_ids) == len(set(all_ids)), f"duplicate ids delivered across reconnect: {all_ids}"
+
+    _, full_body, _ = _request(base_url=base_url, path=stream_path, headers=user_headers)
+    assert isinstance(full_body, str)
+    full_ids = [frame_id for frame_id, _, _ in _sse_frames(full_body) if frame_id is not None]
+    assert [frame_id for frame_id in full_ids if frame_id > last_id] == phase2_ids, (
+        f"reconnect content mismatch: full={full_ids} phase2={phase2_ids}"
+    )
 
 
 def _assert_smoke_flow(base_url: str) -> None:
@@ -501,7 +671,7 @@ def _assert_resume_check(base_url: str, *, thread_id: str, run_id: str, resume: 
     end_statuses = [
         payload["status"]
         for payload in _stream_payloads(run_stream)
-        if payload["event"] == "end"
+        if isinstance(payload, dict) and payload.get("event") == "end"
     ]
     assert "interrupted" in end_statuses
     assert "success" in end_statuses

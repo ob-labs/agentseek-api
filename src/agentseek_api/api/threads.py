@@ -539,6 +539,10 @@ async def get_thread_state_internal(
     snapshot = await graph.aget_state(config)
     if snapshot is None or snapshot.config is None:
         return None
+    # LangGraph returns an empty snapshot (with no timestamp) when no
+    # checkpoint exists, including after cancellation clears the store.
+    if not snapshot.config.get("configurable", {}).get("checkpoint_id"):
+        return None
 
     return snapshot_to_payload(snapshot, thread_id)
 
@@ -723,66 +727,15 @@ async def join_thread_stream(
 
     async def _event_iter() -> AsyncIterator[str]:
         payload = ProtocolEventStreamRequest(channels=THREAD_STREAM_CHANNELS)
-        current_seq = after_seq
         yield ": stream-open\n\n"
-
-        events = await load_thread_stream_events(
-            thread_id,
-            channels=payload.channels,
-            namespaces=payload.namespaces,
-            depth=payload.depth,
-            after_seq=after_seq,
-        )
-        if not _uses_redis_executor():
-            events = thread_protocol_broker.replay_records(
-                thread_id,
-                persisted=events,
-                channels=payload.channels,
-                namespaces=payload.namespaces,
-                depth=payload.depth,
-                after_seq=after_seq,
-            )
-        for event in events:
-            seq = int(event.get("seq", 0))
-            current_seq = max(current_seq, seq)
-            event_name = str(event.get("method", "event"))
-            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event)}\n\n"
-
-        if _uses_redis_executor():
-            async for event in iter_with_sse_keepalives(
-                _iter_persisted_thread_events(
-                    thread_id=thread_id,
-                    payload=payload,
-                    after_seq=current_seq,
-                    wait_for_future_runs=True,
-                )
-            ):
-                if event is None:
-                    yield sse_keepalive_comment()
-                    continue
-                seq = int(event.get("seq", 0))
-                current_seq = max(current_seq, seq)
-                event_name = str(event.get("method", "event"))
-                yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event)}\n\n"
-            return
-
-        async for event in iter_with_sse_keepalives(
-            thread_protocol_broker.stream(
-                thread_id=thread_id,
-                channels=payload.channels,
-                namespaces=payload.namespaces,
-                depth=payload.depth,
-                since=current_seq,
-                wait_for_future_runs=True,
-            )
-        ):
+        async for event in iter_with_sse_keepalives(_iter_persisted_thread_events(
+            thread_id=thread_id, payload=payload, after_seq=after_seq, wait_for_future_runs=True,
+        )):
             if event is None:
                 yield sse_keepalive_comment()
                 continue
             seq = int(event.get("seq", 0))
-            current_seq = max(current_seq, seq)
-            event_name = str(event.get("method", "event"))
-            yield f"id: {seq}\nevent: {event_name}\ndata: {safe_json_dumps(event)}\n\n"
+            method = str(event.get("method", "event"))
+            yield f"id: {seq}\nevent: {method}\ndata: {safe_json_dumps(event)}\n\n"
 
     return StreamingResponse(_event_iter(), media_type="text/event-stream")
-

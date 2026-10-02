@@ -17,6 +17,7 @@ class StreamEvent:
     stream_id: str
     seq: int
     payload: dict[str, Any]
+    publish: Callable[[int, dict[str, Any]], Any] | None = None
 
 
 class StreamEventBuffer:
@@ -55,15 +56,19 @@ class StreamEventBuffer:
         return self
 
     async def append(self, record: StreamEvent) -> bool:
+        return await self.append_many([record])
+
+    async def append_many(self, records: list[StreamEvent]) -> bool:
+        """Keep one logical envelope (possibly two logs) in one transaction."""
         async with self._lock:
             if self._closed:
                 return False
             # Producers may reuse nested message dictionaries after publishing.
-            snapshot = replace(record, payload=deepcopy(record.payload))
-            size = len(json.dumps(snapshot.payload, ensure_ascii=False).encode("utf-8"))
+            snapshots = [replace(record, payload=deepcopy(record.payload)) for record in records]
+            size = sum(len(json.dumps(record.payload, ensure_ascii=False).encode("utf-8")) for record in snapshots)
             if self._pending and self._pending_bytes + size > self._max_bytes:
                 await self._flush_locked()
-            self._pending.append(snapshot)
+            self._pending.extend(snapshots)
             self._pending_bytes += size
             self._nonempty.set()
             if (

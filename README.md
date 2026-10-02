@@ -439,7 +439,7 @@ Custom images must expose all four exact labels:
 - `org.agentseek.environment-contract=preloaded-v1`
 - `org.agentseek.runtime-manifest=/opt/agentseek/manifest.v1.json`
 - `org.agentseek.runtime-distribution=agentseek-api`
-- `org.agentseek.runtime-version=0.3.2`
+- `org.agentseek.runtime-version=0.3.3`
 
 The manifest, installed distribution, entrypoint, and labels must agree. There
 is no legacy-image fallback: migrate and attest the image before passing it to
@@ -451,7 +451,7 @@ AgentSeek release is also 0.1.4; both follow the shipped 0.1.3 releases.
 Endpoint-level LangGraph config keys such as `http` and `api_version` are
 tolerated by the CLI layer where possible. Store config is used by the HTTP
 Store API and the injected LangGraph `BaseStore` runtime for TTL and semantic
-search. This repo uses the published `langchain-oceanbase==0.6.3` package from
+search. This repo uses the published `langchain-oceanbase>=0.6.4,<0.7` package from
 PyPI.
 
 Config-driven custom auth can live in `agentseek.json` or `langgraph.json`:
@@ -823,8 +823,8 @@ The design intent is:
 - `live-provider-streaming.yml` proves that the same API surfaces still work
   when a real provider is in the loop
 
-The live-provider workflow is the canonical proof for real SSE
-`message_chunk` events from provider-backed graphs, and it now also covers
+The live-provider workflow is the canonical proof for incremental SSE
+`messages/partial` events from provider-backed graphs, and it also covers
 provider-backed Store, MCP, and HITL flows in a tiered backend matrix:
 
 - seekdb: full Streaming + Store + MCP + HITL acceptance

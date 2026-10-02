@@ -55,8 +55,37 @@ class Run(Base):
     kwargs_json: Mapped[dict] = mapped_column("kwargs", JSON, default=dict, nullable=False)
     multitask_strategy: Mapped[str] = mapped_column(String(32), nullable=False, default="enqueue")
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    execution_owner: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    execution_lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dispatch_state: Mapped[str] = mapped_column(String(32), nullable=False, default="pending", server_default=text("'pending'"))
+    dispatch_payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    terminal_result: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, onupdate=_utc_now, nullable=False)
+
+
+class StreamCleanup(Base):
+    """Generation-specific Redis cleanup ownership survives Run deletion/resume."""
+    __tablename__ = "stream_cleanups"
+    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    envelopes: Mapped[list] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+
+
+class StreamDelivery(Base):
+    """A pending Redis run/thread pair; removed after both durable acknowledgments."""
+    __tablename__ = "stream_deliveries"
+    operation_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    run_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    thread_id: Mapped[str] = mapped_column(String(36), nullable=False)
+    execution_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    run_bound: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default=text("false"))
+    payload: Mapped[dict] = mapped_column(JSON, nullable=False)
+    records: Mapped[list | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
 
 
 class CronJob(Base):
@@ -166,6 +195,31 @@ class ThreadStreamEvent(Base):
     seq: Mapped[int] = mapped_column(Integer, nullable=False)
     method: Mapped[str] = mapped_column(String(128), nullable=False)
     payload_json: Mapped[dict] = mapped_column("payload", JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
+
+
+class StreamSequence(Base):
+    """Per-stream monotonic sequence counter for run/thread stream events.
+
+    One row per (scope, scope_id). Appending an event locks this row
+    (``UPDATE ... WHERE scope=:s AND scope_id=:id``) inside the same transaction
+    as the event insert, so concurrent publishers of the same stream serialize
+    and can never allocate the same seq. The row is also the anchor for the
+    "durable before expose" contract: a broker only exposes a seq after the
+    event row (and this counter row) committed.
+
+    The row lives in the metadata DB (not the business tables), so it shares the
+    lifecycle of the stream events it counts and can be self-healed from
+    ``MAX(seq)`` if it is ever deleted out from under a running stream.
+    """
+
+    __tablename__ = "stream_sequences"
+    __table_args__ = (UniqueConstraint("scope", "scope_id", name="uq_stream_sequences_scope_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    scope: Mapped[str] = mapped_column(String(16), nullable=False, index=True)
+    scope_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    seq: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utc_now, nullable=False)
 
 
