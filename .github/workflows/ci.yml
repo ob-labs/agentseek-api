@@ -50,7 +50,8 @@ jobs:
           --cov=src/agentseek_api
           --cov-report=term-missing
           --cov-fail-under=90
-          -q
+          -v
+          -o faulthandler_timeout=60
 
   cli-compatibility:
     name: CLI Compatibility (${{ matrix.os }})
