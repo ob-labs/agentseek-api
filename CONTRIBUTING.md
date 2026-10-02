@@ -45,3 +45,21 @@ Keep local commands aligned with CI when possible:
 For embedded seekdb locally, install the optional extra first:
 
 - `uv sync --dev --extra embedded`
+
+## Published Package Verification
+
+After the tag-triggered release workflow publishes to PyPI, its Linux, macOS,
+and Windows smoke jobs each install the exact tagged version in a fresh Python
+3.12 environment. They use public PyPI with caching disabled, not the checkout
+or the build job's wheel. The checks verify artifact provenance, package and CLI
+versions, imports, CLI help, and dependency compatibility.
+
+The helper retries publication visibility for a bounded period; it does not
+fall back to an older version or retry failing package checks. A smoke failure
+makes the release workflow fail, but does not undo an already-published package.
+
+To check an existing published release without publishing anything:
+
+```bash
+python scripts/test_pypi_release.py --tag v0.3.2
+```

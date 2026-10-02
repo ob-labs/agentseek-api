@@ -51,6 +51,33 @@ jobs:
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
 
+  pypi-smoke:
+    name: PyPI Install Smoke (${{ matrix.os }})
+    needs: publish-pypi
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - macos-latest
+          - windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify the published package from PyPI
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/test_pypi_release.py
+
   github-release:
     needs: build
     runs-on: ubuntu-latest
