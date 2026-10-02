@@ -539,6 +539,10 @@ async def get_thread_state_internal(
     snapshot = await graph.aget_state(config)
     if snapshot is None or snapshot.config is None:
         return None
+    # LangGraph returns an empty snapshot (with no timestamp) when no
+    # checkpoint exists, including after cancellation clears the store.
+    if not snapshot.config.get("configurable", {}).get("checkpoint_id"):
+        return None
 
     return snapshot_to_payload(snapshot, thread_id)
 

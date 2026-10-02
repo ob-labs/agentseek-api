@@ -27,6 +27,18 @@ async def header_user_override(request: Request) -> User:
     return User(identity=identity, is_authenticated=True)
 
 
+def test_graph_thread_without_checkpoints_returns_empty_state(client: TestClient) -> None:
+    thread = client.post("/threads", json={"metadata": {"graph_id": "stress_test"}})
+    assert thread.status_code == 200
+    thread_id = thread.json()["thread_id"]
+
+    state = client.get(f"/threads/{thread_id}/state")
+    assert state.status_code == 200
+    assert state.json()["values"] == {}
+    assert state.json()["created_at"] == thread.json()["created_at"]
+    assert state.json()["checkpoint"]["checkpoint_id"] == thread_id
+
+
 def test_cancelled_run_is_not_overwritten_by_background_completion(tmp_path: Path) -> None:
     db_path = tmp_path / "cancel-race.db"
     with patch("agentseek_api.core.database.OceanBaseCheckpointSaver", FakeCheckpointer):

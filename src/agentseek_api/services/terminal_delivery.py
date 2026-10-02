@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 TERMINAL = {"success", "error", "interrupted"}
 
 
+class _CancellationConflict(RuntimeError):
+    """A concurrent claim invalidated cancellation's read of an active run."""
+
+
 @dataclass(frozen=True)
 class TerminalResult:
     status: str
@@ -119,6 +123,8 @@ async def finish_run(job, result: TerminalResult, *, cancel: bool = False) -> bo
             Run.execution_owner == job.owner_id, Run.status == run.status,
         ).values(status="terminal_pending" if redis else run.status))
         if locked.rowcount != 1:
+            if cancel:
+                raise _CancellationConflict("Cancellation raced with an execution claim")
             return None
         envelopes = _envelopes(job, result)
         stored = {**asdict(result), "envelopes": envelopes}
@@ -137,7 +143,17 @@ async def finish_run(job, result: TerminalResult, *, cancel: bool = False) -> bo
         lifecycle = await add_thread_stream_event_to_session(session, job.thread_id, payload=envelopes[1]["payload"])
         return envelopes, [end, lifecycle]
 
-    staged = await retry_transaction(stage)
+    for attempt in range(8):
+        try:
+            staged = await retry_transaction(stage)
+            break
+        except _CancellationConflict:
+            # SQLite's SELECT FOR UPDATE does not lock the row. A worker
+            # claim must not silently discard cancellation; reread the run
+            # in a fresh transaction, still respecting a completed result.
+            if attempt == 7:
+                raise
+            await asyncio.sleep(min(0.005 * 2 ** attempt, 0.2))
     if staged is None:
         return False
     if redis:

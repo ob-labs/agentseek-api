@@ -163,6 +163,77 @@ async def test_stale_owner_cannot_finalize_or_overwrite_cancellation(recovery_db
         assert row.status == "error" and row.last_error == "Run cancelled"
 
 
+@pytest.mark.parametrize("complete_first", [False, True])
+async def test_cancellation_survives_a_concurrent_execution_claim(recovery_db, monkeypatch, complete_first):
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.dml import Update
+    from agentseek_api.services import terminal_delivery
+    from agentseek_api.services.run_dispatch import claim_execution, ensure_dispatch
+
+    factory, job = recovery_db
+    await ensure_dispatch(job)
+    original_execute = AsyncSession.execute
+    raced = False
+
+    async def execute_after_claim(session, statement, *args, **kwargs):
+        nonlocal raced
+        if not raced and isinstance(statement, Update) and statement.table.name == "runs":
+            # SQLite does not lock SELECT FOR UPDATE. Claim the still-active
+            # run after cancellation reads it, before its conditional write.
+            raced = True
+            assert await claim_execution(job, owner_id="worker", recovered=False) == "claimed"
+            if complete_first:
+                await terminal_delivery.finish_run(
+                    job, terminal_delivery.TerminalResult(status="success", output={"answer": 42}),
+                )
+        return await original_execute(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", execute_after_claim)
+    cancellation = run_jobs.RunExecutionJob(
+        run_id=job.run_id, thread_id=job.thread_id, user_id=job.user_id,
+        graph_id=job.graph_id, payload={},
+    )
+    cancelled = await terminal_delivery.finish_run(
+        cancellation,
+        terminal_delivery.TerminalResult(status="error", error="Run cancelled"),
+        cancel=True,
+    )
+    assert raced
+    assert cancelled is not complete_first
+    async with factory() as session:
+        row = await session.get(Run, job.run_id)
+        if complete_first:
+            assert row.status == "success" and row.output_json == {"answer": 42}
+            assert row.last_error is None
+        else:
+            assert row.status == "error" and row.last_error == "Run cancelled"
+
+
+async def test_cancellation_claim_conflicts_have_a_bounded_retry_budget(recovery_db, monkeypatch):
+    from types import SimpleNamespace
+    from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.dml import Update
+    from agentseek_api.services import terminal_delivery
+
+    _, job = recovery_db
+    original_execute = AsyncSession.execute
+    sessions = []
+
+    async def always_conflict(session, statement, *args, **kwargs):
+        if isinstance(statement, Update) and statement.table.name == "runs":
+            sessions.append(session)
+            return SimpleNamespace(rowcount=0)
+        return await original_execute(session, statement, *args, **kwargs)
+
+    monkeypatch.setattr(AsyncSession, "execute", always_conflict)
+    with pytest.raises(RuntimeError, match="Cancellation raced with an execution claim"):
+        await terminal_delivery.finish_run(
+            job, terminal_delivery.TerminalResult(status="error", error="Run cancelled"), cancel=True,
+        )
+    assert len(sessions) == 8
+    assert len({id(session) for session in sessions}) == 8
+
+
 async def test_redis_terminal_retry_recovers_stored_result_without_graph(recovery_db, monkeypatch):
     from agentseek_api.services import terminal_delivery
     from agentseek_api.services.run_dispatch import claim_execution
